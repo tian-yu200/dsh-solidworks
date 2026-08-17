@@ -1,0 +1,45 @@
+.claude/
+
+# Dev ledgers (logs/sessions/AGENTS/KNOWN-LIMITATIONS/recipe.md full edition) stay PRIVATE —
+# the project's competitive knowledge base. Public docs are explicitly un-ignored below.
+*.md
+!README.md
+!CONTRIBUTING.md
+!CLA.md
+!master-architecture.md
+!architecture.md
+!recipe-usage.md
+
+# CI workflow stays LOCAL-ONLY (project decision 2026-07-19) — private dev artifact,
+# not published to GitHub. File is kept locally; only untracked from the repo.
+.github/workflows/ci.yml
+
+.vs/
+
+[Bb]in/
+[Oo]bj/
+
+packages/
+*.nupkg
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+*.log
+
+dxf-research/
+test/
+
+Thumbs.db
+.DS_Store
+
+drawing-samples/
+
+scratch/
+
+# Build outputs and third-party runtime assemblies are not distributed here.
+

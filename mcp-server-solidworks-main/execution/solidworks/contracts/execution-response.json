@@ -1,0 +1,40 @@
+{
+  "COMPLETED": {
+    "operationId": "string",
+    "status": "COMPLETED",
+    "verified": "boolean - objective in-band verification flag for this low-level operation",
+    "stateVersion": "integer - authoritative version after the operation",
+    "cadState": {
+      "stateVersion": "integer",
+      "activeDocument": "string or null",
+      "activeDocumentPath": "absolute path, or empty for an unsaved document",
+      "documentType": "PART | ASSEMBLY | DRAWING | null",
+      "isDirty": "boolean",
+      "activeSketch": "string or null",
+      "features": "array of returned feature/result labels",
+      "dimensions": "array of returned dimension/result labels"
+    },
+    "result_geometry": "optional object containing readback from the created/checked result",
+    "error": null
+  },
+  "FAILED": {
+    "operationId": "string",
+    "status": "FAILED",
+    "verified": false,
+    "stateVersion": "integer - normally unchanged; rollback rebuild failure can report the advanced authoritative version",
+    "cadState": "optional current state using the COMPLETED cadState shape",
+    "result_geometry": "optional diagnostic readback, including standards-check violations",
+    "error": {
+      "code": "string (e.g. FEATURE_CREATION_FAILED)",
+      "message": "string (human readable)"
+    }
+  },
+  "DUPLICATE": {
+    "operationId": "string",
+    "status": "DUPLICATE",
+    "last_known_state_version": "integer",
+    "cadState": "optional state from the original completed response",
+    "result_geometry": "optional result from the original completed response",
+    "error": null
+  }
+}

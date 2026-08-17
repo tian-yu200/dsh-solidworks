@@ -1,0 +1,10 @@
+{
+  "state_version": "integer, default: 0, increments on every successful operation",
+  "active_document": "string or null",
+  "active_document_path": "absolute string path or empty for an unsaved document",
+  "document_type": "PART | ASSEMBLY | DRAWING | null",
+  "is_dirty": "boolean, true when the active document has unsaved changes",
+  "active_sketch": "string or null",
+  "features": ["array of feature names"],
+  "dimensions": ["array of applied dimensions"]
+}

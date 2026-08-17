@@ -1,0 +1,5 @@
+# Load last so this policy sees the complete tool catalog assembled by the
+# SolidWorks profile and its agent preset.
+- insert:
+    - id: solidworks-policy
+      name: '@dsh-solidworks/policy'

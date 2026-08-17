@@ -1,0 +1,15 @@
+# Host-mount SolidWorks MCP so resumed sessions inherit the tools even when
+# their preset generation predates the MCP integration.
+
+- insert:
+    - id: mcp-solidworks-orchestrator
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: solidworks
+        transport: stdio
+        command: __PYTHON__
+        args:
+          - __DSH_SERVER__
+        cwd: __DSH_ADAPTER_DIR__
+        toolCallTimeoutMs: 300000
+        failOnStartupError: true

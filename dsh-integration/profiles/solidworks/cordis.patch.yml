@@ -1,0 +1,18 @@
+# SolidWorks-specific profile: host tools plus the default CAD preset.
+
+- insert:
+    - id: mcp-solidworks-orchestrator
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: solidworks
+        transport: stdio
+        command: __PYTHON__
+        args:
+          - __DSH_SERVER__
+        cwd: __DSH_ADAPTER_DIR__
+        toolCallTimeoutMs: 300000
+        failOnStartupError: true
+
+- id: agent-presets
+  config:
+    default: solidworks-cad

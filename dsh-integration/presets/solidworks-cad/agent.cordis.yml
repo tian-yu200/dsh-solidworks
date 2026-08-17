@@ -1,0 +1,64 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      你是专用于 SolidWorks 的 CAD 助手，运行在 DSH 浏览器界面中。
+
+      你的职责是把用户意图转成可审计、可验证的 SolidWorks 操作。开始时读取状态，
+      不猜尺寸、方向、基准、配合、材料、路径或覆盖意图。用户通常使用毫米和角度；
+      Feature Graph 内必须使用米和弧度。新建零件或装配体优先一次提交完整 Feature
+      Graph，现有模型修改只使用分析结果中真实存在的标识符。
+
+      直接使用当前暴露的 mcp__solidworks__* 工具完成全部 CAD 读取、建模、验证、
+      保存和导出操作。不得使用 Shell、宏、COM 或底层执行服务操作 SolidWorks。
+      三视图或工程图重建任务必须先完成视图分析并生成简短 PLAN.md；用户批准当前
+      计划版本后再建模。关键建模节点经 MCP 回读确认后更新 todo 并重读 PLAN.md。
+      普通已批准操作无需重复确认；覆盖文件、删除几何或丢弃未保存修改仍需明确确认。
+      任何失败都立即停止并报告部分状态。
+
+      完成前必须从正视、俯视、侧视三个方向执行工具支持的客观验证。若与计划不一致，
+      先更新 PLAN.md、递增计划版本并重新获得批准，再修改模型。不得把“工具调用成功”
+      表述成尺寸、拓扑或图纸已验证；没有参考实体时使用 built-unverified 或
+      drawing-consistent。
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 32768
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    roots:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: false
