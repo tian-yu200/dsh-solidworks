@@ -29,7 +29,7 @@ _spawn_lock = threading.Lock()
 def _server_is_up() -> bool:
     """Cheap liveness probe — True if /health answers 200."""
     try:
-        with httpx.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=2.0, trust_env=False) as client:
             return client.get(HEALTH_ENDPOINT).status_code == 200
     except Exception:
         return False
@@ -102,14 +102,12 @@ def _request_with_autostart(do_request, label: str):
 
 def get_health() -> dict:
     """GET /health — server status + COM attach state (does not touch state_version)."""
+    def _do():
+        with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as client:
+            return client.get(HEALTH_ENDPOINT)
+
     try:
-        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
-            response = client.get(HEALTH_ENDPOINT)
-    except httpx.ConnectError:
-        _log("<- health CONNECT_ERROR (server down?)")
-        raise ExecutionLayerError(
-            f"Cannot connect to solidworks-execution. Is the server running on {HEALTH_ENDPOINT}?"
-        )
+        response = _request_with_autostart(_do, "health")
     except httpx.TimeoutException:
         _log("<- health TIMEOUT")
         raise ExecutionLayerError(f"Health request timed out after {HTTP_TIMEOUT}s.")
@@ -130,7 +128,7 @@ def get_state() -> int:
     _log("-> get_state (resync)")
 
     def _do():
-        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+        with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as client:
             return client.get(STATE_ENDPOINT)
 
     try:
@@ -168,7 +166,7 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     _log(f"-> {tool_name} op={operation_id} sv={state_version}")
 
     def _do():
-        with httpx.Client(timeout=HTTP_TIMEOUT) as client:
+        with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as client:
             return client.post(EXECUTE_ENDPOINT, json=payload)
 
     try:
@@ -210,7 +208,7 @@ def ensure_ready() -> dict:
         _ensure_server_up()
 
     def _do():
-        with httpx.Client(timeout=ENSURE_TIMEOUT) as client:
+        with httpx.Client(timeout=ENSURE_TIMEOUT, trust_env=False) as client:
             return client.post(ENSURE_ENDPOINT)
 
     try:
