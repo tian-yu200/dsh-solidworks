@@ -1,6 +1,6 @@
 ---
 name: solidworks-cad
-description: Use for SolidWorks inspection, creation, editing, drawing reconstruction, saving, exporting, and validation through the dedicated nine-tool MCP workflow, including pictorial, sectional, and three-view reasoning, PLAN.md checkpoints, and directional verification.
+description: Use for SolidWorks inspection, creation, editing, drawing reconstruction, saving, exporting, and validation through the dedicated nine-tool MCP workflow, including pictorial, sectional, three-view, threaded-fastener, and part-drawing reasoning, PLAN.md checkpoints, and directional verification.
 ---
 
 # SolidWorks CAD
@@ -153,6 +153,8 @@ For a new part or assembly:
 
 Do not split a complete graph into low-level modeling calls. Do not invent graph
 fields, feature types, selectors, units, or references absent from the schema.
+The [capability map](references/feature-graph-capability-map.md) summarizes
+expressible constructs; record inexpressible ones as `CAPABILITY_GAP`.
 
 ## Existing Document Edits
 
@@ -227,115 +229,34 @@ Use the returned trust level accurately:
 
 For a model reconstructed from images, PDF pages, orthographic views, or sections:
 
-### Pictorial Evidence
+Read [reconstruction reasoning](references/reconstruction-reasoning.md) in full
+before analysis. Also read [part drawing evidence](references/part-drawing-evidence.md)
+when any dimension, title block, hole/thread callout, bolt, screw, stud, nut,
+washer, fastener, BOM, tolerance, datum, roughness, material, finish, revision,
+or technical note appears, and [assembly reconstruction](references/assembly-reconstruction.md)
+when the evidence describes a multi-part assembly. These local references add
+reasoning rules; they do not replace runtime MCP schema/reference topics.
 
-Before PLAN, scan every supplied sheet or image region for an isometric,
-axonometric, oblique, or perspective view. Record `PICTORIAL_STATUS` as
-`found` or `not_found`; when found, record its region, visible faces, handedness,
-features, and occlusions.
+Before PLAN, identify the projection convention; scan for a pictorial view;
+classify every orthographic, section, detail, and auxiliary view; and lock the
+canonical frame `+X=right`, `+Y=up`, `+Z=front`. The bottom of Top is model front
+and the left of Left is model rear. Record a signed `CAD_AXIS_MAP` for an existing
+model.
 
-Use the pictorial view as the highest-confidence source for topology, feature
-presence, spatial arrangement, handedness, and front/rear placement. On a
-topological or spatial conflict, it wins and the conflict must be logged in PLAN.
-Explicit dimensions and section/depth symbols still govern numeric values because
-pictorial pixels are not true-size. Reinspect the pictorial view whenever PLAN
-reasoning encounters an ambiguity or unmatched detail. If none exists, reconstruct
-from orthographic and sectional evidence alone.
+Use explicit dimensions and annotations for values and standard feature meaning.
+Use a pictorial view first for topology, handedness, and spatial placement; use a
+section first for material/void evidence on its cut plane. Cross-check ordinary
+views by visible outline, hidden line, then centerline. Pixel measurement is only
+schematic evidence. Log every conflict and unresolved item.
 
-### Section Evidence
-
-Before PLAN, detect and classify every supplied section as `full`, `half`,
-`offset/stepped`, `aligned`, `broken-out/local`, `revolved`, `removed`, or
-`unknown`. Record its parent view, arrow sightline, cut-plane normal and position,
-offsets/jogs, local frame, scale, and confidence. Assign `S##` IDs to cut contours
-and internal transitions, then map their coordinates into the canonical 3D frame.
-
-Interpret section conventions before inferring solids:
-
-- Hatching means cut material; hatch strokes are not model edges.
-- An enclosed unhatched region is only a candidate void when its boundaries,
-  centers, or matching evidence support it.
-- Cutting-plane jogs are not geometry; combine offset-section segments into one
-  section without modeling the jog edges.
-- Centerlines are axes or datums. Omitted hidden lines do not prove absence.
-- Longitudinally cut ribs, webs, spokes, shafts, and fasteners may remain
-  unhatched. In assemblies, a hatch change may separate parts rather than create
-  a step in one part.
-
-Treat a section as a projection plus plane and material/void constraints. A
-section is strongest for geometry on its cut plane and for otherwise hidden
-interiors. Recover missing section lines by testing candidate solids against other
-views, centers, tangencies, levels, extents, continuity, containment, feature
-connectivity, evidenced symmetry, and through/blind depth evidence. Prefer the
-simplest candidate explaining all evidence. Mark each section-derived detail
-`resolved`, `assumed`, or `unresolved`; section-only inference is `assumed` and
-must be validated.
-
-The pictorial view remains highest-confidence for visible topology and spatial
-placement. On a direct pictorial/section conflict, follow the pictorial view and
-log the conflict; explicit dimensions and cut/depth symbols govern numeric
-placement.
-
-### Orientation Contract
-
-Lock one canonical model frame before interpreting geometry:
-
-```text
-+X = model right
-+Y = model up
-+Z = model front
-```
-
-| View | Observer/sightline | Drawing right | Drawing up | Into drawing |
-| --- | --- | --- | --- | --- |
-| Front | at `+Z`, looking `-Z` | `+X` right | `+Y` up | `-Z` rear |
-| Top | at `+Y`, looking `-Y` | `+X` right | `-Z` rear | `-Y` down |
-| Left | at `-X`, looking `+X` | `+Z` front | `+Y` up | `+X` right |
-| Right | at `+X`, looking `-X` | `-Z` rear | `+Y` up | `-X` left |
-
-Thus the bottom of Top is model front (`+Z`), and the left of Left is model rear
-(`-Z`). Projection convention controls sheet placement, not this direction map.
-For an existing model, preserve geometry and record a signed canonical-to-document
-`CAD_AXIS_MAP`.
-
-With drawing coordinates `u` right and `v` up:
-
-```text
-Front: X=+u, Y=+v
-Top:   X=+u, Z=-v
-Left:  Z=+u, Y=+v
-Right: Z=-u, Y=+v
-```
-
-### Edge And Corner Correspondence
-
-Before selecting features, assign `E##` IDs to topology-driving lines/arcs/edges
-and `V##` IDs to endpoints, intersections, and corners. Record source position,
-line type, visibility, adjacency, candidate feature, and evidence in every view.
-
-| View | Fixed point coordinates | Projected edge components |
-| --- | --- | --- |
-| Front | `X,Y`; `Z` unresolved | `(dX,dY)` |
-| Top | `X,Z`; `Y` unresolved | `(dX,-dZ)` |
-| Left | `Z,Y`; `X` unresolved | `(dZ,dY)` |
-| Right | `Z,Y`; `X` unresolved | `(-dZ,dY)` |
-
-Match details by signed coordinates, aligned endpoints, adjacency, closed loops,
-symmetry, centers, and visible/hidden transitions. Infer each 3D edge from at
-least two independent projections; use the third as confirmation or explain why
-it becomes a point, coincident contour, hidden edge, or occluded detail.
-
-A section is one projection plus cut-plane and material/void constraints. It can
-resolve an internal edge when paired with another hidden line, centerline,
-dimension, repeated section, or supported continuity inference. Record the
-matching `S##` evidence; unsupported section-only placement remains `assumed` and
-must be validated.
-
-For example, a line in the middle of Left supplies `Z,Y`; locate the same `Y` in
-Front and `Z` in Top to resolve its `X` location or extent. Mark every detected
-nonconstruction detail `resolved` or `explained`. Cross-check Front/Top width,
-Front/Side height, Top/Side depth, and every hole, cut, step, and protrusion.
-Derive a missing view from this same correspondence, not from a separate guess.
+Resolve the envelope, normal surfaces, internal features, inclined/oblique
+surfaces, then curved/cylindrical features. Assign `F##` faces, `E##` edges,
+`V##` vertices, and `S##` section details. Locate every critical face, edge, and
+vertex from at least two independent projections; use the third to confirm or
+explain hiding, coincidence, tangency, or point projection. Auxiliary views
+control true shape/size of inclined faces. Generate a missing view only by
+projecting resolved 3D topology. If topology remains nonunique after all supplied
+evidence, set `RECONSTRUCTION_STATUS: BLOCKED` rather than guessing.
 
 ### PLAN.md
 
@@ -349,6 +270,7 @@ PLAN_STATUS: DRAFT
 LOOP_COUNTS: L1=0; L2=0; L3={}; L4={}; L5=0
 TARGET: <source and requested output>
 MODE: <exact|schematic>
+DRAWING_META: <title/no/rev; units/scale; projection; part/assembly; standard/unique>
 PROJECTION: <first-angle|third-angle>
 NORMALIZATION: <dimensions or schematic scale>
 MODEL_FRAME: +X=right; +Y=up; +Z=front
@@ -358,27 +280,33 @@ VIEW_DATUMS: <shared X/Y/Z datums>
 PICTORIAL: <status; source; findings; conflicts>
 SECTIONS: <not_present or IDs; type; parent; sightline; plane/offsets; confidence>
 DETAIL_COVERAGE: <detected/resolved/explained/unresolved>
+SURFACE_COVERAGE: <F## resolved/explained/unresolved across views>
+DIMENSION_BASIS: <explicit/baseline/chain/derived/schematic; datums; conflicts>
+FEATURE_ANNOTATIONS: <holes/threads/nuts/fasteners/depth/count/pattern/radii/chamfers or none>
+MATERIAL_FINISH_TOLERANCE: <material/finish/roughness/tolerance/GD&T/notes/unresolved>
+RECONSTRUCTION_STATUS: <DRAFT|READY|BLOCKED|COMPLETE>
+MANUFACTURING_STATUS: <COMPLETE|INCOMPLETE|UNRESOLVED>
 ## View Ledger
-| View | Envelope | Features | Hidden/depth evidence |
+| View | Envelope | F/E/V/S evidence | Hidden/depth evidence |
 | --- | --- | --- | --- |
 | Front | ... | ... | ... |
 | Top | ... | ... | ... |
 | Side | ... | ... | ... |
-| Section(s) | ... | ... | cut material/void; missing-line inference |
+| Section/Aux | ... | ... | material/void or true-shape evidence |
 ## Detail Correspondence
-| ID | Front | Top | Side/Section | 3D inference/status |
+| ID | Front | Top | Side/Section/Aux | 3D inference/status |
 | --- | --- | --- | --- | --- |
-| E01/V01 | ... | ... | ... | ... |
+| F01/E01/V01/S01 | ... | ... | ... | resolved/explained/unresolved |
 ## Feature Sequence And Todo
-- [x] Analyze pictorial, orthographic, and sectional evidence
-- [x] Lock orientation, side view, missing view, and detail IDs
+- [x] Analyze pictorial, orthographic, sectional, auxiliary, and part evidence
+- [x] Lock projection, axes, surfaces, details, missing views, and statuses
 - [ ] Approve this PLAN_VERSION
-- [ ] M1 <evidence IDs; plane; signed direction; end condition>
-- [ ] M2 <...>
+- [ ] M1 <F/E/V/S IDs; sketch plane; signed direction; end condition; dimension source>
+- [ ] M2 <same fields>
 - [ ] Validate Front
 - [ ] Validate Top
 - [ ] Validate Side
-- [ ] Validate supplied Sections
+- [ ] Validate supplied Sections/Auxiliary views
 - [ ] Save/export requested outputs
 ## Validation Matrix
 | View | Planned checks | Result |
@@ -386,7 +314,7 @@ DETAIL_COVERAGE: <detected/resolved/explained/unresolved>
 | Front | ... | pending |
 | Top | ... | pending |
 | Side | ... | pending |
-| Section(s) | cut contours; material/void; transitions; depth | pending or N/A |
+| Section/Aux | cut material/void; transitions; depth; true shape | pending or N/A |
 LAST_CHECKPOINT: none
 REPLAN_LOG: none
 ```
@@ -395,11 +323,15 @@ Use `exact` mode for dimensioned/fabrication work. Use `schematic` for
 dimensionless projection exercises; preserve available proportions or record one
 normalization, and state depth/handedness assumptions.
 
-Set `PLAN_STATUS: READY` only when all view roles, axis signs, topology,
-handedness, missing views, section planes/conventions, dimensions/normalization,
-detail IDs, feature order, directions, end conditions, and measurable validation
-checks are coherent. Every detail must be resolved/explained by cross-view
-evidence, section constraints, or a documented projection/occlusion explanation.
+Set `PLAN_STATUS: READY` only when view roles, axis signs, topology, handedness,
+missing views, section/auxiliary conventions, dimensions or normalization,
+`F##/E##/V##/S##`, feature order, signed directions, end conditions, dimension
+sources, standard-part identity, thread semantics, and measurable checks are
+coherent. Every nonconstruction detail must be `resolved`, `explained`, or
+explicitly `unresolved`. Keep reconstruction and manufacturing completeness as
+separate statuses. While writing modeling todos, check the
+[capability map](references/feature-graph-capability-map.md); plan only features
+the vocabulary can express and record the rest as `CAPABILITY_GAP`.
 
 If one decision can change topology or handedness, set `BLOCKED` and ask one
 focused question. Waiting does not consume `L2`; revising PLAN after new input
@@ -413,6 +345,17 @@ Read approved PLAN in full immediately before mutation. Start or reuse the job,
 read only the required Feature Graph references, then prefer one complete
 `submit_feature_graph(..., fresh_document=true)` for a new model. Do not split a
 complete graph merely to create checkpoints.
+
+Encode design intent: anchor the first datum/sketch to the origin when reasonable;
+establish geometric relations, then location dimensions, then shape dimensions;
+keep sketches simple and preferably fully constrained; use mirror or pattern when
+the evidence establishes symmetry or repetition.
+
+For every thread, nut, bolt, screw, or stud todo, record the axis, internal or
+external role, cosmetic/symbolic or physical representation, designation source,
+thread extent, and mating evidence. Prefer an approved standard/toolbox component
+for a fully designated standard fastener. Model a physical helix only when the
+request requires it and the runtime schema supports it.
 
 One successful complete graph is one MCP milestone and may check every modeling
 todo it covers after objective readback. For genuinely staged edits or drawing
@@ -439,6 +382,10 @@ Validate independently:
 - Each supplied section: recreate its cut plane and sightline; check cut contours,
   material/void regions, centers, transitions, connectivity, and through/blind
   depths. Missing hidden lines alone are neither PASS nor FAIL.
+- Each auxiliary view: check the true shape/size and the parent-view projection;
+  omitted hidden lines in a partial auxiliary view do not prove feature absence.
+- Each threaded interface: check coaxiality, designation, pitch, hand, fit when
+  stated, engagement length, through/blind extent, and nut open/closed topology.
 
 Write `PASS`, `FAIL`, or `UNAVAILABLE` with evidence in each Validation Matrix
 row. When useful and planned, make a working save and use `drawing_workflow` to
@@ -466,3 +413,6 @@ Report:
 - assumptions, unavailable checks, or capability gaps
 
 Never claim success from appearance or a tool return code alone.
+
+Keep this main skill at or below 550 lines; disclose detailed domain rules through
+the directly linked reference files.

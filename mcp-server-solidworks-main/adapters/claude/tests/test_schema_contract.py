@@ -19,6 +19,13 @@ server.py must resolve, every declared section must be registered AND present in
 recipe-usage.md. Resources have no `tool-schemas.json` counterpart (that file's every top-level
 key is a tool), so the declared surface is `server._RECIPE_SECTIONS` itself.
 
+THIRD CHECK (2026-08-29, DSH fork): the contract may be a superset of this adapter's surface.
+Upstream exposed every wire tool through server.py; the dsh-solidwork fork moved eleven of them
+(drawing tables/annotations, exploded views, Toolbox inserts, undo scopes) behind the DSH
+orchestrator's nine high-level tools, where `backend.call(name, params)` dispatches them by
+name. So a tool that is in tool-schemas.json but not exposed by server.py is drift ONLY if no
+module under `adapters/dsh/` consumes it. Adapter -> contract direction stays strictly 1:1.
+
 Runnable two ways:
   - standalone:  python tests/test_schema_contract.py   (exits non-zero on drift)
   - pytest:      pytest tests/test_schema_contract.py
@@ -35,6 +42,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(_ADAPTER_DIR))
 _CONTRACT_PATH = os.path.join(
     _REPO_ROOT, "execution", "solidworks", "contracts", "tool-schemas.json"
 )
+_DSH_DIR = os.path.join(_REPO_ROOT, "adapters", "dsh")
 
 # Import server.py as a module (it lives one dir up from tests/).
 sys.path.insert(0, _ADAPTER_DIR)
@@ -62,6 +70,16 @@ def _contract_tools():
     return out
 
 
+def _dsh_consumer_source():
+    """Concatenated source of the DSH adapter modules that consume wire tools."""
+    chunks = []
+    for name in sorted(os.listdir(_DSH_DIR)):
+        if name.endswith(".py"):
+            with open(os.path.join(_DSH_DIR, name), encoding="utf-8") as fh:
+                chunks.append(fh.read())
+    return "\n".join(chunks)
+
+
 def find_drift():
     """Return a list of human-readable drift messages (empty == in sync)."""
     adapter = _adapter_tools()
@@ -72,8 +90,18 @@ def find_drift():
     only_contract = sorted(set(contract) - set(adapter))
     for name in only_adapter:
         errors.append(f"tool '{name}' is exposed by server.py but missing from tool-schemas.json")
+    consumer_source = None
     for name in only_contract:
-        errors.append(f"tool '{name}' is in tool-schemas.json but not exposed by server.py")
+        # DSH fork invariant: a wire tool may be deliberately kept off the model
+        # surface, but then some adapters/dsh module must still dispatch it
+        # (backend.call, the edit allowlist in policy.py, or a workflow step).
+        if consumer_source is None:
+            consumer_source = _dsh_consumer_source()
+        if not re.search(rf"\b{re.escape(name)}\b", consumer_source):
+            errors.append(
+                f"tool '{name}' is in tool-schemas.json but is neither exposed by "
+                f"server.py nor consumed by the adapters/dsh orchestrator"
+            )
 
     for name in sorted(set(adapter) & set(contract)):
         a, c = adapter[name], contract[name]

@@ -30,6 +30,8 @@ vendor/
 /*.SLDASM
 /*.SLDDRW
 /PLAN.md
+/*.png
+/drawing_crops/
 **/.solidpilot/
 
 # IDE and operating system files
