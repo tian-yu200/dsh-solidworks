@@ -215,3 +215,30 @@ def cad_env(tmp_path, monkeypatch):
         backup_root=backup_root,
         module=orchestrator_module,
     )
+
+
+@pytest.fixture
+def unbound_env(tmp_path, monkeypatch):
+    """A job started while NO document is active: expected_document is empty."""
+    fake_backend = FakeBackend({})
+    fake_backend.state = None
+    store = JobStore(tmp_path / "jobs")
+    backup_root = tmp_path / "backups"
+
+    monkeypatch.setattr(orchestrator_module, "backend", fake_backend)
+    monkeypatch.setattr(orchestrator_module, "job_store", store)
+    monkeypatch.setattr(orchestrator_module, "BACKUP_ROOT", backup_root)
+
+    orchestrator = orchestrator_module.CadOrchestrator()
+    started = orchestrator.begin_job("test CAD job with no active document")
+    job = store.load(started["job_id"], started["job_token"])
+    return SimpleNamespace(
+        orchestrator=orchestrator,
+        backend=fake_backend,
+        store=store,
+        job=job,
+        job_id=started["job_id"],
+        token=started["job_token"],
+        backup_root=backup_root,
+        module=orchestrator_module,
+    )

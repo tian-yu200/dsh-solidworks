@@ -18,6 +18,7 @@ if _COMPILER_ROOT not in sys.path:
 
 from pycompiler.compiler import compile_and_run          # noqa: E402
 from pycompiler.execution_port import ExecutionPort       # noqa: E402
+from pycompiler import contours as _contours             # noqa: E402
 
 # A canonical box's 6 planar faces. The +Y face at y=0.05 is the unambiguous "top".
 _BOX_FACES = json.dumps({
@@ -125,6 +126,49 @@ class FakePort(ExecutionPort):
 
 def _tools(port):
     return [t for (t, _p) in port.calls]
+
+
+def _arc_points(params, n=400):
+    """Sample an emitted arc_center op exactly as the execution layer's CreateArc does:
+    +1 sweeps CCW from start to end, -1 sweeps CW (SolidWorksService.Sketch.cs:260-271
+    resolves an omitted direction to the minor arc; the compiler always passes an explicit
+    sign). Returns [(x, y)] including both endpoints."""
+    import math
+    cx, cy = params["cx"], params["cy"]
+    a1 = math.atan2(params["y1"] - cy, params["x1"] - cx)
+    a2 = math.atan2(params["y2"] - cy, params["x2"] - cx)
+    r = math.hypot(params["x1"] - cx, params["y1"] - cy)
+    if params["direction"] > 0:
+        while a2 < a1:
+            a2 += 2.0 * math.pi
+    else:
+        while a2 > a1:
+            a2 -= 2.0 * math.pi
+    return [(cx + r * math.cos(a1 + (a2 - a1) * i / n),
+             cy + r * math.sin(a1 + (a2 - a1) * i / n)) for i in range(n + 1)]
+
+
+def _arc_x_extent(params, n=400):
+    xs = [x for (x, _y) in _arc_points(params, n)]
+    return min(xs), max(xs)
+
+
+def _approx(pair, tol=1e-9):
+    """Float-tuple comparison without a pytest dependency (this file also runs standalone)."""
+    return _Approx(pair, tol)
+
+
+class _Approx:
+    def __init__(self, pair, tol):
+        self.pair = pair
+        self.tol = tol
+
+    def __eq__(self, other):
+        return (len(other) == len(self.pair)
+                and all(abs(a - b) <= self.tol for a, b in zip(other, self.pair)))
+
+    def __repr__(self):
+        return "_approx(%r, tol=%g)" % (self.pair, self.tol)
 
 
 def test_example_box_hole_lowering_order():
@@ -290,6 +334,360 @@ def test_path_profile_line_arc_construction_params():
                                 "x1": 0.0065, "y1": 0.0, "x2": -0.0065, "y2": 0.0, "direction": -1}
     assert port.calls[3][1] == {"entity_type": "line", "x1": 0.0, "y1": -0.01, "x2": 0.0, "y2": 0.01,
                                 "construction": True}
+
+
+# ---------------------------------------------------------------------------
+# Contour welding + plan-time closure (v0.7.3 — the 阀体 open-contour failure class)
+# ---------------------------------------------------------------------------
+
+
+def test_contour_weld_snaps_micron_gap():
+    # A line end 30 µm off the arc start: the welder snaps the arc start onto the FIRST
+    # anchor (the line's end — deterministic first-anchor-wins) so the build runs; the
+    # exact-match closing endpoint moves nothing and is not reported; the weld is visible
+    # on the create_sketch op note in the node_log.
+    g = {
+        "schema_version": "0.7.3-draft", "units": "meters",
+        "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [
+                 {"kind": "line", "x1": -0.0065, "y1": 0.0, "x2": 0.0065, "y2": 0.00003},
+                 {"kind": "arc", "cx": 0.0, "cy": 0.0, "x1": 0.0065, "y1": 0.0,
+                  "x2": -0.0065, "y2": 0.0, "dir": -1},
+             ]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.003},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    line = port.calls[1][1]
+    assert (line["x2"], line["y2"]) == (0.0065, 0.00003)  # the first anchor never moves
+    arc = port.calls[2][1]
+    assert (arc["x1"], arc["y1"]) == (0.0065, 0.00003)    # snapped onto the line's end
+    assert (arc["x2"], arc["y2"]) == (-0.0065, 0.0)       # exact match -> untouched
+    assert "(1 endpoint(s) welded within 0.0001 m)" in r.node_log[0]["ops"][0]["note"]
+
+
+def test_contour_weld_spline_endpoints():
+    # Spline through-points participate: both ends weld onto the line's anchors and the
+    # flat points list is rewritten in place.
+    g = {
+        "schema_version": "0.7.3-draft", "units": "meters",
+        "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [
+                 {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0},
+                 {"kind": "spline", "points": [0.01, 0.00005, 0.005, 0.004, 0.0, 0.00005]},
+             ]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.003},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    spl = port.calls[2][1]
+    assert spl["points"] == [0.01, 0.0, 0.005, 0.004, 0.0, 0.0]
+    assert "(2 endpoint(s) welded within 0.0001 m)" in r.node_log[0]["ops"][0]["note"]
+
+
+def test_open_contour_rejected_at_plan_time():
+    # A 0.2 mm gap (> the 0.1 mm weld tolerance) on an extruded outline: rejected at
+    # plan time with ZERO execution calls and the exact gap + nearest neighbour named,
+    # instead of a mid-build EXTRUSION_FAILED with rollback.
+    g = {
+        "schema_version": "0.7.3-draft", "units": "meters",
+        "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [
+                 {"kind": "line", "x1": -0.0065, "y1": 0.0, "x2": 0.0065, "y2": 0.0002},
+                 {"kind": "arc", "cx": 0.0, "cy": 0.0, "x1": 0.0065, "y1": 0.0,
+                  "x2": -0.0065, "y2": 0.0, "dir": -1},
+             ]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "cut",
+             "end": "through_all"},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED"
+    assert port.calls == []  # nothing executed
+    msg = r.error["message"]
+    assert "open contour for extrude 'e1'" in msg
+    assert "profile[0] (line) end at (0.0065, 0.0002)" in msg
+    assert "nearest: profile[1] (arc) start, 0.0002 m away" in msg
+
+
+def test_open_rib_sketch_still_allowed():
+    # rib consumes an intentionally OPEN profile — never closure-checked, never welded shut.
+    g = {
+        "schema_version": "0.7.3-draft", "units": "meters",
+        "nodes": [
+            {"id": "b1", "type": "box", "width": 0.05, "depth": 0.05, "height": 0.005},
+            {"id": "s1", "type": "sketch", "ref": {"datum": "right"},
+             "profile": [{"kind": "line", "x1": 0.02, "y1": 0.0, "x2": 0.0, "y2": 0.02}]},
+            {"id": "r1", "type": "rib", "sketch": "s1", "thickness": 0.004},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    line = port.calls[-2][1]
+    assert (line["x1"], line["y1"], line["x2"], line["y2"]) == (0.02, 0.0, 0.0, 0.02)
+
+
+def test_dangling_stray_segment_rejected_for_extrude():
+    # A closed rectangle PLUS a non-construction stray line: the stray endpoints have no
+    # partners, so the sketch is rejected for the extrude with the fix in the message
+    # (mark it construction:true). Zero execution calls.
+    g = {
+        "schema_version": "0.7.3-draft", "units": "meters",
+        "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [
+                 {"kind": "rectangle", "width": 0.04, "height": 0.03},
+                 {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.005, "y2": 0.005},
+             ]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED"
+    assert port.calls == []
+    assert "construction:true" in r.error["message"]
+
+
+def test_non_finite_numbers_rejected():
+    # NaN / +Inf / -Inf must never reach the execution layer: +inf satisfies `v > 0` and
+    # json.loads accepts the bare NaN/Infinity literals, while NaN compares False to
+    # everything (so it would silently count as a "paired" contour endpoint). Every
+    # primitive that carries numbers is covered; ZERO execution calls in each case.
+    nan, inf = float("nan"), float("inf")
+    cases = [
+        [{"kind": "rectangle", "width": inf, "height": 0.03}],
+        [{"kind": "rectangle", "width": nan, "height": 0.03}],
+        [{"kind": "circle", "diameter": inf}],
+        [{"kind": "circle", "diameter": nan}],
+        [{"kind": "circle", "diameter": 0.01, "cx": nan}],
+        [{"kind": "line", "x1": 0.0, "y1": 0.0, "x2": inf, "y2": 0.0}],
+        [{"kind": "line", "x1": 0.0, "y1": nan, "x2": 0.01, "y2": 0.0}],
+        [{"kind": "slot", "length": inf, "width": 0.02}],
+        [{"kind": "slot", "length": 0.05, "width": 0.02, "cy": nan}],
+        [{"kind": "rounded_rect", "width": 0.04, "height": 0.03, "radius": inf}],
+        [{"kind": "rounded_rect", "width": 0.04, "height": 0.03, "radius": 0.005,
+          "cx": nan}],
+        [{"kind": "spline", "points": [0.0, 0.0, 0.01, inf]}],
+        [{"kind": "arc", "cx": 0.0, "cy": 0.0, "x1": 0.01, "y1": 0.0,
+          "x2": 0.0, "y2": nan, "dir": 1}],
+    ]
+    for profile in cases:
+        g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+             "profile": profile},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+             "depth": 0.01},
+        ]}
+        port = FakePort()
+        r = compile_and_run(port, g)
+        assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", (
+            profile, r.to_dict())
+        assert port.calls == [], profile
+
+
+def test_non_finite_extrude_depth_rejected():
+    # Node-level numbers are guarded by the same helpers (extrude depth is > 0).
+    for bad in (float("nan"), float("inf")):
+        g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [{"kind": "rectangle", "width": 0.04, "height": 0.03}]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+             "depth": bad},
+        ]}
+        port = FakePort()
+        r = compile_and_run(port, g)
+        assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", r.to_dict()
+        assert port.calls == []
+
+
+def test_thin_contour_collapsed_by_weld_rejected():
+    # A closed 4-line contour 0.08 mm tall: every endpoint is within the 0.1 mm weld
+    # tolerance, so the weld flattens it to a repeated zero-length segment. Pre-fix the
+    # endpoints then all "paired" and the collapsed profile was ACCEPTED; now it is
+    # rejected at plan time with zero execution calls.
+    thin = [
+        {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0},
+        {"kind": "line", "x1": 0.01, "y1": 0.0, "x2": 0.01, "y2": 0.00008},
+        {"kind": "line", "x1": 0.01, "y1": 0.00008, "x2": 0.0, "y2": 0.00008},
+        {"kind": "line", "x1": 0.0, "y1": 0.00008, "x2": 0.0, "y2": 0.0},
+    ]
+    g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "front"}, "profile": thin},
+        {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+         "depth": 0.01},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", r.to_dict()
+    assert port.calls == []
+    assert "zero-length segment" in r.error["message"]
+
+
+def test_spike_collapsed_by_weld_rejected():
+    # A closed square plus a 0.05 mm spike off a corner: the spike's far endpoint welds
+    # onto the corner, emitting a zero-length entity while the sketch still looks closed.
+    spike = [
+        {"kind": "line", "x1": -0.01, "y1": -0.01, "x2": 0.01, "y2": -0.01},
+        {"kind": "line", "x1": 0.01, "y1": -0.01, "x2": 0.01, "y2": 0.01},
+        {"kind": "line", "x1": 0.01, "y1": 0.01, "x2": -0.01, "y2": 0.01},
+        {"kind": "line", "x1": -0.01, "y1": 0.01, "x2": -0.01, "y2": -0.01},
+        {"kind": "line", "x1": -0.01, "y1": -0.01, "x2": -0.00995, "y2": -0.00995},
+    ]
+    g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "front"}, "profile": spike},
+        {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+         "depth": 0.01},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", r.to_dict()
+    assert port.calls == []
+    assert "zero-length segment" in r.error["message"]
+
+
+def test_thin_feature_above_weld_tolerance_still_builds():
+    # Guard against over-rejection: a 0.5 mm wall is 5x the weld tolerance, so nothing
+    # collapses and the build proceeds normally.
+    wall = [
+        {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0},
+        {"kind": "line", "x1": 0.01, "y1": 0.0, "x2": 0.01, "y2": 0.0005},
+        {"kind": "line", "x1": 0.01, "y1": 0.0005, "x2": 0.0, "y2": 0.0005},
+        {"kind": "line", "x1": 0.0, "y1": 0.0005, "x2": 0.0, "y2": 0.0},
+    ]
+    g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "front"}, "profile": wall},
+        {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+         "depth": 0.01},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# slot / rounded_rect convenience primitives (v0.7.4 — compiler-side expansion)
+# ---------------------------------------------------------------------------
+
+
+def test_slot_expands_to_exact_four_entity_chain():
+    # ONE slot node -> 4 exact line/arc entities (overall 50 x 20, centred): traversal
+    # left cap -> top -> right cap -> bottom, endpoints computed exact so the contour
+    # closes with NO welding and NO plan-time closure rejection.
+    g = {
+        "schema_version": "0.7.4-draft", "units": "meters",
+        "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+             "profile": [{"kind": "slot", "length": 0.05, "width": 0.02}]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    assert _tools(port) == ["create_sketch",
+                            "add_sketch_entity", "add_sketch_entity",
+                            "add_sketch_entity", "add_sketch_entity",
+                            "extrude_feature"]
+    a, top, b, bot = (port.calls[i][1] for i in range(1, 5))
+    assert a == {"entity_type": "arc_center", "cx": -0.015, "cy": 0.0,
+                 "x1": -0.015, "y1": -0.01, "x2": -0.015, "y2": 0.01, "direction": -1}
+    assert top == {"entity_type": "line", "x1": -0.015, "y1": 0.01, "x2": 0.015, "y2": 0.01}
+    assert b == {"entity_type": "arc_center", "cx": 0.015, "cy": 0.0,
+                 "x1": 0.015, "y1": 0.01, "x2": 0.015, "y2": -0.01, "direction": -1}
+    assert bot == {"entity_type": "line", "x1": 0.015, "y1": -0.01, "x2": -0.015, "y2": -0.01}
+    # Both caps must bulge OUTWARD: sampled with +1=CCW / -1=CW CreateArc semantics, the
+    # left cap reaches cx - length/2 and the right cap reaches cx + length/2 (the pre-fix
+    # right cap swept the 180 deg complement through -X and stopped at cx + half - r).
+    assert _arc_x_extent(a) == _approx((-0.025, -0.015))
+    assert _arc_x_extent(b) == _approx((0.015, 0.025))
+    assert "welded" not in r.node_log[0]["ops"][0]["note"]
+
+
+def test_rounded_rect_expands_to_exact_eight_entity_chain():
+    # The 90x90-flange-with-R10-corners class: 4 edges + 4 CCW corner arcs, all endpoints
+    # exact (40 x 30, r 5, centred).
+    g = {
+        "schema_version": "0.7.4-draft", "units": "meters",
+        "nodes": [
+            {"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+             "profile": [{"kind": "rounded_rect", "width": 0.04, "height": 0.03,
+                          "radius": 0.005}]},
+            {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    entities = [p for (t, p) in port.calls if t == "add_sketch_entity"]
+    assert len(entities) == 8
+    assert entities[0] == {"entity_type": "line", "x1": -0.015, "y1": -0.015,
+                           "x2": 0.015, "y2": -0.015}
+    assert entities[1] == {"entity_type": "arc_center", "cx": 0.015, "cy": -0.01,
+                           "x1": 0.015, "y1": -0.015, "x2": 0.02, "y2": -0.01, "direction": 1}
+    assert entities[3] == {"entity_type": "arc_center", "cx": 0.015, "cy": 0.01,
+                           "x1": 0.02, "y1": 0.01, "x2": 0.015, "y2": 0.015, "direction": 1}
+    assert entities[7] == {"entity_type": "arc_center", "cx": -0.015, "cy": -0.01,
+                           "x1": -0.02, "y1": -0.01, "x2": -0.015, "y2": -0.015, "direction": 1}
+    # Every corner arc must bulge OUTWARD (sampled with +1=CCW / -1=CW CreateArc semantics):
+    # each arc's extreme along its outward axis reaches the rounded rect's outer bounding box
+    # (an inverted sweep would stop at the inner rounded corner instead).
+    arcs = [e for e in entities if e["entity_type"] == "arc_center"]
+    assert len(arcs) == 4
+    for arc in arcs:
+        pts = _arc_points(arc)
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        # the arc centre sits at an INNER corner of the bbox (cx = +/-0.015, cy = +/-0.01)
+        if arc["cx"] > 0:
+            assert abs(max(xs) - 0.02) <= 1e-9
+        else:
+            assert abs(min(xs) + 0.02) <= 1e-9
+        if arc["cy"] > 0:
+            assert abs(max(ys) - 0.015) <= 1e-9
+        else:
+            assert abs(min(ys) + 0.015) <= 1e-9
+    # every entity endpoint is shared with a neighbour exactly — no weld needed
+    assert "welded" not in r.node_log[0]["ops"][0]["note"]
+
+
+def test_slot_and_rounded_rect_validation_rejections():
+    # slot length <= width; rounded_rect radius at/over min/2; non-numeric cx — all
+    # rejected at plan time with zero execution calls.
+    bads = [
+        [{"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+          "profile": [{"kind": "slot", "length": 0.02, "width": 0.02}]},
+         {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01}],
+        [{"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+          "profile": [{"kind": "slot", "length": 0.01, "width": 0.02}]},
+         {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01}],
+        [{"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+          "profile": [{"kind": "rounded_rect", "width": 0.04, "height": 0.03,
+                       "radius": 0.015}]},
+         {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01}],
+        [{"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+          "profile": [{"kind": "rounded_rect", "width": 0.04, "height": 0.03,
+                       "radius": 0.02}]},
+         {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01}],
+        [{"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+          "profile": [{"kind": "slot", "length": 0.05, "width": 0.02, "cx": "left"}]},
+         {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01}],
+    ]
+    for nodes in bads:
+        port = FakePort()
+        r = compile_and_run(port, {"schema_version": "0.7.4-draft", "units": "meters",
+                                   "nodes": nodes})
+        assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", r.to_dict()
+        assert port.calls == []
 
 
 def test_extrude_up_to_surface_resolves_face_anchor():
@@ -572,8 +970,11 @@ def test_sketch_frame_identity_no_transform_and_missing_frame_error():
     g = {
         "schema_version": "0.5.2-draft", "units": "meters",
         "nodes": [
+            # Construction-only scaffolding: closure sees no chain endpoints, the frame
+            # transform still maps every coordinate (identity -> untouched).
             {"id": "s1", "type": "sketch", "ref": {"datum": "front"}, "frame": ident,
-             "profile": [{"kind": "line", "x1": 0.001, "y1": 0.002, "x2": 0.003, "y2": 0.004}]},
+             "profile": [{"kind": "line", "x1": 0.001, "y1": 0.002, "x2": 0.003, "y2": 0.004,
+                          "construction": True}]},
             {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01},
         ],
     }
@@ -1277,7 +1678,8 @@ def test_ellipse_spline_frame_transform_mirror():
         "nodes": [
             {"id": "s1", "type": "sketch", "ref": {"datum": "top"}, "frame": declared,
              "profile": [
-                 {"kind": "spline", "points": [0.0, 0.01, 0.01, 0.02, 0.02, 0.01]},
+                 {"kind": "spline", "points": [0.0, 0.01, 0.01, 0.02, 0.02, 0.01],
+                  "construction": True},
                  {"kind": "ellipse", "cx": 0.0, "cy": 0.005, "x1": 0.02, "y1": 0.005,
                   "x2": 0.0, "y2": 0.008},
              ]},
@@ -1410,6 +1812,152 @@ def test_rib_reverse_thickness_dir_passthrough():
     assert r.status == "COMPLETED", r.to_dict()
     rib = port.calls[-1][1]
     assert rib == {"thickness": 0.005, "two_sided": False, "reverse_thickness_dir": True}
+
+
+# ---------------------------------------------------------------------------
+# Direct contours.py unit tests (v0.7.3/v0.7.4 hardening — P2-3)
+# ---------------------------------------------------------------------------
+
+
+def test_contours_weld_malformed_spline_ignored():
+    # A malformed spline (odd count / < 2 points / non-number) contributes NO endpoints: it
+    # must not anchor a weld and must not crash. A well-formed spline beside it still welds.
+    malformed = [
+        {"kind": "spline", "points": [0.0, 0.0, 0.01]},                 # odd count
+        {"kind": "spline", "points": [0.0, 0.0]},                       # < 2 points
+        {"kind": "spline", "points": [0.0, 0.0, 0.01, "x"]},           # non-number
+        {"kind": "spline", "points": "0,0,1,1"},                       # not a list
+    ]
+    assert _contours.open_gaps(malformed) == []
+    welded, welds = _contours.weld_profile(malformed)
+    assert welds == []
+    assert welded == malformed  # deep copy of untouched prims compares equal
+
+
+def test_contours_lone_primitive_has_no_anchors():
+    # A lone chain primitive has no partner: BOTH endpoints are reported, each with
+    # nearest_* = None (the no-anchor branch).
+    lone = [{"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0}]
+    gaps = _contours.open_gaps(lone)
+    assert [g["endpoint"] for g in gaps] == ["start", "end"]
+    assert all(g["nearest_prim"] is None and g["nearest_gap"] is None for g in gaps)
+    # its own two endpoints must not pair with EACH OTHER
+    assert len(gaps) == 2
+
+
+def test_contours_mixed_line_arc_spline_chain():
+    # line -> arc -> spline forming a closed chain: every endpoint welds/pairs and
+    # open_gaps is empty. Proves all three chain kinds share one endpoint model.
+    chain = [
+        {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.02, "y2": 0.0},
+        {"kind": "arc", "cx": 0.01, "cy": 0.0, "x1": 0.02, "y1": 0.0,
+         "x2": 0.0, "y2": 0.0, "dir": 1},
+        {"kind": "spline", "points": [0.02, 0.0, 0.01, 0.005, 0.0, 0.0]},
+    ]
+    # the line's end (0.02, 0) and the spline's start (0.02, 0) are exact matches; the
+    # arc's endpoints match the line's end and the spline's end exactly too.
+    assert _contours.open_gaps(chain) == []
+    _welded, welds = _contours.weld_profile(chain)
+    assert welds == []  # all exact, nothing moved
+
+
+def test_contours_weld_is_first_anchor_wins_and_never_mutates():
+    # Two endpoints 30 um apart: the SECOND snaps onto the FIRST anchor (deterministic),
+    # the input list is not mutated, and the weld is reported with its gap.
+    prof = [
+        {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0},
+        {"kind": "line", "x1": 0.01, "y1": 0.00003, "x2": 0.0, "y2": 0.0},
+    ]
+    welded, welds = _contours.weld_profile(prof)
+    assert len(welds) == 1 and welds[0]["prim"] == 1 and welds[0]["endpoint"] == "start"
+    assert (welded[1]["x1"], welded[1]["y1"]) == (0.01, 0.0)
+    assert prof[1]["y1"] == 0.00003  # original untouched
+
+
+def test_contours_non_finite_endpoints_never_pair():
+    # NaN compares False to everything, so a NaN endpoint must be reported as open even
+    # when it sits on a real partner; +/-Inf likewise.
+    nan, inf = float("nan"), float("inf")
+    prof = [
+        {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0},
+        {"kind": "line", "x1": nan, "y1": 0.0, "x2": 0.01, "y2": 0.0},
+        {"kind": "line", "x1": 0.0, "y1": inf, "x2": 0.0, "y2": 0.0},
+    ]
+    gaps = _contours.open_gaps(prof)
+    # Exactly the two NON-FINITE endpoints are reported: prim1's start (nan) and prim2's
+    # start (inf in y). The finite endpoints still pair with prim0 as usual.
+    assert [(g["prim"], g["endpoint"]) for g in gaps] == [(1, "start"), (2, "start")]
+    assert gaps[0]["x"] != gaps[0]["x"]          # nan x is surfaced, not silently paired
+    assert gaps[1]["y"] == inf
+
+
+def test_closure_message_lists_every_consumer_and_counts_suppressed_gaps():
+    # P2-2: a sketch referenced by more than one consumer names them ALL (a plain dict
+    # would keep only the last), and more than four open endpoints append a "+N more"
+    # note so the planner can tell something was suppressed.
+    open_chain = [{"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.01, "y2": 0.0}]
+    g = {"schema_version": "0.7.3-draft", "units": "meters", "nodes": [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "front"}, "profile": open_chain},
+        # s1 is consumed TWICE: as the ACTIVE sketch of the extrude (adjacency) and as a
+        # loft profile (by id). The message must name BOTH consumers for s1.
+        {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+         "depth": 0.01},
+        {"id": "s2", "type": "sketch", "ref": {"datum": "top"},
+         "profile": [{"kind": "line", "x1": 0.0, "y1": 0.0, "x2": 0.02, "y2": 0.0}]},
+        {"id": "l1", "type": "loft", "profiles": ["s1", "s2"]},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED"
+    assert port.calls == []
+    # s1's message names BOTH its consumers (a plain dict would keep only the last)
+    s1_msg = [e for e in r.error["message"].split("; ") if "sketch 's1'" in e][0]
+    assert "extrude 'e1'" in s1_msg and "loft 'l1'" in s1_msg
+
+
+def test_closure_message_suppresses_gaps_beyond_four():
+    # 5 disjoint open segments -> 10 unpaired endpoints; only the first 4 are spelled out
+    # and the remainder is counted.
+    prof = [{"kind": "line", "x1": 0.01 * i, "y1": 0.0,
+             "x2": 0.01 * i + 0.005, "y2": 0.0} for i in range(5)]
+    g = {"schema_version": "0.7.3-draft", "units": "meters", "nodes": [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "front"}, "profile": prof},
+        {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss",
+         "depth": 0.01},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED"
+    assert port.calls == []
+    assert "+6 more open endpoint(s)" in r.error["message"]
+
+
+def test_huge_int_coordinates_never_overflow():
+    # A JSON document can carry an integer beyond float range: json.loads yields 10**400 as an
+    # int, NOT as inf. math.isfinite() raises OverflowError on such an int, so every finiteness
+    # check must treat an int as always finite and route only floats through math.isfinite.
+    # The graph must come back as a clean FAILED/VALIDATION_FAILED (zero execution calls) or a
+    # clean COMPLETED — never an OverflowError escaping the validator or the contour walk.
+    huge = 10 ** 400
+    g = {"schema_version": "0.7.3-draft", "units": "meters", "nodes": [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "front"},
+         "profile": [{"kind": "line", "x1": 0.0, "y1": 0.0, "x2": huge, "y2": 0.0}]},
+        {"id": "e1", "type": "extrude", "sketch": "s1", "operation": "boss", "depth": 0.01},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)                      # must not raise OverflowError
+    assert r.status in ("COMPLETED", "FAILED"), r.to_dict()
+    if r.status == "FAILED":
+        assert r.error["code"] == "VALIDATION_FAILED"
+        assert port.calls == []                       # rejected BEFORE any execution call
+    # the contour helpers see the same value directly: it IS a number and it IS finite (so the
+    # profile is accepted as numeric), it is just not a usable vertex — reported as an open
+    # endpoint rather than crashing the walk.
+    assert _contours._is_number(huge)
+    assert _contours._is_finite(huge)
+    prim = {"kind": "line", "x1": 0.0, "y1": 0.0, "x2": huge, "y2": 0.0}
+    assert _contours.open_gaps([prim]) != []
+    assert _contours.collapsed_entities([prim]) == []
 
 
 _TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

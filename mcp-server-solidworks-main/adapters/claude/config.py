@@ -12,6 +12,12 @@ STATE_ENDPOINT = f"{EXECUTION_BASE_URL}/api/tool/state"
 HEALTH_ENDPOINT = f"{EXECUTION_BASE_URL}/health"
 ENSURE_ENDPOINT = f"{EXECUTION_BASE_URL}/ensure_ready"
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
+# CAD ops legitimately run long: one complex sketch posts many entities, an extrude/analyze
+# triggers a rebuild, and COM can stall behind a SolidWorks dialog. A single 30s budget killed
+# large graphs mid-build (observed on the 阀体 rebuild, 2026-08-17: sketch nodes timed out and
+# the model responded by simplifying the part), so /api/tool/execute gets its own budget;
+# /health and /state stay on HTTP_TIMEOUT.
+TOOL_EXEC_TIMEOUT = float(os.getenv("HTTP_TOOL_TIMEOUT", "120"))
 # ensure_ready may cold-launch SolidWorks, which can take tens of seconds — give it room.
 ENSURE_TIMEOUT = float(os.getenv("ENSURE_TIMEOUT", "120"))
 

@@ -1,8 +1,8 @@
 {
  "_meta": {
   "name": "feature-graph",
-  "version": "0.7.2-draft",
-  "status": "DRAFT — v0.5 vocabulary grown from the REAL production parts in drawing-samples/ (IR-ADR-007): the 1-1 bracket's recorded VOCABULARY_GAP list (path sketch profile, offset datum plane, up_to_surface end condition, edge fillet + edge reference model, construction geometry); v0.5.1 adds the 1-2 flange's gap list (revolve with in-sketch axis, circular_pattern with datum-intersection axis + runtime seed-feature reference). Do NOT freeze before the MAT v1 validation set arrives; v0.6.0 adds the ASSEMBLY sub-vocabulary (component + mate — Phase B, ADR-047), grown from the real assembly samples in drawing-samples/assembly/. v0.7.0 (the FORWARD Feature Graph session, IR-ADR-017) deliberately overrides the grow-from-real-parts mantra ONCE to cover the FULL existing part tool surface: sweep, linear_pattern, ellipse/spline profile primitives, graph-level material, edge_flange simple length mode. Known tool-surface limits recorded there (revolve/sweep/loft are boss-only; linear pattern D2 unwired). v0.7.1 (audit-A1) adds NO vocabulary — it PROMOTES eight closed vocabulary sets that existed only as prose (assembly_node_types, mate_types, mate_alignments, anchor_kinds_face/edge, pattern_directions, chamfer_types, bend_positions, edge_flange_positions) plus the two grammar sets (body_producers, feature_producers) into covered_subset as real arrays, so the schema<->ir_schema.py contract test can machine-diff them. Motivation: circular_pattern's seed list had silently rotted to five stale types since 0.7.0 — prose cannot be tested. v0.7.2 (2026-07-30, IR-ADR-019 follow-up) likewise adds NO vocabulary — it DOCUMENTS `extrude.reversed`, which lowering.py has mapped to the tool's `reverse` param and ir_schema.py has validated as a boolean since v0.5, but which the registry never listed. It was found by reading the COMPILER SOURCE instead of the registry — exactly the inversion audit-A1 exists to prevent, and a blind spot audit-A1 cannot catch because it diffs covered_subset ARRAYS while per-param fields are prose by design. No compiler or validator change; graphs that already used the flag are unaffected.",
+  "version": "0.7.4-draft",
+  "status": "DRAFT — v0.5 vocabulary grown from the REAL production parts in drawing-samples/ (IR-ADR-007): the 1-1 bracket's recorded VOCABULARY_GAP list (path sketch profile, offset datum plane, up_to_surface end condition, edge fillet + edge reference model, construction geometry); v0.5.1 adds the 1-2 flange's gap list (revolve with in-sketch axis, circular_pattern with datum-intersection axis + runtime seed-feature reference). Do NOT freeze before the MAT v1 validation set arrives; v0.6.0 adds the ASSEMBLY sub-vocabulary (component + mate — Phase B, ADR-047), grown from the real assembly samples in drawing-samples/assembly/. v0.7.0 (the FORWARD Feature Graph session, IR-ADR-017) deliberately overrides the grow-from-real-parts mantra ONCE to cover the FULL existing part tool surface: sweep, linear_pattern, ellipse/spline profile primitives, graph-level material, edge_flange simple length mode. Known tool-surface limits recorded there (revolve/sweep/loft are boss-only; linear pattern D2 unwired). v0.7.1 (audit-A1) adds NO vocabulary — it PROMOTES eight closed vocabulary sets that existed only as prose (assembly_node_types, mate_types, mate_alignments, anchor_kinds_face/edge, pattern_directions, chamfer_types, bend_positions, edge_flange_positions) plus the two grammar sets (body_producers, feature_producers) into covered_subset as real arrays, so the schema<->ir_schema.py contract test can machine-diff them. Motivation: circular_pattern's seed list had silently rotted to five stale types since 0.7.0 — prose cannot be tested. v0.7.2 (2026-07-30, IR-ADR-019 follow-up) likewise adds NO vocabulary — it DOCUMENTS `extrude.reversed`, which lowering.py has mapped to the tool's `reverse` param and ir_schema.py has validated as a boolean since v0.5, but which the registry never listed. It was found by reading the COMPILER SOURCE instead of the registry — exactly the inversion audit-A1 exists to prevent, and a blind spot audit-A1 cannot catch because it diffs covered_subset ARRAYS while per-param fields are prose by design. No compiler or validator change; graphs that already used the flag are unaffected. v0.7.3 (2026-08-29) likewise adds NO vocabulary — it hardens frozen-coordinate contours: lowering welds chain endpoints within 0.0001 m (0.1 mm, inside GB/T 1804-m, first-anchor-wins, welds ride the create_sketch note) and ir_schema REJECTS a sketch consumed by extrude/revolve/sheet_metal/sweep-PROFILE/loft whose chain endpoints remain unpaired beyond that weld (VALIDATION_FAILED at plan time with the exact gap and nearest neighbour, instead of a mid-build EXTRUSION_FAILED + rollback — the 阀体 2026-08-17 failure class). rib/sketched_bend and sweep-path sketches are open by design and never checked. Non-finite numbers (NaN/Infinity) are rejected at plan time, as is a contour the weld would collapse to zero length or zero area. v0.7.4 (2026-08-29) adds TWO convenience profile primitives, `slot` (overall length > width, optional cx/cy) and `rounded_rect` (width/height/radius < min/2, optional cx/cy) — pure compiler-side sugar: lowering expands each into EXACT line/arc_center entities (4 / 8 ops) whose shared endpoints close the contour by construction, so one node replaces up to 8 hand-computed entities on obround base plates and radiused flanges (the C-C/D-view shapes of the 阀体 drawing). No execution-layer change.",
   "role": "CAD-NEUTRAL intermediate representation (IR). The host AI (Planner) emits this; the deterministic compiler/solidworks lowers it to tool calls. The model NEVER emits raw tool sequences.",
   "doubles_as": "Capability registry — the set of supported feature node types + params IS the capability list. The Planner validates intent against this single artifact (no separate chatty discovery protocol)."
  },
@@ -66,7 +66,9 @@
    "line",
    "arc",
    "ellipse",
-   "spline"
+   "spline",
+   "slot",
+   "rounded_rect"
   ],
   "profile_flags": [
    "construction"
@@ -175,7 +177,7 @@
    "height": "number — meters (extrusion distance)"
   },
   "sketch": {
-   "description": "A 2D profile on a plane. Entities are profile primitives, not tools. v0.5 adds PATH profiles: free line/arc chains with exact coordinates (the recipe's 7-line+2-arc bracket outline), plus construction scaffolding. Primitives sharing identical endpoint coordinates close the contour — do NOT add constraints (frozen-coordinate rebuild, see add_sketch_entity guidance).",
+   "description": "A 2D profile on a plane. Entities are profile primitives, not tools. v0.5 adds PATH profiles: free line/arc chains with exact coordinates (the recipe's 7-line+2-arc bracket outline), plus construction scaffolding. Primitives sharing identical endpoint coordinates close the contour — do NOT add constraints (frozen-coordinate rebuild, see add_sketch_entity guidance). The compiler welds chain endpoints within 0.0001 m onto the first matching anchor before emitting entities; a sketch consumed by extrude/revolve/sheet_metal/sweep-PROFILE/loft whose contour is still open beyond that weld is REJECTED at plan time with the gap named (rib/bend/sweep-path sketches are open by design).",
    "ref": "datum + optional offset (the sketch plane; offset != 0 => the compiler prefers an existing face on that plane, else creates a parallel reference plane) OR — since v0.5.5, for sketches on NON-axis-aligned support (a bent flange's face, 4-1's Sketch13/16) — { face: face_anchor }: the compiler resolves the anchor via analyze_model(faces) plane-containment (resolve_face_by_anchor) and sketches ON that face (create_sketch on_face). Record the ORIGINAL sketch's `frame` — the frame transform (IR-ADR-010) makes the 2D coordinates support-independent.",
    "profile": "array of profile primitives:",
    "profile_primitives": {
@@ -223,6 +225,23 @@
      "kind": "spline",
      "points": "array of FLAT through-point coordinates [x1, y1, x2, y2, ...] — >= 2 points (4 numbers), even count",
      "_note": "COVERED since v0.7.0. Mirrors analyze_model(sketch)'s spline 'points' (flat x,y list). HONEST CAVEAT (KNOWN-LIMITATIONS): recreating a spline from through-points is VISUALLY equivalent, not bit-identical (SW stores control points + tangency, not interpolation points) — volume/area round-trips within tolerance, never byte-exact."
+    },
+    "slot": {
+     "kind": "slot",
+     "length": "number (m) — OVERALL length incl. both end radii",
+     "width": "number (m) — slot width; length must be > width (equal is a circle — model it as one)",
+     "cx": "number (optional, default 0 — centre X)",
+     "cy": "number (optional, default 0 — centre Y)",
+     "_note": "COVERED since v0.7.4. Compiler-side sugar: lowering expands to 4 exact line/arc entities (two semicircle caps + two tangent edges) that close by construction — one node replaces 4 hand-computed entities on obround outlines."
+    },
+    "rounded_rect": {
+     "kind": "rounded_rect",
+     "width": "number (m) — overall width (along the sketch X)",
+     "height": "number (m) — overall height (along the sketch Y)",
+     "radius": "number (m) — corner radius, must be < min(width, height)/2",
+     "cx": "number (optional, default 0 — centre X)",
+     "cy": "number (optional, default 0 — centre Y)",
+     "_note": "COVERED since v0.7.4. Centred like rectangle; lowering expands to 8 exact line/arc entities (4 edges + 4 CCW corner arcs) that close by construction — the 90x90 flange with R10 corners class."
     },
     "_common_flag": "any primitive may carry construction: true — created as CONSTRUCTION/reference geometry (mirrors analyze_model's per-segment flag)"
    }

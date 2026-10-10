@@ -26,6 +26,10 @@ const ALLOWED_TOOLS = Object.freeze([
 ]);
 const ALLOWED_SET = new Set(ALLOWED_TOOLS);
 const CONFIRM_TOOL = "mcp__solidworks__confirm_action";
+const MODLENS_TOOL = "modlens_read_image";
+const MODLENS_LOCAL_ONLY_REASON =
+  "modlens_read_image accepts only a non-empty local image file path in the SolidWorks " +
+  "profile; URL forms such as http://, https://, ftp:// and file:// are not allowed.";
 
 function denialReason(toolName) {
   return (
@@ -44,17 +48,30 @@ function apply(ctx) {
   });
 
   ctx.on("tools/pre-execute", (exec, next) => {
+    if (!ALLOWED_SET.has(exec.name)) {
+      return { kind: "deny", reason: denialReason(exec.name) };
+    }
+    if (exec.name === MODLENS_TOOL) {
+      const imagePath = exec.arguments?.path;
+      if (
+        typeof imagePath !== "string" ||
+        !imagePath.trim() ||
+        /^[a-z][a-z0-9+.-]*:\/\//i.test(imagePath)
+      ) {
+        return { kind: "deny", reason: MODLENS_LOCAL_ONLY_REASON };
+      }
+    }
     if (exec.name !== CONFIRM_TOOL) {
       return next();
     }
     const summary = exec.arguments?.action_summary;
-    return {
-      kind: "ask",
-      reason:
-        typeof summary === "string" && summary.trim()
-          ? summary
-          : "Confirm the pending SolidWorks CAD action.",
-    };
+    const reason =
+      typeof summary === "string" && summary.trim()
+        ? summary
+        : "Confirm the pending SolidWorks CAD action.";
+    return Promise.resolve(next()).then((result) =>
+      result?.kind === "allow" ? { kind: "ask", reason } : result,
+    );
   });
 }
 

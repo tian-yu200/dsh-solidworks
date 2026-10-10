@@ -171,6 +171,17 @@ if (Test-Path -LiteralPath $Dsh) {
     Add-Check "Policy in profile" $HasPolicy "solidworks profile dump"
 }
 
+$ImageCapabilityScript = Join-Path $PSScriptRoot "Check-ModelImageCapability.mjs"
+if ((Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $ImageCapabilityScript)) {
+    $CapabilityOutput = & node $ImageCapabilityScript `
+        --settings (Join-Path $DshHome "settings.yaml") `
+        --profiles (Join-Path $DshHome "profiles") 2>&1 | Out-String
+    $CapabilityLines = $CapabilityOutput -split "`n" |
+        Where-Object { $_ -match "default model|FAIL" } |
+        ForEach-Object { $_.Trim() }
+    Add-Check "Model image capability" ($LASTEXITCODE -eq 0) ($CapabilityLines -join " | ")
+}
+
 $Process = Get-Process -Name SLDWORKS -ErrorAction SilentlyContinue
 $ProcessDetail = if ($Process) {
     "PID: " + (($Process.Id | Sort-Object) -join ", ")

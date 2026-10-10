@@ -21,6 +21,25 @@ Log conflicts and apply the highest-ranked evidence for the disputed scope. If
 the winning evidence is damaged or semantically unresolved, preserve that fact
 instead of inventing geometry.
 
+## Missing Dimension Gate
+
+Pixel or proportional estimates are shape evidence, never coordinate sources.
+A placement or size coordinate may be derived from image proportion ONLY when
+the plan states that fallback explicitly and the user approves it; otherwise:
+
+1. Record the missing value as `unresolved` in the dimension ledger, with the
+   views that should have carried it.
+2. Ask one focused question when the answer changes topology, feature
+   presence, or any modeled dimension.
+3. Set `RECONSTRUCTION_STATUS: BLOCKED` when the user cannot supply it and the
+   feature cannot be modeled without it.
+
+Do not silently scale unreadable dimensions to fit (observed failure: a rebuild
+that filled missing outline positions by visual proportion produced a
+plausible-looking but wrong part). A model that omits an `unresolved` feature
+and says so is more correct than a complete-looking model with invented
+numbers.
+
 ## Projection And Coordinates
 
 Determine first-angle or third-angle projection from the projection symbol,
@@ -58,6 +77,33 @@ views, dimensions, symbols, the part name, or technical notes. If topology or
 handedness is still not unique, set `RECONSTRUCTION_STATUS: BLOCKED` and do not
 guess. Generate a missing view only by projecting resolved 3D coordinates and
 topology; never sketch it independently.
+
+## Feature Graph Milestone Strategy
+
+Asymmetric cast or crossed-bore parts (brackets, valve bodies, housings) exceed
+what one oversized Feature Graph reliably builds: large graphs have failed
+mid-build and the recovery was a silently simplified part. Plan them as ordered
+milestones in this shape order, and keep every evidenced feature in some
+milestone — dropping features to fit one graph is a plan defect, not a
+simplification:
+
+1. The most asymmetric true-shape profile (a base plate's obround outline with
+   its ear fillets — a `slot`/`rounded_rect` primitive covers the symmetric
+   cases) plus its extrude — build the hard sketch first, while a rejection is
+   cheap.
+2. Revolved shells for every diameter-led cylindrical body; a half-section
+   revolve beats a multi-arc extruded outline for round shells.
+3. Crossed bores and ports: `hole`/extrude cuts with through-all or
+   `up_to_surface`, each axis taken from its own view's centerlines.
+4. Ears, bosses, windows, patterns, and mirrored features.
+5. Fillets and chamfers last, as one post-solid pass; cast radii never go in
+   the base sketch.
+
+When a milestone's graph would be too large to build reliably, submit ordered
+milestones as SEQUENTIAL graphs against the SAME locked document — the first
+with a fresh document, later ones into the active document after inspecting the
+live geometry and anchoring to it. After each milestone, validate the views
+that constrain it before planning the next.
 
 ## Faces, Edges, Vertices, And Sections
 
@@ -112,3 +158,29 @@ direction, end condition, and dimension source. Validate Front, Top, Side, each
 section, and each auxiliary view independently against the resolved topology.
 Any mismatch uses the existing `L5` route back to PLAN; this reference introduces
 no additional retry loop.
+
+## As-Built Verification
+
+A model that rebuilds without errors is not yet a correct model. Before
+finishing a reconstruction job, close the loop against the source drawing:
+
+1. Read `mass_properties`. The model's overall extents must reproduce the
+   drawing's overall dimensions (the ledger's baseline values) within the
+   general tolerance band, and the centroid must sit where the views place it.
+   A volume-to-extents fraction far outside the part's apparent solidity
+   (roughly below 0.1 — hollow or missing material — or above 0.9 — cavities
+   that should be open) marks dropped or added material; find it before
+   publishing.
+2. Recreate the drawing's own view set on the finished model with
+   `drawing_workflow` — the same view placements and section lines
+   (B-B/A-A/C-C/D) as the source — save the model, export the drawing as PDF,
+   and compare each view against the source image: outline shape, hole count
+   and positions, hidden-line evidence, section cut regions, and overall
+   dimensions.
+3. Record one verdict per source view (`match` / `conflict: <what>`) in the
+   finish report. Any conflict takes the existing `L5` route back to PLAN; a
+   model with an open conflict is not a verified model.
+
+A deliberately partial model (a feature recorded as `CAPABILITY_GAP` or an
+`unresolved` dimension) must be reported as partial. Never let a clean
+verification pass present an incomplete part as complete.

@@ -44,6 +44,11 @@ DeepSeek Harness
 | `confirm_action` | 在用户明确批准后执行精确待办动作 |
 | `finish_job` | 完成最终客观验证并结束任务 |
 
+除以上 9 个 SolidWorks 工具外，策略插件还放行 4 个支撑工具：
+`ask_user_question`（向用户提问）、`todo_write`（维护待办清单）、`skill`（加载技能）、
+`modlens_read_image`（读取图片证据；仅接受本地图片文件路径，`http://`、`https://`、
+`ftp://`、`file://` 等 URL 形式一律拒绝）。除此之外的任何工具一律拒绝。
+
 注册事实源：
 `mcp-server-solidworks-main/adapters/dsh/server.py`。
 
@@ -67,7 +72,7 @@ DeepSeek Harness
 2. 使用 `inspect_state(scope="reference")` 读取本任务需要的 recipe 或 Feature Graph schema。
 3. 使用 `start_job` 获取 `job_id` 和私密 `job_token`。
 4. 根据任务调用 `submit_feature_graph`、`apply_document_edits` 或 `drawing_workflow`。
-5. 收到 `pending_confirmation` 时调用 `request_confirmation`，向用户展示精确 `action_summary`，等待新消息明确批准后再调用 `confirm_action`。
+5. 收到 `pending_confirmation` 时调用 `request_confirmation`，向用户展示精确 `action_summary`（其中会点名目标文档的路径或标题），等待新消息明确批准后再调用 `confirm_action`。
 6. 使用 `inspect_state` 检查结果，按需调用 `save_or_export`。
 7. 最后调用 `finish_job`。`verification_failed`、`partial` 或 `rollback_failed` 都不能作为成功交付。
 
@@ -76,6 +81,9 @@ DeepSeek Harness
 
 工具边界说明：
 [`docs/SolidWorks-MCP工具清单.md`](docs/SolidWorks-MCP工具清单.md)
+
+模型图片输入配置（换模型时保持看图能力）：
+[`docs/DSH模型图片输入配置.md`](docs/DSH模型图片输入配置.md)
 
 ## 目录
 

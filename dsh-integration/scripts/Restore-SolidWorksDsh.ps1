@@ -37,6 +37,43 @@ $SolidworksProfile = Assert-UnderDshHome $SolidworksProfile
 $SolidworksPreset = Assert-UnderDshHome $SolidworksPreset
 $SolidworksPolicy = Assert-UnderDshHome $SolidworksPolicy
 
+# Reversible restore: snapshot the CURRENT state of the five targets BEFORE anything is
+# removed or overwritten, so this restore can itself be undone. The snapshot is a sibling
+# of BackupRoot in the SAME layout and the SAME manifest format Install writes, so
+# Restore-SolidWorksDsh.ps1 can restore it in turn (restoring the snapshot == rolling the
+# restore back). Only targets that currently exist are captured, exactly like Install's
+# backup step; the flags in the snapshot's manifest record which ones those were.
+$PreRestoreStamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmss.fffZ")
+$PreRestoreRoot = Join-Path (Split-Path -Parent $BackupRoot) "pre-restore-$PreRestoreStamp"
+New-Item -ItemType Directory -Force -Path $PreRestoreRoot | Out-Null
+$PreRestoreManifest = [ordered]@{
+    createdAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+    dshHome = $DshHome
+    projectRoot = $ProjectRoot
+    webPatchExisted = Test-Path -LiteralPath $WebPatch
+    solidworksProfileExisted = Test-Path -LiteralPath $SolidworksProfile
+    solidworksPresetExisted = Test-Path -LiteralPath $SolidworksPreset
+    solidworksPolicyExisted = Test-Path -LiteralPath $SolidworksPolicy
+    installManifestExisted = Test-Path -LiteralPath $InstallManifest
+}
+if ($PreRestoreManifest.webPatchExisted) {
+    Copy-Item -LiteralPath $WebPatch -Destination (Join-Path $PreRestoreRoot "web.cordis.patch.yml")
+}
+if ($PreRestoreManifest.solidworksProfileExisted) {
+    Copy-Item -LiteralPath $SolidworksProfile -Destination (Join-Path $PreRestoreRoot "solidworks-profile") -Recurse
+}
+if ($PreRestoreManifest.solidworksPresetExisted) {
+    Copy-Item -LiteralPath $SolidworksPreset -Destination (Join-Path $PreRestoreRoot "solidworks-cad-preset") -Recurse
+}
+if ($PreRestoreManifest.solidworksPolicyExisted) {
+    Copy-Item -LiteralPath $SolidworksPolicy -Destination (Join-Path $PreRestoreRoot "solidworks-policy") -Recurse
+}
+if ($PreRestoreManifest.installManifestExisted) {
+    Copy-Item -LiteralPath $InstallManifest -Destination (Join-Path $PreRestoreRoot "solidworks-dsh-install.json")
+}
+$PreRestoreManifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PreRestoreRoot "manifest.json") -Encoding utf8
+Write-Host "Pre-restore snapshot: $PreRestoreRoot"
+
 if ($Manifest.webPatchExisted) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $WebPatch) | Out-Null
     Copy-Item -LiteralPath (Join-Path $BackupRoot "web.cordis.patch.yml") -Destination $WebPatch -Force

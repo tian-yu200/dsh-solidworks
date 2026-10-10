@@ -3,11 +3,18 @@ import json
 import os
 import re
 import threading
+import time
+import uuid
 from pathlib import Path
 
 from models import utc_now
 from policy import new_secret, secret_hash
 from settings import JOB_ROOT
+
+# On Windows a concurrent reader/replacer can hold the target open for a moment, so a
+# cross-process replace may fail with a sharing violation even though it is retryable.
+_REPLACE_ATTEMPTS = 20
+_REPLACE_BACKOFF_SECONDS = 0.01
 
 
 class JobStore:
@@ -53,12 +60,41 @@ class JobStore:
         with self._lock:
             job["updated_at"] = utc_now()
             path = self._path(job["job_id"])
-            temp = path.with_suffix(".tmp")
-            temp.write_text(
-                json.dumps(job, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            # Per-writer temp name: the lock only serializes THIS instance, so two server
+            # processes saving the same job would otherwise collide on a shared "*.tmp".
+            # os.replace stays atomic, so readers never observe a partial file.
+            temp = path.with_name(
+                f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             )
-            os.replace(temp, path)
+            try:
+                temp.write_text(
+                    json.dumps(job, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self._replace_with_retry(temp, path)
+            finally:
+                if temp.exists():
+                    try:
+                        temp.unlink()
+                    except OSError:
+                        pass
+
+    @staticmethod
+    def _replace_with_retry(temp, path):
+        """Atomically swap temp -> path, retrying the Windows sharing violation.
+
+        A concurrent cross-process reader or writer can hold the destination open just long
+        enough for `os.replace` to raise PermissionError (WinError 5/32). That is transient,
+        so back off and retry instead of failing the whole save.
+        """
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temp, path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_BACKOFF_SECONDS)
 
     def load(self, job_id, token):
         with self._lock:

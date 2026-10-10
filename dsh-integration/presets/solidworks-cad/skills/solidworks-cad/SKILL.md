@@ -6,6 +6,9 @@ description: Use for SolidWorks inspection, creation, editing, drawing reconstru
 # SolidWorks CAD
 
 Operate SolidWorks only through these nine high-level `mcp__solidworks__` tools.
+Approved support tools for workflow assistance: `ask_user_question`, `todo_write`,
+`skill`, and `modlens_read_image` (local image file paths only; URL forms such as
+`http://` are rejected).
 The runtime tool schemas and returned payloads are the authoritative contract.
 Parse each tool's JSON string before acting on its envelope status.
 
@@ -38,6 +41,7 @@ requested operation. If the nine-tool surface is unavailable, report
    write `PLAN.md`, and obtain approval before mutation.
 4. Call `start_job` before any deep document inspection or mutation. Supply
    `target_document` for an existing file and leave it empty for a fresh model.
+   An empty `target_document` with no active document starts an unbound job.
 5. Keep `job_id` and `job_token` private. Pass both to every later job-scoped
    call. Never place `job_token` in plans, logs, summaries, or user-visible text.
 6. Use the smallest matching high-level mutation tool.
@@ -48,6 +52,16 @@ requested operation. If the nine-tool surface is unavailable, report
 `start_job` locks the expected active-document identity. Every later job-scoped
 call verifies that identity. If the user switches documents, stop and begin a new
 job for the newly intended target.
+
+An unbound job — started with no active document — has no identity to lock, so
+every document-bound call is refused with `JOB_DOCUMENT_UNBOUND` before any CAD
+call: `apply_document_edits`, `submit_feature_graph` with
+`fresh_document=false`, `drawing_workflow`, save/export/batch/close, and
+`confirm_action` of a pending action that does not create its own document. The
+job binds only through its own document-creating call,
+`submit_feature_graph` with `fresh_document=true`; `save_or_export` `close` with
+`close_all=true` runs but never binds. Otherwise start a new job with
+`target_document`, or open the document first and start a new job.
 
 ## Drawing Reconstruction Flow
 
@@ -105,6 +119,11 @@ withheld approval. Waiting for input does not increment it; a new PLAN revision
 does. Do not add another automatic retry path. Confirmation pauses are not retries.
 If a flow edit adds or removes a back edge, recompute the graph and table.
 
+Every dimension the drawing evidence cannot read stays `unresolved` in the plan.
+Never fill placement or size coordinates from pixel proportions without explicit
+user approval in the plan (the Missing Dimension Gate in
+[reconstruction-reasoning.md](references/reconstruction-reasoning.md)).
+
 At exhaustion, stop mutation:
 
 ```text
@@ -155,6 +174,15 @@ Do not split a complete graph into low-level modeling calls. Do not invent graph
 fields, feature types, selectors, units, or references absent from the schema.
 The [capability map](references/feature-graph-capability-map.md) summarizes
 expressible constructs; record inexpressible ones as `CAPABILITY_GAP`.
+
+For a part whose complete graph would be oversized (asymmetric cast parts,
+crossed-bore housings), submit ordered milestones as SEQUENTIAL graphs against
+the SAME locked document: the first with `fresh_document=true`, later ones with
+`fresh_document=false` into the active document after inspecting the live
+geometry and anchoring to it (see the milestone strategy in
+[reconstruction-reasoning.md](references/reconstruction-reasoning.md)). Never
+shrink a graph by dropping evidenced features — report the split in the plan
+instead.
 
 ## Existing Document Edits
 

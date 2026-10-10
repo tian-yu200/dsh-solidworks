@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import secrets
 from datetime import datetime, timezone
@@ -245,7 +246,13 @@ DOCUMENT_SAVE_SUFFIXES = {
 
 
 def canonical_json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def payload_hash(value):
@@ -291,6 +298,10 @@ def _require_string(value, label):
 def _require_number(value, label, *, positive=False):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{label} must be a number")
+    # An int is ALWAYS finite; math.isfinite() raises OverflowError on one beyond float range
+    # (json.loads produces those), so only floats go through it.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite number")
     if positive and value <= 0:
         raise ValueError(f"{label} must be greater than zero")
 
@@ -391,6 +402,12 @@ def _validate_edit_params(index, tool, params):
                 raise ValueError(
                     f"{label}.edges_json must contain {{ex, ey, ez}} objects"
                 )
+            for index, edge in enumerate(edges):
+                for coordinate in ("ex", "ey", "ez"):
+                    _require_number(
+                        edge[coordinate],
+                        f"{label}.edges_json[{index}].{coordinate}",
+                    )
             has_selection = True
         if {"ex", "ey", "ez"} <= set(params):
             for coordinate in ("ex", "ey", "ez"):

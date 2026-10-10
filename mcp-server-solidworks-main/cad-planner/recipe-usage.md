@@ -101,7 +101,7 @@ original — these rules replace the readback discipline there. C1–C5 still ap
 
 1. Walk `recipe.features` in order; classify each against the CURRENT covered vocabulary —
    **the schema IS the registry**: read the node types from `feature-graph.schema.json`
-   (the `schema://feature-graph` resource). Part vocabulary (0.7.2-draft): `box`,
+   (the `schema://feature-graph` resource). Part vocabulary (0.7.4-draft): `box`,
    `sketch`+`extrude` boss/cut (ends blind / through_all / up_to_surface / mid_plane),
    `hole`-on-face, `fillet`, `chamfer`, `revolve`, `sweep`, `rib`, `loft`, `linear_pattern`,
    `circular_pattern`, `mirror`, `sheet_metal`, `sketched_bend`, `edge_flange` (custom-profile

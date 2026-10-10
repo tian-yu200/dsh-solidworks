@@ -22,6 +22,8 @@ import json
 import math
 from collections import namedtuple
 
+from . import contours
+
 Op = namedtuple("Op", ["tool", "params", "note"])
 
 # Sentinel (JSON-safe string, impossible as a real plane name) — see module docstring.
@@ -86,26 +88,40 @@ def lower_sketch(node, face_index=None):
          (localization-independent — 'Düzlem1'/'Plane1').
     Either way, coordinate correctness does NOT depend on the support: when the node carries the
     ORIGINAL sketch's `frame`, the compiler transforms every 2D coordinate into the frame
-    create_sketch MEASURES on the rebuild."""
+    create_sketch MEASURES on the rebuild.
+
+    Contour welding (v0.7.3): chain endpoints within CONTOUR_WELD_TOL are snapped onto the first
+    matching earlier anchor before the entities are emitted — validation already rejected
+    anything still open, so the weld only closes micron-level arithmetic drift. The weld count
+    rides the create_sketch op's note (visible in the node_log)."""
+    profile, welds = contours.weld_profile(node.get("profile") or [])
+    weld_note = _weld_note(welds)
     offset = _offset(node)
     ops = []
     if face_index is not None:
         ops.append(Op("create_sketch", {"on_face": True, "face_index": int(face_index)},
-                      "sketch on the existing face #%d at %s %+g m"
-                      % (int(face_index), _datum(node), offset)))
+                      "sketch on the existing face #%d at %s %+g m%s"
+                      % (int(face_index), _datum(node), offset, weld_note)))
     elif offset != 0.0:
         plane = _PLANE[_datum(node)]
         ops.append(Op("add_reference_geometry",
                       {"type": "plane", "ref_plane_name": plane, "offset": offset},
                       "sketch: offset plane %s %+g m" % (plane, offset)))
         ops.append(Op("create_sketch", {"plane": FROM_PREV_FEATURE, "on_face": False},
-                      "sketch on the created offset plane"))
+                      "sketch on the created offset plane" + weld_note))
     else:
         plane = _PLANE[_datum(node)]
-        ops.append(Op("create_sketch", {"plane": plane, "on_face": False}, "sketch on " + plane))
-    for prim in node.get("profile", []):
-        ops.append(_profile_op(prim))
+        ops.append(Op("create_sketch", {"plane": plane, "on_face": False},
+                      "sketch on " + plane + weld_note))
+    for prim in profile:
+        ops.extend(_profile_ops(prim))
     return ops
+
+
+def _weld_note(welds):
+    if not welds:
+        return ""
+    return " (%d endpoint(s) welded within %g m)" % (len(welds), contours.CONTOUR_WELD_TOL)
 
 
 def _profile_op(prim):
@@ -157,7 +173,82 @@ def _profile_op(prim):
         if construction:
             params["construction"] = True
         return Op("add_sketch_entity", params, "construction spline" if construction else "spline")
+    if kind == "slot":
+        # v0.7.4 convenience primitive: ONE closed slot -> 4 exact line/arc entities (overall
+        # length x width, centred on cx/cy). Traversal order left cap -> top -> right cap ->
+        # bottom; endpoints are computed exact, so the chain closes without welding.
+        length = float(prim["length"])
+        width = float(prim["width"])
+        cx = float(prim.get("cx") or 0.0)
+        cy = float(prim.get("cy") or 0.0)
+        r = width / 2.0
+        half = (length - width) / 2.0
+        left, right = cx - half, cx + half
+        return [
+            _arc_op(left, cy, left, cy - r, left, cy + r, -1,
+                    "slot: left cap", construction),
+            _line_op(left, cy + r, right, cy + r, "slot: top edge", construction),
+            # The right cap sweeps CW (-1) from its TOP point to its BOTTOM point: that arc
+            # passes through +X (the outward bulge). +1 would sweep the 180 deg complement
+            # through -X, carving the cap INWARD (the right end would sit at cx+half-r
+            # instead of cx+half+r) — a silently wrong closed profile.
+            _arc_op(right, cy, right, cy + r, right, cy - r, -1,
+                    "slot: right cap", construction),
+            _line_op(right, cy - r, left, cy - r, "slot: bottom edge", construction),
+        ]
+    if kind == "rounded_rect":
+        # v0.7.4 convenience primitive: centred rectangle with corner radius -> 8 exact
+        # line/arc entities, CCW from the bottom edge. Validation keeps r < min(W,H)/2, so
+        # every straight edge is non-degenerate.
+        width = float(prim["width"])
+        height = float(prim["height"])
+        r = float(prim["radius"])
+        cx = float(prim.get("cx") or 0.0)
+        cy = float(prim.get("cy") or 0.0)
+        hw, hh = width / 2.0, height / 2.0
+        xl, xr = cx - hw + r, cx + hw - r
+        yb, yt = cy - hh + r, cy + hh - r
+        L, R_, B, T = cx - hw, cx + hw, cy - hh, cy + hh
+        return [
+            _line_op(xl, B, xr, B, "rounded_rect: bottom edge", construction),
+            _arc_op(xr, yb, xr, B, R_, yb, 1, "rounded_rect: BR corner", construction),
+            _line_op(R_, yb, R_, yt, "rounded_rect: right edge", construction),
+            _arc_op(xr, yt, R_, yt, xr, T, 1, "rounded_rect: TR corner", construction),
+            _line_op(xr, T, xl, T, "rounded_rect: top edge", construction),
+            _arc_op(xl, yt, xl, T, L, yt, 1, "rounded_rect: TL corner", construction),
+            _line_op(L, yt, L, yb, "rounded_rect: left edge", construction),
+            _arc_op(xl, yb, L, yb, xl, B, 1, "rounded_rect: BL corner", construction),
+        ]
     raise ValueError("unsupported profile kind %r (ir_schema should have rejected it)" % kind)
+
+
+def _profile_ops(prim):
+    """[_profile_op] as a LIST — slot/rounded_rect expand to several exact entities."""
+    op = _profile_op(prim)
+    return op if isinstance(op, list) else [op]
+
+
+def _line_op(x1, y1, x2, y2, note, construction=False):
+    # Coordinates rounded to 9 decimals (the _sketch_frame_transform convention): pure
+    # cosmetics for decimal arithmetic (-0.025 + 0.01 -> -0.015000000000000001); shared
+    # endpoints stay exactly equal because both sides round the same computed value.
+    params = {"entity_type": "line",
+              "x1": round(float(x1), 9), "y1": round(float(y1), 9),
+              "x2": round(float(x2), 9), "y2": round(float(y2), 9)}
+    if construction:
+        params["construction"] = True
+    return Op("add_sketch_entity", params, note)
+
+
+def _arc_op(cx, cy, x1, y1, x2, y2, direction, note, construction=False):
+    params = {"entity_type": "arc_center",
+              "cx": round(float(cx), 9), "cy": round(float(cy), 9),
+              "x1": round(float(x1), 9), "y1": round(float(y1), 9),
+              "x2": round(float(x2), 9), "y2": round(float(y2), 9),
+              "direction": direction}
+    if construction:
+        params["construction"] = True
+    return Op("add_sketch_entity", params, note)
 
 
 def lower_extrude(node, up_to_face_index=None):
@@ -378,14 +469,16 @@ def lower_edge_flange(node, edge_index):
                     "flange_length": float(node["length"]), "angle": angle_deg},
                    "edge flange (simple): length %g on edge #%d"
                    % (float(node["length"]), int(edge_index)))]
+    profile, welds = contours.weld_profile(node.get("profile") or [])
     gen = {"feature_type": "edge_flange_sketch", "edge_index": int(edge_index),
            "angle": angle_deg}
     if node.get("flip") is True:
         gen["flip"] = True
     ops = [Op("sheet_metal_feature", gen,
-              "edge flange: generate+clear the profile sketch on edge #%d" % int(edge_index))]
-    for prim in node.get("profile", []):
-        ops.append(_profile_op(prim))
+              "edge flange: generate+clear the profile sketch on edge #%d%s"
+              % (int(edge_index), _weld_note(welds)))]
+    for prim in profile:
+        ops.extend(_profile_ops(prim))
     fin = {"feature_type": "edge_flange_finish", "edge_index": int(edge_index),
            "angle": angle_deg}
     if node.get("radius") is not None:

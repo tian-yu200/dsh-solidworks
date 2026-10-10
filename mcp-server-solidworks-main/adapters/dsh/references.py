@@ -41,6 +41,8 @@ def read_reference(topic):
         )
     sections = _recipe_sections()
     for heading, body in sections.items():
-        if heading == title or heading.startswith(title + " ") or title in heading:
+        # Exact heading, or the topic as a leading word ("mapping — ..."). A bare substring
+        # match would let an unrelated heading ("Reverse-mapping notes") hijack a topic.
+        if heading == title or heading.startswith(title + " "):
             return body
     raise RuntimeError(f"Recipe section '{title}' was not found in {RECIPE_PATH}")

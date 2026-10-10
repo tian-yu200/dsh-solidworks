@@ -1,13 +1,24 @@
 import inspect
 import json
+import re
 from typing import Literal
 
 from mcp.server import MCPServer
 
+from backend import ExecutionLayerError
 from orchestrator import orchestrator
 
 
 mcp = MCPServer("solidworks-cad-orchestrator")
+
+# Orchestrator refusals and transport failures are raised as `RuntimeError("<CODE>: message")`
+# so the model gets a stable, actionable error code instead of a generic UNEXPECTED_ERROR.
+_ERROR_CODE_PATTERN = re.compile(r"^([A-Z][A-Z0-9_]{2,}):")
+
+
+def _error_code_from(exc):
+    match = _ERROR_CODE_PATTERN.match(str(exc))
+    return match.group(1) if match else None
 
 
 def _json_result(func):
@@ -25,11 +36,24 @@ def _json_result(func):
             "risk": "read",
             "error": {"code": "PERMISSION_DENIED", "message": str(exc)},
         }
+    except ExecutionLayerError as exc:
+        result = {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": "EXECUTION_LAYER_ERROR", "message": str(exc)},
+        }
     except ValueError as exc:
         result = {
             "status": "failed",
             "risk": "read",
             "error": {"code": "INVALID_REQUEST", "message": str(exc)},
+        }
+    except RuntimeError as exc:
+        code = _error_code_from(exc) or "UNEXPECTED_ERROR"
+        result = {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": code, "message": str(exc)},
         }
     except Exception as exc:  # noqa: BLE001
         result = {

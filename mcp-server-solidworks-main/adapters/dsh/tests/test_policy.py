@@ -3,6 +3,7 @@ import json
 import pytest
 
 from policy import (
+    canonical_json,
     expected_output_paths,
     same_document,
     validate_drawing_workflow,
@@ -402,3 +403,112 @@ def test_output_paths_match_document_and_export_contract(
                 "documentType": "PART",
             },
         )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_are_rejected(value):
+    with pytest.raises(ValueError, match="finite number"):
+        validate_edits(
+            [
+                {
+                    "tool": "modify_dimension",
+                    "params": {"name": "D1", "value": value},
+                }
+            ]
+        )
+    with pytest.raises(ValueError, match="finite number"):
+        validate_edits(
+            [
+                {
+                    "tool": "add_edge_feature",
+                    "params": {
+                        "feature_type": "fillet",
+                        "radius_or_distance": value,
+                        "ex": 0.0,
+                        "ey": 0.0,
+                        "ez": 0.0,
+                    },
+                }
+            ]
+        )
+
+
+def test_huge_int_values_are_finite_and_never_overflow():
+    # json.loads yields an int BEYOND float range for 10**400, and math.isfinite() raises
+    # OverflowError on such an int. An int is always finite, so validation must accept it (or
+    # reject it on its own merits) and never raise OverflowError.
+    huge = 10 ** 400
+    edits = validate_edits(
+        [{"tool": "modify_dimension", "params": {"name": "D1", "value": huge}}]
+    )
+    assert edits[0]["params"]["value"] == huge
+    # the positive-required path takes the same route (no OverflowError, value preserved)
+    edits = validate_edits(
+        [
+            {
+                "tool": "add_edge_feature",
+                "params": {
+                    "feature_type": "fillet",
+                    "radius_or_distance": huge,
+                    "ex": 0.0,
+                    "ey": 0.0,
+                    "ez": 0.0,
+                },
+            }
+        ]
+    )
+    assert edits[0]["params"]["radius_or_distance"] == huge
+
+
+def test_canonical_json_refuses_non_finite_numbers():
+    assert canonical_json({"a": 1}) == '{"a":1}'
+    with pytest.raises(ValueError):
+        canonical_json({"a": float("nan")})
+    with pytest.raises(ValueError):
+        canonical_json({"a": float("inf")})
+
+
+def test_edges_json_elements_must_be_numeric():
+    with pytest.raises(ValueError, match=r"edges_json\[0\]\.ex"):
+        validate_edits(
+            [
+                {
+                    "tool": "add_edge_feature",
+                    "params": {
+                        "feature_type": "fillet",
+                        "radius_or_distance": 0.001,
+                        "edges_json": '[{"ex": "NOT_A_NUMBER", "ey": 0.0, "ez": 0.0}]',
+                    },
+                }
+            ]
+        )
+    with pytest.raises(ValueError, match=r"edges_json\[1\]\.ez"):
+        validate_edits(
+            [
+                {
+                    "tool": "add_edge_feature",
+                    "params": {
+                        "feature_type": "fillet",
+                        "radius_or_distance": 0.001,
+                        "edges_json": '[{"ex": 0.0, "ey": 0.0, "ez": 0.0}, '
+                        '{"ex": 0.0, "ey": 0.0, "ez": {}}]',
+                    },
+                }
+            ]
+        )
+
+
+def test_edges_json_with_numeric_coordinates_is_accepted():
+    edits = validate_edits(
+        [
+            {
+                "tool": "add_edge_feature",
+                "params": {
+                    "feature_type": "fillet",
+                    "radius_or_distance": 0.001,
+                    "edges_json": '[{"ex": 0.0, "ey": 0.01, "ez": -0.02}]',
+                },
+            }
+        ]
+    )
+    assert edits[0]["params"]["edges_json"].startswith("[")

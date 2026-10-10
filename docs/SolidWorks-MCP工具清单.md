@@ -24,8 +24,17 @@
 | `confirm_action` | 对应原动作 | 用户明确批准精确摘要后执行一个待办动作。 |
 | `finish_job` | 验证 | 运行最终客观验证并结束任务。 |
 
-专用 profile 的策略插件只允许这 9 个工具。任何其他
-`mcp__solidworks__*` 工具都不属于模型可调用接口。
+专用 profile 的策略插件只允许这 9 个 SolidWorks 工具，外加下方 4 个支撑工具。
+任何其他 `mcp__solidworks__*` 工具都不属于模型可调用接口。
+
+支撑工具没有 `mcp__solidworks__` 前缀，由同一个策略插件放行：
+
+| 工具 | 用途 |
+| --- | --- |
+| `ask_user_question` | 向用户提出选择题式提问。 |
+| `todo_write` | 维护任务待办清单。 |
+| `skill` | 加载并读取技能。 |
+| `modlens_read_image` | 读取图片证据；仅接受本地图片文件路径，`http://`、`https://`、`ftp://`、`file://` 等 URL 形式一律拒绝。 |
 
 ## 2. `start_job`
 
@@ -38,6 +47,8 @@
 输出包含 `job_id` 和私密 `job_token`。后续深层检查和所有写操作必须携带二者。
 
 任务会记录目标文档标题、路径和类型。用户在 SolidWorks 中切换活动文档后，下一次任务调用会因身份不一致而停止。
+
+`target_document` 留空且当前没有活动文档时，任务处于未绑定状态：它只能通过任务自身的建文档调用绑定，即 `submit_feature_graph` 且 `fresh_document=true`。其余所有依赖文档的调用——`apply_document_edits`、`submit_feature_graph` 且 `fresh_document=false`、`drawing_workflow`、save/export/batch/close，以及执行非建文档待办动作的 `confirm_action`——都会在发起任何执行层调用前失败并返回 `JOB_DOCUMENT_UNBOUND`。此时需要用 `target_document` 重新 `start_job`，或先打开文档再启动新任务。`save_or_export` 的 `close` 且 `close_all=true` 在未绑定任务上允许执行，但不会建立绑定。
 
 ## 3. `inspect_state`
 
@@ -151,6 +162,8 @@ action_id
 action_summary
 ```
 
+`action_summary` 会点名目标文档：优先使用任务锁定的文档路径，其次使用文档标题，再回退到当前活动文档的路径或名称。
+
 正确流程：
 
 1. 使用 `request_confirmation(job_id, job_token, action_id)` 获取新的一次性 token、精确 `confirmation_text` 和精确 `action_summary`。
@@ -192,6 +205,8 @@ action_summary
 | `rolled_back` | Undo 和回读验证成功。 |
 | `rollback_failed` | 无法证明文档已恢复。 |
 | `backup_only` | 只有文件备份，没有完成 Undo 恢复。 |
+
+`error.code` 取值：执行层失败返回 `EXECUTION_LAYER_ERROR`；带 `UPPER_SNAKE` 前缀的 `RuntimeError` 直接返回该前缀（例如 `ACTIVE_DOCUMENT_CHANGED`、`BACKUP_SOURCE_MISSING`、`JOB_DOCUMENT_UNBOUND`）；其余未预期错误返回 `UNEXPECTED_ERROR`。
 
 ## 10. Trust Level
 

@@ -9,7 +9,7 @@ discovered mid-build.
 The runtime reference topic `feature_graph_schema` (read it with
 `inspect_state(scope="reference", reference_topic="feature_graph_schema")`) and
 `cad-planner/contracts/feature-graph.schema.json` are authoritative. This map is
-decision support as of schema 0.7.2 with recipe notes through 0.9.0; re-verify
+decision support as of schema 0.7.4 with recipe notes through 0.9.0; re-verify
 any capability it claims before relying on it. Never invent node types, fields,
 selectors, or enum values not present in the runtime schema.
 
@@ -18,10 +18,10 @@ selectors, or enum values not present in the runtime schema.
 | Drawing construct | Feature Graph expression |
 | --- | --- |
 | Rectangular boss/pad | `box` node, or rectangle sketch + `extrude` boss |
-| Free-form prismatic body | `sketch` (line/arc/circle/ellipse/spline/rectangle primitives, exact coordinates) + `extrude` boss |
+| Free-form prismatic body | `sketch` (line/arc/circle/ellipse/spline/rectangle primitives, exact coordinates; `slot` and `rounded_rect` as one-node convenience contours) + `extrude` boss |
 | Stepped shaft, flange, revolved body | `revolve` of a half-section sketch; `axis` is the axis segment's 2D sketch coordinates, `angle` in radians |
 | Through hole | `hole` node (`ref` = face + position, `through_all` only) or circle sketch + `extrude` cut `through_all` |
-| Blind hole, pocket, slot | circle/closed-contour sketch + `extrude` cut with `end: "blind"` and a depth |
+| Blind hole, pocket, slot | circle/`slot`/closed-contour sketch + `extrude` cut with `end: "blind"` and a depth |
 | Counterbore/countersink | no dedicated node — compose concentric cuts (e.g. large shallow blind cut + small through cut) |
 | Keyway, flat, milled pocket | sketch on face or datum offset + `extrude` cut |
 | Tapered/lofted body | `loft` through >= 2 profile sketches referenced by id (simple blend, no guide curves) |
@@ -52,7 +52,11 @@ plane containment.
   `hint`.
 - Sketches rebuild frozen-coordinate: emit exact segment coordinates in segment
   order and do not add constraints or dimensions. Identical shared endpoints
-  close a contour.
+  close a contour. The compiler welds chain endpoints within 0.0001 m (0.1 mm)
+  onto the first matching anchor and reports the weld count on the sketch's
+  node_log note; an extrude/revolve/sheet_metal/sweep-profile/loft sketch whose
+  contour is still open beyond that weld is rejected at plan time with the
+  exact gap named (rib/bend/sweep-path sketches are open by design).
 - Extrude end conditions are `blind`, `through_all`, `up_to_surface` (needs a
   face anchor point on the terminating face's plane), and `mid_plane`. There is
   no `up_to_next`; a trim against adjacent material needs an explicit depth or

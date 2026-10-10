@@ -9,6 +9,7 @@ from config import (
     HEALTH_ENDPOINT,
     ENSURE_ENDPOINT,
     HTTP_TIMEOUT,
+    TOOL_EXEC_TIMEOUT,
     ENSURE_TIMEOUT,
     EXECUTION_EXE_PATH,
     SERVER_SPAWN_TIMEOUT,
@@ -153,6 +154,10 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     """
     POST /api/tool/execute on the solidworks-execution layer.
 
+    Every execute call runs COM against SolidWorks (sketch entities, rebuild-heavy
+    extrudes/patterns, large analyze payloads), so it uses TOOL_EXEC_TIMEOUT —
+    /health and /state stay on the fast HTTP_TIMEOUT budget.
+
     Returns the parsed JSON response body on HTTP 200.
     Raises ExecutionLayerError on HTTP 400 or unexpected status codes.
     """
@@ -166,15 +171,18 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     _log(f"-> {tool_name} op={operation_id} sv={state_version}")
 
     def _do():
-        with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as client:
+        with httpx.Client(timeout=TOOL_EXEC_TIMEOUT, trust_env=False) as client:
             return client.post(EXECUTE_ENDPOINT, json=payload)
 
     try:
         response = _request_with_autostart(_do, tool_name)
     except httpx.TimeoutException:
-        _log(f"<- {tool_name} TIMEOUT after {HTTP_TIMEOUT}s")
+        _log(f"<- {tool_name} TIMEOUT after {TOOL_EXEC_TIMEOUT}s")
         raise ExecutionLayerError(
-            f"Request to solidworks-execution timed out after {HTTP_TIMEOUT}s."
+            f"Request to solidworks-execution timed out after {TOOL_EXEC_TIMEOUT}s "
+            f"(tool={tool_name}, op={operation_id}). Large sketches and analyze payloads "
+            f"legitimately need longer — raise HTTP_TOOL_TIMEOUT in the adapter .env if "
+            f"this tool is known-good."
         )
 
     if response.status_code == 400:

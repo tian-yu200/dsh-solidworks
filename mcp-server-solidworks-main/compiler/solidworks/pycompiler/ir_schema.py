@@ -21,7 +21,18 @@ graph-level `material` (part graphs only, applied after the last node), edge_fla
 length mode (length XOR frame+profile).
 Anything outside the covered set is rejected here with an explicit 'unsupported' message —
 never silently ignored (recipe.md C5).
+
+Contour closure (v0.7.3) is also plan-time: a sketch consumed by an extrude/revolve/
+sheet_metal base flange/sweep PROFILE/loft profile must CLOSE. The lowering welds chain
+endpoints within CONTOUR_WELD_TOL, so anything still open here is a real coordinate error —
+reported with the exact gap before any execution call, instead of surfacing mid-build as an
+EXTRUSION_FAILED with rollback (the 阀体 2026-08-17 failure class). rib/sketched_bend and
+sweep-path sketches are open by design and never checked.
 """
+
+import math
+
+from . import contours
 
 DATUMS = frozenset(("front", "top", "right"))
 # Assembly sub-vocabulary (v0.6.0 — Phase B, ADR-047): component + mate. An assembly graph is
@@ -40,7 +51,8 @@ NODE_TYPES = frozenset(("box", "sketch", "extrude", "revolve", "sweep", "rib", "
                         "chamfer", "loft", "linear_pattern", "circular_pattern", "sheet_metal",
                         "sketched_bend", "mirror", "edge_flange")) \
     | ASSEMBLY_NODE_TYPES
-PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spline"))
+PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spline",
+                           "slot", "rounded_rect"))
 # Optional boolean flags any profile primitive may carry (mirrors analyze_model's per-segment flag).
 PROFILE_FLAGS = frozenset(("construction",))
 FACE_SELECTORS = frozenset(("top",))          # v0.5: only 'top'
@@ -64,11 +76,23 @@ EDGE_FLANGE_POSITIONS = BEND_POSITIONS | frozenset(("bend_sharp",))
 
 
 def _is_pos_number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    # isfinite as well as > 0: +inf satisfies `v > 0`, so it must be excluded explicitly.
+    # Only FLOATS can be non-finite: an int is always finite, and math.isfinite() on an int
+    # beyond float range (10**400 — json.loads happily produces those) raises OverflowError
+    # instead of answering, so a plain int must never be handed to it.
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and (not isinstance(v, float) or math.isfinite(v)) and v > 0)
 
 
 def _is_number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    # isfinite rejects NaN and +/-Inf: JSON allows them only as non-standard literals (Python's
+    # json.loads ACCEPTS NaN/Infinity/-Infinity by default), and an infinite coordinate would be
+    # emitted verbatim into the execution layer's params. NaN is worse than inf: every comparison
+    # against it is False, so a NaN endpoint silently counts as "paired" in the closure walk.
+    # Ints are always finite and NEVER go through math.isfinite (a huge int raises
+    # OverflowError there) — only floats can be NaN/Inf.
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and (not isinstance(v, float) or math.isfinite(v)))
 
 
 def _is_point3(v):
@@ -184,10 +208,10 @@ def validate(graph):
             elif seen.get(tgt) not in BODY_PRODUCERS:
                 errors.append("%s: ref.node_face.node '%s' must reference an earlier box/extrude node." % (label, tgt))
             if nf.get("selector") not in FACE_SELECTORS:
-                errors.append("%s: ref.node_face.selector %r unsupported in v0.5 (only %s)."
+                errors.append("%s: ref.node_face.selector %r unsupported (only %s)."
                               % (label, nf.get("selector"), sorted(FACE_SELECTORS)))
             if ref.get("position") not in POSITIONS:
-                errors.append("%s: ref.position %r unsupported in v0.5 (only %s)."
+                errors.append("%s: ref.position %r unsupported (only %s)."
                               % (label, ref.get("position"), sorted(POSITIONS)))
             if not _is_pos_number(node.get("diameter")):
                 errors.append("%s: 'diameter' must be a positive number (meters)." % label)
@@ -549,6 +573,97 @@ def validate(graph):
         if nid:
             seen[nid] = ntype
 
+    errors.extend(_check_contour_closure(nodes))
+    return errors
+
+
+# Consumers that need the ACTIVE sketch's contour to CLOSE (the sketch must immediately
+# precede extrude/revolve/sheet_metal/sweep-profile; loft profiles are referenced by id).
+# rib and sketched_bend consume OPEN profiles by design; a sweep's `path` sketch is an
+# open chain by design — none of them impose closure.
+_CLOSURE_CONSUMERS = frozenset(("extrude", "revolve", "sheet_metal", "sweep"))
+
+
+def _check_contour_closure(nodes):
+    """Plan-time contour closure for sketches whose consumer needs a closed region.
+
+    Zero execution calls. Each still-open endpoint is reported with the exact gap and
+    its nearest neighbour, so the planner fixes coordinates instead of discovering the
+    failure as a mid-build EXTRUSION_FAILED + rollback.
+    """
+    consumer_of = {}  # sketch node id -> "extrude 'e1'"-style consumer label
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type")
+        nid = node.get("id")
+        if ntype in _CLOSURE_CONSUMERS:
+            sk = node.get("sketch")
+            if isinstance(sk, str):
+                consumer_of.setdefault(sk, []).append("%s '%s'" % (ntype, nid))
+        elif ntype == "loft":
+            for pid in node.get("profiles") or ():
+                if isinstance(pid, str):
+                    consumer_of.setdefault(pid, []).append("loft '%s'" % nid)
+    errors = []
+    for pos, node in enumerate(nodes):
+        if not isinstance(node, dict) or node.get("type") != "sketch":
+            continue
+        nid = node.get("id")
+        if nid not in consumer_of:
+            continue
+        key = nid
+        label = "sketch '%s'" % nid
+        profile = node.get("profile")
+        if not isinstance(profile, list):
+            continue  # shape errors already reported in the per-node pass
+        consumers = "/".join(consumer_of[key])
+        # P1-1: the weld tolerance can collapse a genuinely thin feature (or a stray spike)
+        # to a zero-length entity, which SolidWorks cannot build. Report it here rather than
+        # letting the build fail mid-flight. Checked BEFORE the open-gap walk because a
+        # collapsed contour's endpoints all coincide, so it would otherwise look closed.
+        collapsed = contours.collapsed_entities(profile)
+        if collapsed:
+            parts = ["profile[%d] (%s), span %.6g m" % (c["prim"], c["kind"], c["span"])
+                     for c in collapsed[:4]]
+            if len(collapsed) > 4:
+                parts.append("+%d more" % (len(collapsed) - 4))
+            errors.append(
+                "nodes[%d] (%s): %s — the contour weld (gaps <= %g m) collapsed the entity to "
+                "a zero-length segment. Move the endpoints apart or widen the feature."
+                % (pos, label, "; ".join(parts), contours.CONTOUR_WELD_TOL))
+            continue
+        gaps = contours.open_gaps(profile)
+        if gaps:
+            parts = []
+            for g in gaps[:4]:
+                if g["nearest_prim"] is not None:
+                    nearest = (" — no partner within %g m (nearest: profile[%d] (%s) %s, "
+                               "%.6g m away)" % (contours.CONTOUR_WELD_TOL, g["nearest_prim"],
+                                                 g["nearest_kind"], g["nearest_which"],
+                                                 g["nearest_gap"]))
+                else:
+                    nearest = " — no other chain endpoint in the profile"
+                parts.append("profile[%d] (%s) %s at (%.6g, %.6g)%s"
+                             % (g["prim"], g["kind"], g["endpoint"], g["x"], g["y"], nearest))
+            if len(gaps) > 4:
+                parts.append("+%d more open endpoint(s)" % (len(gaps) - 4))
+            errors.append(
+                "nodes[%d] (%s): open contour for %s — %s. Chain segments close ONLY "
+                "through exact shared endpoint coordinates (the compiler welds gaps <= %g m); "
+                "correct the endpoints, close the loop, or mark non-contour segments "
+                "construction:true."
+                % (pos, label, consumers, "; ".join(parts), contours.CONTOUR_WELD_TOL))
+        elif contours.collapsed_profile(profile):
+            # Closed (every endpoint paired) yet the outline has no enclosed area: the weld
+            # merged a thin feature shut. Only meaningful once closure holds.
+            ext = contours.profile_extent(profile)
+            errors.append(
+                "nodes[%d] (%s): closed contour for %s has collapsed to a line/point "
+                "(bounding span %.6g x %.6g m <= weld tolerance %g m) — no enclosed area "
+                "remains. Widen the profile."
+                % (pos, label, consumers, ext[2] - ext[0], ext[3] - ext[1],
+                   contours.CONTOUR_WELD_TOL))
     return errors
 
 
@@ -616,7 +731,7 @@ def _check_profile_prim(prim, label, errors):
         return
     kind = prim.get("kind")
     if kind not in PROFILE_KINDS:
-        errors.append("%s.kind '%s' unsupported in v0.5 (only %s)." % (label, kind, sorted(PROFILE_KINDS)))
+        errors.append("%s.kind '%s' unsupported (only %s)." % (label, kind, sorted(PROFILE_KINDS)))
         return
     for flag in sorted(PROFILE_FLAGS):
         if prim.get(flag) is not None and not isinstance(prim.get(flag), bool):
@@ -656,3 +771,33 @@ def _check_profile_prim(prim, label, errors):
                 or not all(_is_number(v) for v in pts)):
             errors.append("%s: spline 'points' must be a FLAT number list [x1, y1, x2, y2, ...] "
                           "with >= 2 points (even count)." % label)
+    elif kind == "slot":
+        # v0.7.4 convenience primitive (expanded to exact line/arc entities at lowering):
+        # overall length > width, optional cx/cy centre like a circle. length == width is a
+        # circle — model it as one.
+        if not _is_pos_number(prim.get("length")):
+            errors.append("%s: slot 'length' (overall) must be a positive number." % label)
+        if not _is_pos_number(prim.get("width")):
+            errors.append("%s: slot 'width' must be a positive number." % label)
+        if (_is_pos_number(prim.get("length")) and _is_pos_number(prim.get("width"))
+                and prim["length"] <= prim["width"]):
+            errors.append("%s: slot 'length' must be > 'width' (length == width is a circle)." % label)
+        for k in ("cx", "cy"):
+            if prim.get(k) is not None and not _is_number(prim.get(k)):
+                errors.append("%s: slot '%s' must be a number." % (label, k))
+    elif kind == "rounded_rect":
+        # v0.7.4 convenience primitive: centred like rectangle, corner radius must leave all
+        # four edges non-degenerate.
+        for k in ("width", "height"):
+            if not _is_pos_number(prim.get(k)):
+                errors.append("%s: rounded_rect '%s' must be a positive number." % (label, k))
+        if not _is_pos_number(prim.get("radius")):
+            errors.append("%s: rounded_rect 'radius' must be a positive number." % label)
+        if (_is_pos_number(prim.get("width")) and _is_pos_number(prim.get("height"))
+                and _is_pos_number(prim.get("radius"))
+                and prim["radius"] * 2 >= min(prim["width"], prim["height"])):
+            errors.append("%s: rounded_rect 'radius' must be < min(width, height)/2 — at the "
+                          "limit the straight edges degenerate (use a slot or circle)." % label)
+        for k in ("cx", "cy"):
+            if prim.get(k) is not None and not _is_number(prim.get(k)):
+                errors.append("%s: rounded_rect '%s' must be a number." % (label, k))

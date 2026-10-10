@@ -356,6 +356,68 @@ class CadOrchestrator:
             **self._job_metadata(job),
         )
 
+    def _post_verify_failure_response(
+        self,
+        job,
+        *,
+        kind,
+        risk,
+        error,
+        previous_identity,
+        newly_created,
+        completed_steps,
+        partial_state,
+        backup_path=None,
+    ):
+        """Recover a transaction whose post-verification RAISED (transport error, timeout).
+
+        Without this the exception escaped with the undo scope still open, the job metadata
+        untouched (verification_status not_run, empty failure_history) and no typed error.
+        Mirrors the try/except that _execute_feature_graph already had around _post_verify.
+        """
+        if isinstance(error, ExecutionLayerError):
+            typed_error = {
+                "code": "EXECUTION_LAYER_ERROR",
+                "message": str(error),
+            }
+        else:
+            typed_error = {
+                "code": "POST_VERIFICATION_ERROR",
+                "message": f"{type(error).__name__}: {error}",
+            }
+
+        recovery_status, recovered_state, recovery = self._recover_transaction(
+            job,
+            kind=kind,
+            previous_identity=previous_identity,
+            newly_created=newly_created,
+        )
+        verification = {
+            "state": recovery.get("verification"),
+            "deep_checks": [],
+            "all_completed": False,
+            "available": (recovery.get("verification") or {}).get("status")
+            == "COMPLETED",
+            "post_verify_error": typed_error,
+        }
+        return self._transaction_failure_response(
+            job,
+            kind=kind,
+            phase="verification",
+            risk=risk,
+            error=typed_error,
+            verification=verification,
+            recovery_status=recovery_status,
+            recovery_event=recovery,
+            completed_steps=completed_steps,
+            partial_state={
+                "cad": recovered_state,
+                **partial_state,
+            },
+            target_state=recovered_state,
+            backup_path=backup_path,
+        )
+
     def status(self):
         try:
             health = backend.health()
@@ -564,6 +626,40 @@ class CadOrchestrator:
             )
         return job
 
+    @staticmethod
+    def _job_is_unbound(job):
+        """True when the job was started without a document and has not created one yet."""
+        expected = job.get("expected_document") or {}
+        return not (expected.get("path") or expected.get("title"))
+
+    def _require_bound_job(self, job, operation):
+        """Refuse an operation that would act on "whatever document is active".
+
+        A job started with no active document has no document identity to verify against, so
+        its writes used to land on any document the user happened to have open (see the
+        ACTIVE_DOCUMENT_CHANGED guard in _verify_job_document, which is skipped for an empty
+        expected_document). Binding now happens only through the job's own document-creating
+        operations.
+        """
+        if self._job_is_unbound(job):
+            raise RuntimeError(
+                "JOB_DOCUMENT_UNBOUND: this CAD job is not bound to a document yet, "
+                f"so {operation} is refused. Start a new job with target_document (or "
+                "open the document first and start a new job), then retry."
+            )
+
+    @staticmethod
+    def _action_creates_document(kind, payload):
+        """True for pending actions that create their own document (the only adoption path)."""
+        if kind == "feature_graph":
+            return bool(payload.get("fresh_document", True))
+        if kind == "drawing_workflow":
+            return True
+        # close_all is deliberately document-agnostic.
+        if kind == "save_or_export":
+            return bool(payload.get("operation") == "close" and payload.get("close_all"))
+        return False
+
     def _verify_job_document(self, job, allow_no_document=False):
         response = backend.verify_state()
         if response.get("status") != "COMPLETED":
@@ -589,7 +685,10 @@ class CadOrchestrator:
             char if char.isalnum() or char in "._-" else "_"
             for char in (value or "unsaved")
         )
-        return text[:120] or "document"
+        # A name made only of dots ("..", ".") would be a traversal / self-reference as a
+        # path segment, so strip the leading dots and fall back to a literal word.
+        text = text.lstrip(".")[:120]
+        return text or "document"
 
     def _backup_once(self, job, state):
         source = state.get("activeDocumentPath") or ""
@@ -636,6 +735,44 @@ class CadOrchestrator:
         job_store.save(job)
         return str(destination)
 
+    @staticmethod
+    def _document_label(job):
+        """Human-readable name of the document a pending action will act on."""
+        expected = job.get("expected_document") or {}
+        state = job.get("last_state") or {}
+        return (
+            expected.get("path")
+            or expected.get("title")
+            or state.get("activeDocumentPath")
+            or state.get("activeDocument")
+            or "unknown document"
+        )
+
+    def _edits_summary(self, job, edits):
+        return (
+            f"Apply edits to '{self._document_label(job)}': "
+            + ", ".join(
+                f"{item['tool']}({json.dumps(item['params'], ensure_ascii=False)})"
+                for item in edits
+            )
+        )
+
+    def _feature_graph_summary(self, job, graph, fresh_document):
+        return (
+            f"Build {len(graph.get('nodes') or [])} Feature Graph nodes in "
+            + (
+                "a new document."
+                if fresh_document
+                else f"'{self._document_label(job)}' (active document)."
+            )
+        )
+
+    def _drawing_summary(self, job, count):
+        return (
+            f"Create a drawing from '{self._document_label(job)}' and execute "
+            f"{count} drawing steps."
+        )
+
     def _queue_confirmation(self, job, kind, payload, risk, summary):
         action_id = str(uuid.uuid4())
         confirmation_text = f"CONFIRM {action_id}"
@@ -676,27 +813,36 @@ class CadOrchestrator:
         )
         normalized = validate_save_or_export_payload(payload, state)
         operation = normalized["operation"]
+        target_document = self._document_label(job)
         risk = "write"
         if operation == "save":
             target = normalized["file_path"] or state.get(
                 "activeDocumentPath", ""
             )
             risk = "overwrite" if output_exists(target) else "write"
-            summary = f"Save the active document to '{target}'."
+            summary = (
+                f"Save the active document '{target_document}' to '{target}'."
+            )
         elif operation == "export":
             target = expected_output_paths(normalized, state)[0]
             risk = "overwrite" if output_exists(target) else "write"
             summary = (
-                f"Export the active document as {normalized['format']} "
-                f"to '{target}'."
+                f"Export the active document '{target_document}' as "
+                f"{normalized['format']} to '{target}'."
             )
         elif operation == "batch_export":
-            risk = "batch"
+            targets = expected_output_paths(normalized, state)
+            existing = [path for path in targets if output_exists(path)]
+            risk = "overwrite" if existing else "batch"
             summary = (
-                f"Batch export the active document from base path "
+                f"Batch export the active document '{target_document}' from base path "
                 f"'{normalized['file_path']}' using formats "
                 f"{normalized['formats_json']}."
             )
+            if existing:
+                summary += " Existing files will be overwritten: " + ", ".join(
+                    f"'{path}'" for path in existing
+                ) + "."
         else:
             dirty_discard = (
                 bool(state.get("isDirty"))
@@ -710,7 +856,7 @@ class CadOrchestrator:
             ):
                 risk = "overwrite"
             summary = (
-                f"Close {'all documents' if normalized['close_all'] else 'the active document'}; "
+                f"Close {'all documents' if normalized['close_all'] else f'the active document {target_document!r}'}; "
                 f"save_before_close={normalized['save_before_close']}."
             )
         return normalized, state, risk, summary
@@ -725,24 +871,20 @@ class CadOrchestrator:
                 "fresh_document": bool(payload.get("fresh_document", True)),
             }
             risk = graph_risk(graph)
-            summary = (
-                f"Build {len(graph.get('nodes') or [])} Feature Graph nodes "
-                f"({'new document' if normalized['fresh_document'] else 'active document'})."
+            summary = self._feature_graph_summary(
+                job, graph, normalized["fresh_document"]
             )
             return normalized, risk, summary
         if kind == "document_edits":
             edits = validate_edits(payload.get("operations"))
             risk = edits_risk(edits)
-            summary = "Apply edits: " + ", ".join(
-                f"{item['tool']}({json.dumps(item['params'], ensure_ascii=False)})"
-                for item in edits
-            )
+            summary = self._edits_summary(job, edits)
             return {"operations": edits}, risk, summary
         if kind == "drawing_workflow":
             normalized = validate_drawing_workflow(payload)
             count = self._drawing_step_count(normalized)
             risk = "batch" if count > 7 else "write"
-            summary = f"Create a drawing and execute {count} drawing steps."
+            summary = self._drawing_summary(job, count)
             return normalized, risk, summary
         if kind == "save_or_export":
             normalized, _, risk, summary = self._assess_save_or_export(
@@ -820,13 +962,27 @@ class CadOrchestrator:
                     f"user_confirmation must exactly equal: {action.get('confirmation_text')}"
                 )
             if not isinstance(action_summary, str) or not hmac.compare_digest(
-                action_summary, action.get("summary", "")
+                action_summary.encode("utf-8"),
+                action.get("summary", "").encode("utf-8"),
             ):
                 raise PermissionError(
                     "action_summary must exactly equal the pending action summary"
                 )
             if payload_hash(action.get("payload")) != action.get("payload_hash"):
                 raise PermissionError("Pending action parameters changed after approval")
+            # Re-check the binding at approval time: the job may still be unbound (or may have
+            # been left unbound by a failed create), in which case executing the action would
+            # act on whatever document the user has open. Only the job's own document-creating
+            # actions may bind it.
+            if self._job_is_unbound(job) and not self._action_creates_document(
+                action["kind"], action["payload"]
+            ):
+                raise RuntimeError(
+                    "JOB_DOCUMENT_UNBOUND: this CAD job is not bound to a document, "
+                    "so the approved action is refused. Start a new job with "
+                    "target_document (or open the document first and start a new job), "
+                    "then retry."
+                )
 
             kind = action["kind"]
             payload, current_risk, current_summary = self._reassess_risk(
@@ -876,14 +1032,17 @@ class CadOrchestrator:
         risk = graph_risk(graph)
         with self._write_lock:
             job = self._load_job(job_id, job_token)
+            if not payload["fresh_document"]:
+                # Building into the ACTIVE document needs a known target; a fresh_document
+                # graph creates its own document, which is how an unbound job gets bound.
+                self._require_bound_job(job, "submit_feature_graph with fresh_document=false")
             if risk == "batch":
                 return self._queue_confirmation(
                     job,
                     "feature_graph",
                     payload,
                     risk,
-                    f"Build {len(graph.get('nodes') or [])} Feature Graph nodes "
-                    f"({'new document' if fresh_document else 'active document'}).",
+                    self._feature_graph_summary(job, graph, fresh_document),
                 )
             return self._execute_feature_graph(job, payload, risk)
 
@@ -1174,17 +1333,14 @@ class CadOrchestrator:
         risk = edits_risk(edits)
         with self._write_lock:
             job = self._load_job(job_id, job_token)
+            self._require_bound_job(job, "apply_document_edits")
             if risk in ("destructive", "batch"):
                 return self._queue_confirmation(
                     job,
                     "document_edits",
                     payload,
                     risk,
-                    "Apply edits: "
-                    + ", ".join(
-                        f"{item['tool']}({json.dumps(item['params'], ensure_ascii=False)})"
-                        for item in edits
-                    ),
+                    self._edits_summary(job, edits),
                 )
             return self._execute_document_edits(job, payload, risk)
 
@@ -1225,7 +1381,6 @@ class CadOrchestrator:
             if response.get("status") != "COMPLETED":
                 failed_operation = edit
                 break
-            completed.append(edit["tool"])
             verify_response = backend.verify_state()
             verified_state = (
                 cad_state(verify_response)
@@ -1251,6 +1406,7 @@ class CadOrchestrator:
             job["last_state"] = verified_state
             job_store.save(job)
             step_states.append(verified_state)
+            completed.append(edit["tool"])
 
         if failed_operation is not None:
             recovery_status, state, recovery = self._recover_transaction(
@@ -1285,7 +1441,20 @@ class CadOrchestrator:
                 backup_path=backup_path,
             )
 
-        state, verification = self._post_verify(job)
+        try:
+            state, verification = self._post_verify(job)
+        except Exception as exc:  # noqa: BLE001
+            return self._post_verify_failure_response(
+                job,
+                kind="document_edits",
+                risk=risk,
+                error=exc,
+                previous_identity=self._identity(before),
+                newly_created=False,
+                completed_steps=completed,
+                partial_state={"step_states": step_states},
+                backup_path=backup_path,
+            )
         if not verification.get("all_completed"):
             recovery_status, recovered_state, recovery = (
                 self._recover_transaction(
@@ -1388,14 +1557,14 @@ class CadOrchestrator:
         risk = "batch" if self._drawing_step_count(payload) > 7 else "write"
         with self._write_lock:
             job = self._load_job(job_id, job_token)
+            self._require_bound_job(job, "drawing_workflow")
             if risk == "batch":
                 return self._queue_confirmation(
                     job,
                     "drawing_workflow",
                     payload,
                     risk,
-                    f"Create a drawing and execute {self._drawing_step_count(payload)} "
-                    "drawing steps.",
+                    self._drawing_summary(job, self._drawing_step_count(payload)),
                 )
             return self._execute_drawing_workflow(job, payload, risk)
 
@@ -1843,7 +2012,19 @@ class CadOrchestrator:
                 target_state=recovered_state,
             )
 
-        state, verification = self._post_verify(job)
+        try:
+            state, verification = self._post_verify(job)
+        except Exception as exc:  # noqa: BLE001
+            return self._post_verify_failure_response(
+                job,
+                kind="drawing_workflow",
+                risk=risk,
+                error=exc,
+                previous_identity=previous_identity,
+                newly_created=True,
+                completed_steps=completed,
+                partial_state={"step_states": step_states},
+            )
         if not verification.get("all_completed"):
             recovery_status, recovered_state, recovery = (
                 self._recover_transaction(
@@ -1939,6 +2120,10 @@ class CadOrchestrator:
         }
         with self._write_lock:
             job = self._load_job(job_id, job_token)
+            # close_all intentionally targets whatever is open, so it is the one operation
+            # allowed on an unbound job; every other operation needs a bound document.
+            if not (operation == "close" and close_all):
+                self._require_bound_job(job, f"save_or_export({operation})")
             payload, _, risk, summary = self._assess_save_or_export(
                 job, payload
             )
@@ -2058,9 +2243,59 @@ class CadOrchestrator:
                 "closed_document": self._identity(state),
             }
         else:
-            after, verification = self._post_verify(
-                job, update_identity=(operation == "save")
-            )
+            try:
+                after, verification = self._post_verify(
+                    job, update_identity=(operation == "save")
+                )
+            except Exception as exc:  # noqa: BLE001
+                # save/export is not wrapped in an undo scope, so there is no transaction to
+                # roll back — but the failure must still be recorded and typed instead of
+                # escaping with the job metadata untouched.
+                if isinstance(exc, ExecutionLayerError):
+                    error = {
+                        "code": "EXECUTION_LAYER_ERROR",
+                        "message": str(exc),
+                    }
+                else:
+                    error = {
+                        "code": "POST_VERIFICATION_ERROR",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    }
+                self._record_failure(
+                    job,
+                    kind="save_or_export",
+                    phase="verification",
+                    error=error,
+                    execution_status="completed",
+                    verification_status_value="failed",
+                    recovery_status=(
+                        "backup_only" if backup_path else "not_needed"
+                    ),
+                )
+                return envelope(
+                    status="verification_failed",
+                    risk=risk,
+                    job_id=job["job_id"],
+                    target_document=self._target(state),
+                    backup_path=backup_path,
+                    completed_steps=[operation],
+                    partial_state=state,
+                    verification={
+                        "state": {},
+                        "deep_checks": [],
+                        "all_completed": False,
+                        "available": False,
+                        "output_files": output_checks,
+                        "all_outputs_valid": not [
+                            path
+                            for path, check in output_checks.items()
+                            if not check["valid"]
+                        ],
+                        "post_verify_error": error,
+                    },
+                    error=error,
+                    **self._job_metadata(job),
+                )
             verification["output_files"] = output_checks
 
         invalid_outputs = [
@@ -2147,7 +2382,10 @@ class CadOrchestrator:
         state = cad_state(response)
         identity_match = True
         identity_error = None
-        if update_identity or not job.get("expected_document"):
+        if update_identity:
+            # Binding is explicit: only an operation that creates its own document passes
+            # update_identity=True. An empty expected_document no longer auto-adopts whatever
+            # document happens to be active (see _require_bound_job).
             job["expected_document"] = self._identity(state)
         elif not same_document(job["expected_document"], state):
             identity_match = False
