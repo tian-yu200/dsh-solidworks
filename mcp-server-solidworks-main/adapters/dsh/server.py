@@ -22,6 +22,14 @@ def _error_code_from(exc):
 
 
 def _json_result(func):
+    """Serialize a tool result as COMPACT SINGLE-LINE JSON.
+
+    The host elides a long tool result down to head + marker + tail, and the rule is
+    budgeted in LINES as well as characters — so `indent=2` (which multiplied the line
+    count ~3x) was itself part of the bug. One line of compact JSON cannot be elided for
+    its length, and `ensure_ascii=False` keeps the Chinese text in the CAD payloads
+    readable instead of escaping it into a much longer string.
+    """
     try:
         result = func()
     except json.JSONDecodeError as exc:
@@ -64,7 +72,7 @@ def _json_result(func):
                 "message": f"{type(exc).__name__}: {exc}",
             },
         }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
 @mcp.tool(structured_output=False)
@@ -114,15 +122,28 @@ def inspect_state(
         "coverage",
         "feature_graph_schema",
     ] = "contract",
+    reference_offset: int = 0,
+    reference_limit: int = 0,
 ) -> str:
     """Read readiness, locked document state, constrained CAD analysis, or approved references.
 
-    Use scope=reference for recipe/schema content. Deep document scopes require job credentials.
+    Use scope=reference for recipe/schema content; it is returned ONE PAGE AT A TIME so the
+    result always survives the host's tool-result elision rule. `reference_offset` is the
+    0-based first line of the page and `reference_limit` an optional smaller page size (0 =
+    defaults; a larger value is clamped). The page reports total_lines/total_chars, has_more
+    and next_offset, and for feature_graph_schema an index of its sections and node kinds.
+    Deep document scopes require job credentials.
     Assembly faces/edges additionally require component.
     """
     return _json_result(
         lambda: orchestrator.inspect_state(
-            job_id, job_token, scope, component, reference_topic
+            job_id,
+            job_token,
+            scope,
+            component,
+            reference_topic,
+            reference_offset or None,
+            reference_limit or None,
         )
     )
 

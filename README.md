@@ -69,7 +69,7 @@ DeepSeek Harness
 ## 工作流
 
 1. 使用 `inspect_state(scope="state")` 检查 SolidWorks 与活动文档。
-2. 使用 `inspect_state(scope="reference")` 读取本任务需要的 recipe 或 Feature Graph schema。
+2. 使用 `inspect_state(scope="reference")` 读取本任务需要的 recipe 或 Feature Graph schema。大参考按页返回（每页至多 40 行、约 4000 字符；`reference_limit` 传更小值有效，更大值被钳制，`0` 表示默认），用 `reference_offset`/`reference_limit` 翻页并跟随 `page.has_more`/`page.next_offset`；`feature_graph_schema` 的 `page.index.feature_types` 列出节点类型，`page.index.sections[].line` 可直接跳转到某节。
 3. 使用 `start_job` 获取 `job_id` 和私密 `job_token`。
 4. 根据任务调用 `submit_feature_graph`、`apply_document_edits` 或 `drawing_workflow`。
 5. 收到 `pending_confirmation` 时调用 `request_confirmation`，向用户展示精确 `action_summary`（其中会点名目标文档的路径或标题），等待新消息明确批准后再调用 `confirm_action`。

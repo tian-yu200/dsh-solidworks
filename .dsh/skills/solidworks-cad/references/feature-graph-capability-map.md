@@ -1,13 +1,16 @@
 # Feature Graph Capability Map
 
 Use this reference when planning any model that will be built with
-`submit_feature_graph`, especially while writing PLAN.md modeling todos. It maps
+`submit_feature_graph`, especially while writing inline plan modeling todos. It maps
 common part-drawing constructs to the Feature Graph vocabulary and records what
 the vocabulary cannot express, so gaps are declared in the plan instead of
 discovered mid-build.
 
-The runtime reference topic `feature_graph_schema` (read it with
-`inspect_state(scope="reference", reference_topic="feature_graph_schema")`) and
+The runtime reference topic `feature_graph_schema` (read it page by page with
+`inspect_state(scope="reference", reference_topic="feature_graph_schema")`,
+following `page.next_offset` while `page.has_more` is true; a smaller
+`reference_limit` may be requested, larger is clamped; `page.index.feature_types`
+lists the node kinds) and
 `cad-planner/contracts/feature-graph.schema.json` are authoritative. This map is
 decision support as of schema 0.7.4 with recipe notes through 0.9.0; re-verify
 any capability it claims before relying on it. Never invent node types, fields,
@@ -64,7 +67,7 @@ plane containment.
 
 ## Not Expressible — Declare A Gap
 
-Record `CAPABILITY_GAP: <construct>` in PLAN.md for any of these when the
+Record `CAPABILITY_GAP: <construct>` in the inline plan for any of these when the
 evidence requires them. Do not emulate them with invented node types:
 
 - Physical helical threads and thread-specific geometry (no helix/thread
@@ -89,7 +92,7 @@ evidence requires them. Do not emulate them with invented node types:
 1. Write the todo against the nearest expressible envelope (for a threaded
    hole: the tap-drill or minor-diameter blind cut) or leave the feature out
    entirely — never approximate with wrong geometry presented as correct.
-2. Add `CAPABILITY_GAP: <designation/feature>` to PLAN.md, naming what the
+2. Add `CAPABILITY_GAP: <designation/feature>` to the plan, naming what the
    final model will lack (thread helix, cosmetic thread, tolerance-driven
    geometry).
 3. If the omission changes topology, handedness, or fitness for the stated

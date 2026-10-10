@@ -31,7 +31,7 @@ from policy import (
     validate_edits,
     validate_save_or_export_payload,
 )
-from references import read_reference
+from references import page_reference, read_reference
 from settings import BACKUP_ROOT
 
 
@@ -442,11 +442,21 @@ class CadOrchestrator:
             verification={"health": health, "state_error": state_error},
         )
 
-    def reference(self, topic):
-        value = read_reference(topic)
+    def reference(self, topic, offset=None, limit=None):
+        """One page of `topic` (defaults keep every page under the host's elision budget).
+
+        Large references are read in pieces: the page reports its own size, whether more
+        remains and the next offset, and a JSON reference also carries a section index so
+        the caller can jump straight to the part it needs.
+        """
+        page = page_reference(topic, offset, limit)
         return envelope(
             status="completed",
-            verification={"topic": topic, "content": value},
+            verification={
+                "topic": topic,
+                "content": page["content"],
+                "page": page["page"],
+            },
         )
 
     def inspect_state(
@@ -456,9 +466,11 @@ class CadOrchestrator:
         scope="state",
         component="",
         reference_topic="contract",
+        reference_offset=None,
+        reference_limit=None,
     ):
         if scope == "reference":
-            return self.reference(reference_topic)
+            return self.reference(reference_topic, reference_offset, reference_limit)
         if bool(job_id) != bool(job_token):
             raise ValueError(
                 "job_id and job_token must be supplied together"
@@ -600,13 +612,28 @@ class CadOrchestrator:
             )
             job["last_state"] = state
             job_store.save(job)
+            # The result must stay SMALL: the host elides a long tool result down to its
+            # head + a marker + its tail, which used to bury `job_token` in the removed
+            # middle so the model never saw it and every later call failed
+            # PERMISSION_DENIED. The bulky readiness/partial_state detail now lives
+            # behind inspect_state (scope=state / scope=geometry); what stays here is the
+            # identity the caller must echo back, the token, and the state version.
             return envelope(
                 status="completed",
                 job_id=job_id,
                 target_document=self._target(state),
                 completed_steps=completed,
-                partial_state=state,
-                verification={"readiness": ready},
+                partial_state={
+                    "stateVersion": state.get("stateVersion"),
+                    "activeDocument": state.get("activeDocument"),
+                    "activeDocumentPath": state.get("activeDocumentPath"),
+                    "documentType": state.get("documentType"),
+                },
+                verification={
+                    "comAttached": ready.get("comAttached"),
+                    "stateVersion": state.get("stateVersion"),
+                    "detail": "inspect_state",
+                },
                 job_token=token,
                 instruction=(
                     "Keep job_token private and pass it to every later call for this CAD job."

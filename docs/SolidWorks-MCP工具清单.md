@@ -81,6 +81,8 @@
 - `coverage`
 - `feature_graph_schema`
 
+参考内容按页返回：每次调用在 `verification` 内给出 `topic`、`content` 与 `page`（`offset`、`limit`、`returned_lines`、`total_lines`、`total_chars`、`has_more`、`next_offset`、`line_truncated`）。`reference_offset`/`reference_limit` 默认 `0`（使用默认值），可请求更小的页，更大的值被钳制；每页至多 40 行、约 4000 字符。`page.has_more` 为 true 时用 `page.next_offset` 继续读取，或用 `reference_offset` 跳到 `page.index.sections[].line`。`feature_graph_schema` 的 `page.index` 还包含 `sections`（`section`、`line`、`entries`）与 `feature_types`（节点类型列表）。
+
 ## 4. `submit_feature_graph`
 
 用于新建零件和装配体。

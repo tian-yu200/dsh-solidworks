@@ -1,6 +1,6 @@
 ---
 name: solidworks-cad
-description: Use for SolidWorks inspection, creation, editing, drawing reconstruction, saving, exporting, and validation through the dedicated nine-tool MCP workflow, including pictorial, sectional, three-view, threaded-fastener, and part-drawing reasoning, PLAN.md checkpoints, and directional verification.
+description: Use for SolidWorks inspection, creation, editing, drawing reconstruction, saving, exporting, and validation through the dedicated nine-tool MCP workflow, including pictorial, sectional, three-view, threaded-fastener, and part-drawing reasoning, inline plan checkpoints, and directional verification.
 ---
 
 # SolidWorks CAD
@@ -10,14 +10,17 @@ Approved support tools for workflow assistance: `ask_user_question`, `todo_write
 `skill`, and `modlens_read_image` (local image file paths only; URL forms such as
 `http://` are rejected).
 The runtime tool schemas and returned payloads are the authoritative contract.
-Parse each tool's JSON string before acting on its envelope status.
+Parse each tool's JSON string before acting on its envelope status. Every tool
+result is compact single-line JSON. `start_job` returns `job_id` and
+`job_token` first; bulky readiness and state detail is read with
+`inspect_state(scope="state")`.
 
 ## Tool Boundary
 
 | Tool | Use |
 | --- | --- |
 | `start_job` | Connect to SolidWorks, optionally open a target document, and return `job_id` plus private `job_token`. |
-| `inspect_state` | Read readiness, locked document state, constrained CAD analysis, or approved recipe/schema content. |
+| `inspect_state` | Read readiness, locked document state, constrained CAD analysis, or approved recipe/schema content; references return one page at a time (`reference_offset`/`reference_limit`). |
 | `submit_feature_graph` | Build a new part or assembly from one complete Feature Graph. |
 | `apply_document_edits` | Apply allowlisted parametric edits to the locked active document. |
 | `drawing_workflow` | Create a production drawing and requested views, annotations, tables, or checks. |
@@ -36,9 +39,11 @@ requested operation. If the nine-tool surface is unavailable, report
 
 1. Call `inspect_state(scope="state")` to check readiness and current document.
 2. Read only the references needed for the task with
-   `inspect_state(scope="reference", reference_topic=...)`.
+   `inspect_state(scope="reference", reference_topic=...)`; a large reference
+   arrives one page at a time, so pass `reference_offset`/`reference_limit`
+   instead of repeating an identical call.
 3. For image or drawing reconstruction, complete the bounded workflow below,
-   write `PLAN.md`, and obtain approval before mutation.
+   present the plan inline in your reply, and obtain approval before mutation.
 4. Call `start_job` before any deep document inspection or mutation. Supply
    `target_document` for an existing file and leave it empty for a fresh model.
    An empty `target_document` with no active document starts an unbound job.
@@ -80,15 +85,15 @@ flowchart TD
     P --> S["Classify section views and infer cut geometry"]
     S --> O["Identify views and lock orientation contract"]
     O --> C["Match edges and corners across views"]
-    C --> D["Write compact PLAN.md with milestone todos"]
+    C --> D["Present compact plan inline with milestone todos"]
     D --> E{"Current plan ready and approved?"}
     E -- "No: L2" --> D
     E -- "Yes" --> F["Start or reuse job; execute next MCP milestone"]
     F --> G["Inspect response and objective model state"]
-    G --> H{"Milestone matches PLAN.md?"}
-    H -- "No: L4" --> X["Set REPLAN_REQUIRED and revise PLAN.md"]
+    G --> H{"Milestone matches the plan?"}
+    H -- "No: L4" --> X["Set REPLAN_REQUIRED and revise the plan"]
     X --> E
-    H -- "Yes" --> I["Check todo, write and reread PLAN.md"]
+    H -- "Yes" --> I["Check todo and re-present the plan"]
     I --> J{"More modeling milestones?"}
     J -- "Yes: L3" --> F
     J -- "No" --> K["Validate projections and supplied sections"]
@@ -151,7 +156,15 @@ face/edge indexes may no longer identify the same geometry.
 
 Reference topics are `contract`, `canonicalization`, `forward`, `mapping`,
 `mapping_part`, `mapping_sheet_metal`, `mapping_assembly`, `verification`,
-`reverse`, `coverage`, and `feature_graph_schema`.
+`reverse`, `coverage`, and `feature_graph_schema`. A reference comes back one
+page at a time inside `verification` as `topic`, `content`, and `page` (`offset`,
+`limit`, `returned_lines`, `total_lines`, `total_chars`, `has_more`,
+`next_offset`, `line_truncated`; `0` means the defaults, a smaller
+`reference_limit` may be requested, larger is clamped; each page is at most 40
+lines and about 4000 characters). Follow `page.next_offset` while
+`page.has_more` is true, or jump with `reference_offset` to
+`page.index.sections[].line`. For `feature_graph_schema`, `page.index` also has
+`sections` (`section`, `line`, `entries`) and `feature_types`.
 
 If an evidence read is too broad, never repeat it unchanged. Traverse `L1` once
 using a smaller image/PDF region or a narrower supported `inspect_state` scope;
@@ -162,7 +175,9 @@ do not invent unsupported flags. On another failure emit `RETRY_EXHAUSTED`.
 For a new part or assembly:
 
 1. Read `forward`, the relevant mapping topic, `verification`, and
-   `feature_graph_schema`.
+   `feature_graph_schema`; `feature_graph_schema` is read by paging (about 15
+   pages at the default limit), and `page.index.feature_types` lists the
+   available node kinds.
 2. Build one complete graph in feature-tree dependency order.
 3. Use meters for all Feature Graph distances and radians for all Feature Graph
    angles.
@@ -288,8 +303,12 @@ evidence, set `RECONSTRUCTION_STATUS: BLOCKED` rather than guessing.
 
 ### PLAN.md
 
-Before the first mutation, create one workspace `PLAN.md` and reuse it as this
-task's long-term memory. Keep it under 70 lines and 4 KB.
+Before the first mutation, present one complete plan inline in your reply and
+reuse it as this task's long-term memory. The reply is the plan of record: this
+profile has no file-writing tool, so never block on creating a file. Keep the
+plan under 70 lines and 4 KB, track its progress with `todo_write`, and write
+the same content to a workspace `PLAN.md` file only when a file-writing tool is
+actually available.
 
 ```markdown
 # CAD Reconstruction Plan
@@ -362,14 +381,15 @@ separate statuses. While writing modeling todos, check the
 the vocabulary can express and record the rest as `CAPABILITY_GAP`.
 
 If one decision can change topology or handedness, set `BLOCKED` and ask one
-focused question. Waiting does not consume `L2`; revising PLAN after new input
-does. Present the compact plan and obtain explicit approval of its current version.
+focused question. Waiting does not consume `L2`; revising the plan after new
+input does. Present the compact plan inline and obtain explicit approval of its
+current version.
 Only then set `APPROVED` and check its approval todo. Any changed topology,
 orientation, dimension, direction, or feature order creates a new version.
 
 ### Execute, Checkpoint, And Validate
 
-Read approved PLAN in full immediately before mutation. Start or reuse the job,
+Reread the approved plan in full immediately before mutation. Start or reuse the job,
 read only the required Feature Graph references, then prefer one complete
 `submit_feature_graph(..., fresh_document=true)` for a new model. Do not split a
 complete graph merely to create checkpoints.
@@ -394,10 +414,10 @@ hole, mirror, pattern, and offset direction through the Orientation Contract and
 
 After each milestone, use `inspect_state` with the smallest relevant scopes.
 Compare feature results, bounds, topology, dimensions, directions, and evidence
-IDs with PLAN. On match, check only covered todos, update `LAST_CHECKPOINT` and
-loop counts, write PLAN, and immediately reread it. On mismatch, stop mutation,
+IDs with the plan. On match, check only covered todos, update `LAST_CHECKPOINT`
+and loop counts, then re-present the updated plan. On mismatch, stop mutation,
 use `L4`, set `REPLAN_REQUIRED`, log the smallest mismatch and root cause, revise
-PLAN/version, and obtain approval before repair.
+the plan/version, re-present it, and obtain approval before repair.
 
 Validate independently:
 

@@ -52,6 +52,7 @@ def envelope(
     status,
     risk="read",
     job_id=None,
+    job_token=None,
     action_id=None,
     target_document=None,
     backup_path=None,
@@ -61,18 +62,25 @@ def envelope(
     error=None,
     **extra,
 ):
-    result = {
-        "job_id": job_id,
-        "action_id": action_id,
+    # KEY ORDER IS LOAD-BEARING: the host may elide a long tool result down to its head
+    # lines, so `job_id`/`job_token` are emitted FIRST — a token in the removed middle is a
+    # token the model never sees, and every later call then fails PERMISSION_DENIED.
+    # `job_token` is emitted ONLY when there is one: a non-start_job result carrying
+    # `"job_token": null` reads to a model as its credential having been reset to null.
+    result = {"job_id": job_id}
+    if job_token is not None:
+        result["job_token"] = job_token
+    result.update({
         "status": status,
         "risk": risk,
+        "action_id": action_id,
         "target_document": target_document,
         "backup_path": backup_path,
         "completed_steps": completed_steps or [],
         "partial_state": partial_state or {},
         "verification": verification or {},
         "error": error,
-    }
+    })
     result.update(extra)
     return result
 
