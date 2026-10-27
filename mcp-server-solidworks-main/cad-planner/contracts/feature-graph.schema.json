@@ -20,8 +20,23 @@
  },
  "reference_model": {
   "_note": "Still the make-or-break part of the IR (persistent/topological naming, P1.3). v0.5 adds GEOMETRIC ANCHORS (decided with the user 2026-07-04, HYBRID form): a 3D point recorded from the ORIGINAL part's analyze_model read, resolved DETERMINISTICALLY against the rebuilt geometry at compile time, plus an optional semantic 'hint' that the compiler NEVER reads — it collects design data for the future semantic reference model (P1.3). Anchors are exact for fresh-doc replay but NOT durable across edits — that honest limitation is the P1.3 forcing function.",
-  "datum": "string — canonical datum plane: 'front' | 'top' | 'right'",
-  "offset": "number (optional, on a datum ref — SIGNED offset in meters along the datum normal; != 0 means the sketch sits on a parallel reference plane the compiler creates via add_reference_geometry, e.g. the recipe's plane {ref:'Front Plane', offset:0.003})",
+  "datum": "string — canonical datum plane: 'front' | 'top' | 'right'. Each datum carries a FIXED 2-D sketch frame — see datum_frame below for the measured table (the contract never stated it before v0.8.0 batch 8, so a sketch author had to guess which way sketch +x and +y point).",
+  "offset": "number (optional, on a datum ref — SIGNED offset in meters along the datum normal; != 0 means the sketch sits on the parallel plane at that offset: the compiler PREFERS an existing planar face on that plane and sketches ON it, and only creates a parallel reference plane via add_reference_geometry when no face lies there (see sketch.ref), e.g. the recipe's plane {ref:'Front Plane', offset:0.003}. Measured: +d moves the plane along the printed +normal and the in-plane frame is unchanged; the created reference plane's own D1 dimension reads the MAGNITUDE, so read the sign from the sketch's plane.offset / plane.frame.origin.)",
+  "datum_frame": {
+   "_measured": "MEASURED 2026-10-27 (batch 8) through the live pipeline on 12 probe parts built for this purpose (3 datums x boss / reversed / offset / negative-offset) — not copied from docs. Those probe parts are local scratch files and are NOT shipped in the repo. Each probe sketched ONE ASYMMETRIC rectangle (sketch-x spanning [0, 0.020], sketch-y spanning [0, 0.010], so both local axes read positive and neither is symmetric about the origin), bossed it blind 0.006 (the offset probes padded 0.004 from a plane at +/-0.012), then read analyze_model(geometry) bbox_min/bbox_max. Every row is what those boxes said, and each was re-confirmed against the frame the SAVED document reports at analyze_model(features) -> sketch plane.frame (xdir = sketch +x, ydir = sketch +y, in model axes). The two independent reads agree on all 12 parts.",
+   "_columns": "datum | sketch +x | sketch +y | +normal | blind boss grows into | reversed grows into | positive offset d moves the plane to",
+   "front": "front | +X | +Y | +Z | +Z | -Z | Z=+d",
+   "top": "top | +X | -Z | +Y | +Y | -Y | Y=+d",
+   "right": "right | -Z | +Y | +X | +X | -X | X=+d",
+   "_invariants": [
+    "handedness: sketch_x x sketch_y = +normal on all three (right-handed): front +X x +Y = +Z, top +X x -Z = +Y, right -Z x +Y = +X",
+    "origin: the sketch origin IS the model origin on every datum (no in-plane shift), and an offset plane keeps the SAME xdir/ydir — the offset moves the plane along the normal, it never rotates the 2-D frame",
+    "independent: offset moves the PLANE only; reversed flips the GROWTH direction only — a reversed probe kept its twin's in-plane extents, and an offset probe kept growing toward +normal",
+    "negative offset: d < 0 lands the plane on the -normal side (front d=-0.012 -> pad Z in [-0.012, -0.008]) and the blind boss still grows toward +normal from there"
+   ],
+   "_why_it_matters": "The frame is what makes a recorded 2-D contour replayable: a sketch's coordinates are along these axes, so the same contour on 'top' is NOT the same shape on 'front' (top's +y runs toward -Z). For the reverse path this is the rule that turns a drawing's front view into model coordinates, and it is why extrude.reversed's '+normal' list is Front->+Z, Top->+Y, Right->+X."
+  },
+
   "node_face": {
    "node": "string — id of an earlier node",
    "selector": "string — semantic face selector resolved at compile time by the reference resolver: 'top' (v0.5: only 'top')"
@@ -180,7 +195,7 @@
   },
   "sketch": {
    "description": "A 2D profile on a plane. Entities are profile primitives, not tools. v0.5 adds PATH profiles: free line/arc chains with exact coordinates (the recipe's 7-line+2-arc bracket outline), plus construction scaffolding. Primitives sharing identical endpoint coordinates close the contour — do NOT add constraints (frozen-coordinate rebuild, see add_sketch_entity guidance). The compiler welds chain endpoints within 0.0001 m onto the first matching anchor before emitting entities; a sketch consumed by extrude/revolve/sheet_metal/sweep-PROFILE/loft whose contour is still open beyond that weld is REJECTED at plan time with the gap named (rib/bend/sweep-path sketches are open by design).",
-   "ref": "datum + optional offset (the sketch plane; offset != 0 => the compiler prefers an existing face on that plane, else creates a parallel reference plane) OR — since v0.5.5, for sketches on NON-axis-aligned support (a bent flange's face, 4-1's Sketch13/16) — { face: face_anchor }: the compiler resolves the anchor via analyze_model(faces) plane-containment (resolve_face_by_anchor) and sketches ON that face (create_sketch on_face). Record the ORIGINAL sketch's `frame` — the frame transform (IR-ADR-010) makes the 2D coordinates support-independent.",
+   "ref": "datum + optional offset (the sketch plane; offset != 0 => the compiler prefers an existing face on that plane, else creates a parallel reference plane) OR — since v0.5.5, for sketches on NON-axis-aligned support (a bent flange's face, 4-1's Sketch13/16) — { face: face_anchor }: the compiler resolves the anchor via analyze_model(faces) plane-containment (resolve_face_by_anchor) and sketches ON that face (create_sketch on_face). Record the ORIGINAL sketch's `frame` — the frame transform (IR-ADR-010) makes the 2D coordinates support-independent. For a datum support the 2-D axes are fixed and measured: see reference_model.datum_frame.",
    "profile": "array of profile primitives:",
    "profile_primitives": {
     "rectangle": {
@@ -257,7 +272,7 @@
    "operation": "string — 'boss' (add material) | 'cut' (remove material)",
    "end": "string (optional) — 'blind' (default; requires depth) | 'through_all' | 'up_to_surface' (requires up_to) | 'mid_plane' (requires depth = the TOTAL width; extrudes symmetrically about the sketch plane). Back-compat: depth:'through_all'/'through' or through:true still mean through_all.",
    "depth": "number — meters (blind: the one-sided depth; mid_plane: the TOTAL symmetric width)",
-   "reversed": "boolean (optional, default false) — extrude toward the datum's NEGATIVE normal instead of the positive one (maps to the extrude tool's `reverse` param). Default direction is +normal: Front→+Z, Top→+Y, Right→+X. IGNORED by mid_plane (symmetric by construction). THE HIGH-RISK FLAG ON THE REVERSE PATH: a boss on 'front' grows toward the direction the front view is looked at FROM, so WITHOUT `reversed` the sketch plane is the part's BACK face and every subsequent depth is measured from the wrong end — which produces a MIRRORED part that volume, area and topology all report as correct (recipe R6/R14; observed for real on f-2, IR-ADR-019).",
+   "reversed": "boolean (optional, default false) — extrude toward the datum's NEGATIVE normal instead of the positive one (maps to the extrude tool's `reverse` param). Default direction is +normal: Front→+Z, Top→+Y, Right→+X. Per-datum 2-D axes and growth side: reference_model.datum_frame. IGNORED by mid_plane (symmetric by construction). THE HIGH-RISK FLAG ON THE REVERSE PATH: a boss on 'front' grows toward the direction the front view is looked at FROM, so WITHOUT `reversed` the sketch plane is the part's BACK face and every subsequent depth is measured from the wrong end — which produces a MIRRORED part that volume, area and topology all report as correct (recipe R6/R14; observed for real on f-2, IR-ADR-019).",
    "up_to": "object (up_to_surface only) — { face: face_anchor } : the face the feature terminates on, as a geometric anchor (+ optional hint)"
   },
   "revolve": {

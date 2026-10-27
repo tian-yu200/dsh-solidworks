@@ -64,6 +64,7 @@ namespace SolidworksExecution.Services
                     results.Add($"cx={props[0]:G6}");
                     results.Add($"cy={props[1]:G6}");
                     results.Add($"cz={props[2]:G6}");
+                    AddBoundingBoxResults(modelDoc, results);
                 }
                 else if (analysisType == "geometry")
                 {
@@ -93,6 +94,7 @@ namespace SolidworksExecution.Services
                     results.Add($"faces={totalFaces}");
                     results.Add($"edges={totalEdges}");
                     results.Add($"vertices={totalVerts}");
+                    AddBoundingBoxResults(modelDoc, results);
                 }
                 else if (analysisType == "bodies")
                 {
@@ -1287,6 +1289,59 @@ namespace SolidworksExecution.Services
         // so pick-points stay valid, while the edges JSON stays small enough for the MCP result cap.
         private static double R6(double v) { return Math.Round(v, 6); }
 
+        // bbox keys are read by machines (size checks), so their numbers never depend on the
+        // machine's regional decimal separator.
+        private static string Num6(double v)
+        {
+            return R6(v).ToString("G6", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        // Axis-aligned bounding box of the solid bodies, in meters — appended LAST by every scope
+        // that calls it, so no existing key moves. This is the size check a drawing-vs-model round trip
+        // needs ("is it 400 long?"), which faces cannot answer: a face's `point` is a mid-parameter,
+        // not an endpoint, so extents had to be reconstructed from whichever faces happened to exist.
+        // Union of IBody2.GetBodyBox over the SAME solid-body enumeration the geometry/faces/bodies
+        // readers walk, so a multibody part reports the whole envelope and the counts stay comparable.
+        // Silent when there is nothing to report (no solid body, or every GetBodyBox threw): the scope
+        // still completes with its historical keys rather than failing a read over an extents call.
+        private static void AddBoundingBoxResults(IModelDoc2 modelDoc, List<string> results)
+        {
+            var partDoc = modelDoc as IPartDoc;
+            if (partDoc == null) return;  // bbox is a part-document read (assembly envelopes are out of scope)
+
+            object[] bodies = null;
+            try { bodies = partDoc.GetBodies2((int)swBodyType_e.swSolidBody, true) as object[]; }
+            catch { }
+            if (bodies == null || bodies.Length == 0) return;
+
+            double minX = double.MaxValue, minY = double.MaxValue, minZ = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue, maxZ = double.MinValue;
+            bool any = false;
+            foreach (var b in bodies)
+            {
+                var body = b as IBody2;
+                if (body == null) continue;
+                double[] box = null;
+                try
+                {
+                    // GetBodyBox: [0..2]=min xyz, [3..5]=max xyz, meters.
+                    object raw = body.GetBodyBox();
+                    box = raw as double[];
+                    if (box == null && raw is object[] oa) box = Array.ConvertAll(oa, o => (double)o);
+                }
+                catch { }
+                if (box == null || box.Length < 6) continue;
+                minX = Math.Min(minX, box[0]); minY = Math.Min(minY, box[1]); minZ = Math.Min(minZ, box[2]);
+                maxX = Math.Max(maxX, box[3]); maxY = Math.Max(maxY, box[4]); maxZ = Math.Max(maxZ, box[5]);
+                any = true;
+            }
+            if (!any) return;
+
+            results.Add($"bbox_min=[{Num6(minX)},{Num6(minY)},{Num6(minZ)}]");
+            results.Add($"bbox_max=[{Num6(maxX)},{Num6(maxY)},{Num6(maxZ)}]");
+            results.Add($"bbox_size=[{Num6(maxX - minX)},{Num6(maxY - minY)},{Num6(maxZ - minZ)}]");
+        }
+
         // ------------------------------------------------------------------
         // Item readers = Fetch* (the COM round-trips) + Assemble* (pure JSON, no COM).
         //
@@ -1403,8 +1458,11 @@ namespace SolidworksExecution.Services
             public double Area;
             public bool ChainAborted; // a throw in the planar chain above — today it skips `point` too
             public double[] Normal;
-            public string Kind;       // curved faces: cylinder / cone / sphere
+            public string Kind;       // curved faces: cylinder / cone / sphere / torus
             public double[] Cylinder; // CylinderParams raw; keys emitted only when it holds 7 entries
+            public double[] Torus;    // TorusParams raw; keys emitted only when it holds 8 entries
+            public double[] Sphere;   // SphereParams raw; keys emitted only when it holds 4 entries
+            public double[] Cone;     // ConeParams raw; keys emitted only when it holds 8 entries
             public double[] Point;
         }
 
@@ -1471,6 +1529,10 @@ namespace SolidworksExecution.Services
                 }
                 else if (f.Surf.IsCone()) f.Kind = "cone";
                 else if (f.Surf.IsSphere()) f.Kind = "sphere";
+                // A TORUS is the fillet/round face class: until it had a kind, every fillet face came
+                // back as planar:false with no kind at all, so a torus was only tellable from a sphere
+                // by its representative point, and "did my R2 fillet land" was not machine-checkable.
+                else if (f.Surf.IsTorus()) f.Kind = "torus";
                 var uv2 = f.Face.GetUVBounds() as double[];
                 if (uv2 != null && uv2.Length >= 4)
                 {
@@ -1479,6 +1541,34 @@ namespace SolidworksExecution.Services
                 }
             }
             catch { }
+            // The other curved kinds' parameters, in their own try: an exotic surface whose params
+            // throw must still report the kind and the point it already has (adding a key must never
+            // subtract one).
+            try { FetchCurvedSurfaceParams(f); } catch { }
+        }
+
+        // Curved-surface parameter layouts, ALL MEASURED on parts built through this service
+        // (2026-10-27, batch 8 — a 3 mm rim fillet = torus, a 5 mm corner fillet = cylinder, a
+        // 3x3 45-deg chamfer = cone, a revolved half-disc = sphere), not copied from docs:
+        //   TorusParams    8: [0..2]=ring centre (ON the tube centreline), [3..5]=axis (unit),
+        //                    [6]=major radius (to the centreline), [7]=minor radius (the tube).
+        //   SphereParams   4: [0..2]=centre, [3]=radius.
+        //   ConeParams     8: [0..2]=a point on the axis (NOT the apex), [3..5]=axis (unit),
+        //                    [6]=section radius at [0..2], [7]=half-angle in RADIANS.
+        // CylinderParams (7) is read where the kind is set, so this helper skips it.
+        private static void FetchCurvedSurfaceParams(FaceFacts f)
+        {
+            if (f.Surf == null || f.Kind == null || f.Kind == "cylinder") return;
+            if (f.Kind == "torus") f.Torus = SurfaceParamsArray(f.Surf.TorusParams);
+            else if (f.Kind == "sphere") f.Sphere = SurfaceParamsArray(f.Surf.SphereParams);
+            else if (f.Kind == "cone") f.Cone = SurfaceParamsArray(f.Surf.ConeParams);
+        }
+
+        private static double[] SurfaceParamsArray(object raw)
+        {
+            var d = raw as double[];
+            if (d != null) return d;
+            return raw is object[] oa ? Array.ConvertAll(oa, o => (double)o) : null;
         }
 
         private static JObject AssembleFace(FaceFacts f, int idx)
@@ -1503,6 +1593,37 @@ namespace SolidworksExecution.Services
                     fj["origin"] = new JArray { R6(cp2[0]), R6(cp2[1]), R6(cp2[2]) };
                     fj["axis"] = new JArray { R6(cp2[3]), R6(cp2[4]), R6(cp2[5]) };
                     fj["radius"] = R6(cp2[6]);
+                }
+                // Additive per-kind geometry (a kind never sets another kind's keys): the torus radii
+                // make a fillet/round machine-checkable by radius alone, which is what the R2 root
+                // fillets and R0.5 groove rounds of a real shaft drawing need.
+                var tp = f.Torus;
+                if (tp != null && tp.Length >= 8)
+                {
+                    fj["origin"] = Pt6(tp);   // ring centre, on the tube CENTRELINE's circle
+                    fj["axis"] = new JArray { R6(tp[3]), R6(tp[4]), R6(tp[5]) };
+                    fj["major_radius"] = R6(tp[6]);
+                    fj["minor_radius"] = R6(tp[7]);
+                }
+                var sp = f.Sphere;
+                if (sp != null && sp.Length >= 4)
+                {
+                    fj["origin"] = Pt6(sp);
+                    fj["radius"] = R6(sp[3]);
+                }
+                var cn = f.Cone;
+                if (cn != null && cn.Length >= 8)
+                {
+                    // MEASURED 2026-10-27 on a 45-deg chamfer of an R10 boss rim: the array is EIGHT
+                    // doubles, [0..2] is a point ON the axis (NOT the apex), [6] is the section radius
+                    // AT that point and [7] is the half-angle in radians (0.7853981633974437 = pi/4).
+                    // The chamfer's own circles are r=0.007 at Y=0.020 and r=0.010 at Y=0.017, so
+                    // [0..2]=[0.028,0.02,0] with [6]=0.007 is exactly the (axis point, radius) pair —
+                    // naming [0..2] `apex` would have been a lie, and [6] as the angle was off by 100x.
+                    fj["origin"] = Pt6(cn);          // a point on the axis, where `radius` is measured
+                    fj["axis"] = new JArray { R6(cn[3]), R6(cn[4]), R6(cn[5]) };
+                    fj["radius"] = R6(cn[6]);        // section radius at origin
+                    fj["half_angle"] = R6(cn[7]);    // RADIANS, between the axis and the surface
                 }
                 AddPoint(fj, f.Point);
             }

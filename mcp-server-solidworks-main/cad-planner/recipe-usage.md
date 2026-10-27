@@ -80,6 +80,29 @@ original — these rules replace the readback discipline there. C1–C5 still ap
   (or a cut that removes nothing) is almost always the WRONG SIGN — flip the direction ONCE and
   resubmit; do not re-guess the geometry or iterate blindly (the loud failure IS the sign
   correction). Fixes the recurring top-hole-drilled-the-wrong-way bug.
+- **The datum's 2-D frame is fixed and measured** (batch 8, 2026-10-27 — 12 probe parts built
+  through the pipeline for this purpose, 3 datums x boss / reversed / offset / negative offset;
+  those probe parts are local scratch files, not shipped in the repo; the same table is in the
+  schema at `reference_model.datum_frame`). A sketch's `cx/cy`, `x1/y1`, … are coordinates along THIS x/y, not
+  along model axes, so read this before placing a profile off-centre:
+
+  ```
+  datum | sketch +x | sketch +y | +normal | blind boss grows into | reversed grows into | positive offset d moves the plane to
+  front | +X | +Y | +Z | +Z | -Z | Z=+d
+  top | +X | -Z | +Y | +Y | -Y | Y=+d
+  right | -Z | +Y | +X | +X | -X | X=+d
+  ```
+
+  Measured invariants of the same run: `handedness: sketch_x x sketch_y = +normal on all three
+  (right-handed): front +X x +Y = +Z, top +X x -Z = +Y, right -Z x +Y = +X`; `origin: the sketch
+  origin IS the model origin on every datum (no in-plane shift), and an offset plane keeps the SAME
+  xdir/ydir — the offset moves the plane along the normal, it never rotates the 2-D frame`;
+  `independent: offset moves the PLANE only; reversed flips the GROWTH direction only — a reversed
+  probe kept its twin's in-plane extents, and an offset probe kept growing toward +normal`;
+  `negative offset: d < 0 lands the plane on the -normal side (front d=-0.012 -> pad Z in
+  [-0.012, -0.008]) and the blind boss still grows toward +normal from there`. Verify a frame
+  without rebuilding anything: `analyze_model(features)` prints each sketch's
+  `plane.frame {origin, xdir, ydir}` read from the document — xdir IS sketch +x in model axes.
 - **Prefer the forward-friendly forms:** `edge_flange` with `length` (not frame+profile —
   those exist for verbatim replay); `material {name, library?}` at graph level; a GRID as a
   pattern OF a pattern (a `linear_pattern` seeding on an earlier `linear_pattern` — the tool
