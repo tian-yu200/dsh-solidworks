@@ -205,9 +205,56 @@ _FIELD_ABBREVIATIONS = (
     (r"the recipe's SI dimension", "SI"),
     # Helper names: the quickref names the mechanism's VOCABULARY (resolve_face_by_anchor /
     # create_sketch), not the call sites — the parenthesised call targets are decoration.
+    # Thread (v0.9.0) vocabulary: the quickref must name the MECHANISM, not spell out
+    # analyze_model(edges) or a swconst enum name on every one of fourteen field lines.
+    (r"analyze_model\(edges\)", "AM(edges)"),
+    (r"swCosmeticStandardType_e", "swStandardType_e"),
+    (r"swCosmeticEndConditions_e", "swCosmeticEnd_e"),
+    (r"swCosmeticThread_MajorDiameter", "major-dia"),
     (r"\s*\(resolve_face_by_anchor\)", ""),
     (r"\s*\(create_sketch on_face\)", ""),
+    (r"^'coincident' \| 'concentric' \| 'perpendicular' \| 'parallel' \| 'tangent' \| 'distance' \| 'angle' \| 'lock'$",
+     "one of `mates` (top of card)"),
+    # Same de-duplication for the alignment vocabulary, which the mate_type line used to repeat
+    # in full on a second line (the words are already on the card, the legend covers 'opt').
+    (r"^'aligned' \| 'anti_aligned' \| 'closest' \(optional; record the reader's RESOLVED alignment verbatim\)$",
+     "aligned | anti_aligned | closest; record the reader's RESOLVED alignment verbatim"),
+    # The C4 note is the LEGEND's job (the legend line states the SI->tool-boundary rule), so the
+    # per-field restatement of it is duplication on every angle/distance value field.
+    (r"; (?:the )?compiler converts to the tool boundary\)", ")"),
+    # `sketch.profile`'s parenthetical restates the `profile_primitives` line printed right below
+    # it on the card (which kinds exist). Keep the requirement, drop the duplicated kind list.
+    (r" \u2014 the ORIGINAL sketch's segments in original 2D coords \(line/arc/circle \+ construction flag\)",
+     " \u2014 ORIGINAL sketch segments, original 2D coords"),
+    (r"^EXACTLY 2 \u2014 \{ component: <earlier component node id>, anchor: \{ kind, near: \[x,y,z\] COMPONENT-LOCAL \(m\), hint\? \} \}$",
+     "EXACTLY 2 \u2014 {component: <earlier component node id>, anchor: {kind, near: [x,y,z] COMPONENT-LOCAL (m), hint?}}"),
     (r"\s*\(maps to the extrude tool's `reverse` param\)", ""),
+    # Thread fields (v0.9.0): the callout/tolerance prose repeats the same three phrases on
+    # every thread-bearing node. The legend already defines AM; these name the mechanism's
+    # VOCABULARY, never drop a normative clause.
+    (r"\(analyze_model\(edges\) `center` for kind='circle'\)", "(AM(edges) `center`, kind='circle')"),
+    (r"analyze_model\(edges\)", "AM(edges)"),
+    # The sheet-metal "stay put" family: four node types restate the same 120-char clause. The
+    # legend carries the meaning once; each field keeps its own side/support rule.
+    (r", on the SIDE that must stay put, in the PRE-bend geometry \(the state the rebuild is in when the bend executes\)", ", on the side that stays put, PRE-bend"),
+    (r", on the SIDE that stays put, in the PRE-flange geometry", ", on the side that stays put, PRE-flange"),
+    (r"Passed straight through as the tool's fixed_x/y/z coordinate pick \(no index resolution \u2014 the point IS the side selector\)", "Passed through as fixed_x/y/z (the point IS the side selector)"),
+    (r"swCosmeticStandardType_e", "swStandardType_e"),
+    (r"swCosmeticEndConditions_e", "swCosmeticEnd_e"),
+    # Legend-backed token compression (v0.9.0): the legend ALREADY defines AM/AA/IP, so every
+    # spelled-out occurrence is pure duplication. Meaning-preserving, no clause dropped.
+    (r"analyze_model", "AM"),
+    (r"analyze_assembly", "AA"),
+    (r"\bthe compiler\b", "compiler"),
+    (r"\be\.g\. ", "eg "),
+    (r"positive number", "pos num"),
+    (r"when present", "if given"),
+    (r"mutually exclusive", "excl."),
+    (r"\bREQUIRED\b", "required"),
+    # NOT "req": a sentence-final "always required" would become "always req", which the
+    # whole-line guard reads as a mid-word cut (the line then ends on a fragment that appears
+    # in no schema spec). The 3 characters are worth keeping the instruction intact.
+    (r"\brequired\b", "required"),
     (r"number — meters", "num m"),
     (r"number — RADIANS", "num rad"),
     (r"number — DEGREES", "num deg"),
@@ -348,21 +395,32 @@ def render_quickref(schema=None):
         "# Feature Graph quickref (GENERATED from feature-graph.schema.json) %s" % version,
         "legend: R=required O=optional | m=meters rad=radians deg=degrees |"
         " IP=immediately preceding node | AM=analyze_model | AA=analyze_assembly |"
-        " opt=optional dflt=default",
+        " dflt=default",
     ]
+    # One line per vocabulary, `key=v1|v2|...` — a COMPACT block, because six "label: a, b, c"
+    # lines cost ~90 characters of pure label/comma overhead and the card is char-bound at two
+    # pages (see REFERENCE_PAGE_CHARS). Every value of every covered_subset list is still
+    # emitted, in schema order; only the separators and the prose labels are compressed, so
+    # nothing is dropped and the two-page + 4-node headroom budget holds.
     vocabulary = (
-        ("profile kinds", "profile_kinds"),
+        ("profiles", "profile_kinds"),
         ("datums", "datums"),
-        ("extrude ends", "extrude_ends"),
+        ("extrude", "extrude_ends"),
         ("chamfer", "chamfer_types"),
-        ("pattern dirs", "pattern_directions"),
-        ("mate types", "mate_types"),
+        ("pdirs", "pattern_directions"),
+        ("mates", "mate_types"),
     )
+    parts = []
     for label, key in vocabulary:
         values = subset.get(key) or []
-        if values:
-            suffix = " (+opt signed m offset)" if key == "datums" else ""
-            lines.append("%s: %s%s" % (label, ", ".join(values), suffix))
+        if not values:
+            continue
+        text = "%s=%s" % (label, "|".join(values))
+        if key == "datums":
+            text += " (+opt signed m offset)"
+        parts.append(text)
+    if parts:
+        lines.append(" | ".join(parts))
 
     def _emit(title, specs):
         lines.append(title)

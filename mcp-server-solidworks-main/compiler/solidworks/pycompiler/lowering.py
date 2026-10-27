@@ -24,6 +24,12 @@ import math
 from collections import namedtuple
 
 from . import contours
+from . import thread_table
+from .errors import FeatureError
+# Shared vocabulary, NOT re-declared here: a second copy of "what counts as a through depth"
+# would let the validator and the lowering drift apart on exactly the token that decides a cut's
+# end condition. ir_schema imports only contours/thread_table, so this is not a cycle.
+from .ir_schema import THROUGH_DEPTHS, THREAD_STANDARD_ENUM
 
 Op = namedtuple("Op", ["tool", "params", "note"])
 
@@ -46,6 +52,30 @@ def parse_node_feature(value):
     if isinstance(value, str) and value.startswith(_NODE_FEATURE_PREFIX):
         return value[len(_NODE_FEATURE_PREFIX):]
     return None
+
+
+# Deferred-reference sentinel for a thread's bore-mouth edge. A `hole`'s mouth circle does not
+# exist when its ops are PLANNED (the cut that creates it has not run), so the lowering cannot
+# put an index in the op. It puts this marker plus the anchor the edge must be found by, and the
+# compiler resolves it between the last cut and the add_cosmetic_thread call — one resolution,
+# one call (the tool is ADDITIVE: a second call would create a second thread).
+THREAD_EDGE_PENDING = "__THREAD_EDGE_PENDING__"
+# The op param that carries that anchor. Popped before the op is executed — the tool never sees it.
+THREAD_REF_PARAM = "thread_ref"
+
+
+def thread_ref(anchor):
+    """Normalize a thread anchor into a resolver ref ({edge_anchor} or {bore_face}).
+
+    `anchor` is whatever the caller knows: a cosmetic_thread node's `ref`, or the synthetic
+    {bore_face: {near, radius}} the compiler builds for a `hole`'s own bore. Passing an already
+    valid ref through unchanged keeps this a pure normalization, never a reinterpretation.
+    """
+    if not isinstance(anchor, dict):
+        return {}
+    if anchor.get("edge_anchor") is not None or anchor.get("bore_face") is not None:
+        return anchor
+    return {"bore_face": anchor} if anchor.get("near") is not None else {}
 
 
 _PLANE = {"top": "Top Plane", "front": "Front Plane", "right": "Right Plane"}
@@ -579,26 +609,175 @@ def lower_mate(node, sides):
                % (node["mate_type"], an, ak, int(ai), bn, bk, int(bi)))]
 
 
-def lower_hole(node, face_index, center2d):
-    """hole -> create_sketch(on_face, face_index) + circle at the resolved centre + a cut.
-    depth 'through_all' (or the 'through' alias) is a through-all cut; a positive NUMBER of metres
-    is a BLIND cut of that depth (the tool's existing blind-cut end condition)."""
+def _thread_params(node, thread, edge_index, defaults=None, pilot=None, pilot_depth=None,
+                   counterbore=None):
+    """Build the add_cosmetic_thread params for one thread declaration.
+
+    `node` carries the optional explicit `callout`; `thread` is the thread block (a hole's
+    `thread` object or the cosmetic_thread node itself); `defaults` is graph.thread_defaults.
+    Node fields beat defaults, defaults beat the module constants.
+
+    THREE facts this function exists to keep straight:
+
+    1. `diameter` is the NOMINAL MAJOR diameter, never the pilot. InsertCosmeticThread3's
+       Diameter is the thread diameter and an internal thread's ICosmeticThreadFeatureData.
+       DiameterType is swCosmeticThread_MajorDiameter, so passing the tap drill would draw the
+       thread on the wrong circle — a silent, plausible-looking wrong model.
+    2. `size` is a TEXT key into the install's thread database ('M5x0.8'), not a number, and
+       the cosmetic tool has NO pitch argument: the pitch comes from that database row. The
+       pitch is resolved here only to build the callout and to look up the tap drill.
+    3. `end_type` is swCosmeticEndConditions_e: 0 blind, 2 through. 2 is NOT the extrude's
+       through-all and there is no 3-way "through" in the real-Thread family — do not unify.
+       For a through thread the depth argument is sent as 0 so a stale depth can never leak in.
+    """
+    defaults = defaults or {}
+    desig = thread["designation"]
+    major_mm, parsed_pitch, _canonical = thread_table.parse_designation(desig)
+    pitch_mm = thread_table.resolve_pitch(
+        major_mm, thread.get("pitch") if thread.get("pitch") is not None else parsed_pitch)
+    standard = thread.get("standard") or defaults.get("standard") or "ISO"
+    style = thread.get("callout_style") or defaults.get("callout_style") or "ascii"
+    handedness = thread.get("handedness") or defaults.get("handedness") or "right"
+
+    depth = thread.get("depth")
+    is_through = depth is not None and depth in THROUGH_DEPTHS
+    params = {
+        # None = "resolved later": lower_hole overwrites it with THREAD_EDGE_PENDING. A concrete
+        # index here is the cosmetic_thread node's already-resolved mouth circle.
+        "edge_index": None if edge_index is None else int(edge_index),
+        "standard": THREAD_STANDARD_ENUM[standard],
+        "standard_type": "Tapped Hole",
+        # The DATABASE spelling (always carries the pitch) — the drawing shows the short form.
+        "size": thread_table.canonical_size(major_mm, pitch_mm),
+        "diameter": major_mm / 1000.0,
+        "end_type": 2 if is_through else 0,
+        "note": (thread.get("callout")
+                 or thread_table.derive_callout(
+                     thread_table.callout_designation(major_mm, pitch_mm),
+                     thread_class=_thread_class(thread, defaults),
+                     depth=None if is_through else float(depth),
+                     pilot=pilot, pilot_depth=pilot_depth,
+                     counterbore=counterbore, style=style, handedness=handedness)),
+    }
+    if not is_through:
+        params["depth"] = float(depth)
+    return params
+
+
+def _thread_class(thread, defaults):
+    """The canonical tolerance class ('6H') from the block or the graph defaults, else None."""
+    for source in (thread, defaults or {}):
+        value = source.get("class")
+        if value:
+            return str(value).strip().upper()
+    return None
+
+
+def lower_cosmetic_thread(node, edge_index, defaults=None):
+    """cosmetic_thread -> ONE add_cosmetic_thread op on a resolver-matched circular edge.
+
+    The edge is the MOUTH of the bore, resolved on the geometry as it stands: a cosmetic thread
+    consumes nothing, so unlike fillet/chamfer there is no pre-consumption anchor rule. SI
+    metres in, metres out — the tool is defined in metres, so no conversion lives here (C4's
+    rule: conversions happen at the tool boundary, and this boundary is already SI).
+
+    A standalone node has no hole to cross-check, so `pilot`/`pilot_depth` are None and the
+    callout names the thread only.
+    """
+    params = _thread_params(node, node, edge_index, defaults=defaults)
+    return [Op("add_cosmetic_thread", params,
+               "cosmetic thread %s on edge #%d (%s)"
+               % (params["size"], int(edge_index), params["note"]))]
+
+
+def lower_hole(node, face_index, center2d, thread_edge=None, defaults=None, thread_anchor=None):
+    """hole -> sketch + circle + cut, then optionally a counterbore and a cosmetic thread.
+
+    ORDER IS LOAD-BEARING: the counterbore is cut FIRST. It changes the entry face, and a
+    cosmetic thread is a SUBFEATURE of the cut it sits on — cutting the counterbore after the
+    pilot would re-intersect the threaded mouth edge and the thread would not survive. The
+    counterbore cut and the pilot cut are therefore separate sketch+cut pairs on the SAME
+    resolved entry face (a coaxial counterbore), counterbore first.
+
+    DEPTH ARITHMETIC: with a counterbore present, `hole.depth` is measured from the
+    COUNTERBORE FLOOR, so the pilot's absolute cut depth is counterbore.depth + hole.depth.
+    That is why the emitted cut depth is a sum and not `hole.depth` verbatim.
+
+    `thread_edge` is the resolver's index for the mouth circle. It cannot be known when the ops
+    are PLANNED (the circle does not exist until the cut runs), so the caller passes
+    THREAD_EDGE_PENDING and the compiler resolves it between the last cut and the thread op; the
+    anchor travels in the op params as `thread_ref` (a resolver ref, popped before the call).
+    None means the node declares no thread.
+    """
     r = float(node["diameter"]) / 2.0
     cx, cy = center2d
-    is_through = node["depth"] in ("through_all", "through")
+    is_through = node["depth"] in THROUGH_DEPTHS
+    counterbore = node.get("counterbore")
+    thread = node.get("thread")
+    ops = []
+
+    if counterbore:
+        ops += [
+            Op("create_sketch", {"on_face": True, "face_index": int(face_index)},
+               "hole: counterbore sketch on face #%d" % int(face_index)),
+            Op("add_sketch_entity",
+               {"entity_type": "circle", "cx": cx, "cy": cy,
+                "radius": float(counterbore["diameter"]) / 2.0},
+               "hole: counterbore circle %s mm"
+               % thread_table.format_dia_mm(float(counterbore["diameter"]))),
+            Op("extrude_feature", {"feature_type": "cut", "depth": float(counterbore["depth"])},
+               "hole: counterbore cut %.6g m deep" % float(counterbore["depth"])),
+        ]
+
     if is_through:
         cut_params = {"feature_type": "cut", "through": True}
         cut_note = "hole: through-all cut"
     else:
-        cut_params = {"feature_type": "cut", "depth": float(node["depth"])}
-        cut_note = "hole: blind cut %.6g m deep" % float(node["depth"])
-    return [
+        cut_depth = float(node["depth"])
+        if counterbore:
+            cut_depth += float(counterbore["depth"])
+        cut_params = {"feature_type": "cut", "depth": cut_depth}
+        # Metres, like every other op note in this module: the note is read by an engineer
+        # diffing the node log, and a unit that appears ONLY here would be a trap.
+        cut_note = "hole: blind cut %.6g m deep" % cut_depth
+        if counterbore:
+            cut_note += " (from the counterbore floor)"
+
+    ops += [
         Op("create_sketch", {"on_face": True, "face_index": int(face_index)},
-           "hole: sketch on top face #%d" % face_index),
+           "hole: sketch on top face #%d" % int(face_index)),
         Op("add_sketch_entity", {"entity_type": "circle", "cx": cx, "cy": cy, "radius": r},
            "hole: circle at centre"),
         Op("extrude_feature", cut_params, cut_note),
     ]
+
+    if thread:
+        if thread_edge is None:
+            raise FeatureError(
+                "hole '%s' declares a thread but the mouth edge was not resolved — the "
+                "compiler must resolve it after the cuts and pass THREAD_EDGE_PENDING in"
+                % node.get("id"),
+                code="THREAD_EDGE_UNRESOLVED", node_id=node.get("id"))
+        deferred = thread_edge == THREAD_EDGE_PENDING
+        params = _thread_params(node, thread,
+                                None if deferred else thread_edge,
+                                defaults=defaults,
+                                pilot=float(node["diameter"]),
+                                pilot_depth=None if is_through else float(node["depth"]),
+                                counterbore=counterbore)
+        if deferred:
+            # The circle does not exist yet. Put the sentinel in the op and carry the ANCHOR
+            # beside it; the compiler resolves the edge after the cuts and pops the anchor
+            # before the call, so the tool never sees either.
+            params["edge_index"] = THREAD_EDGE_PENDING
+            params[THREAD_REF_PARAM] = thread_ref(thread_anchor)
+            note = ("hole: cosmetic thread %s on the mouth circle, resolved after the cut (%s)"
+                    % (params["size"], params["note"]))
+        else:
+            note = ("hole: cosmetic thread %s on edge #%d (%s)"
+                    % (params["size"], int(thread_edge), params["note"]))
+        ops.append(Op("add_cosmetic_thread", params, note))
+    return ops
 
 
 def lower_fillet(node, edge_indices):

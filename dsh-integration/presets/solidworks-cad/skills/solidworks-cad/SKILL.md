@@ -210,6 +210,21 @@ geometry and anchoring to it (see the milestone strategy in
 shrink a graph by dropping evidenced features — report the split in the plan
 instead.
 
+## Cosmetic Threads
+Threads are COSMETIC only: an annotation the drawing reads, with zero geometry
+change (no faces or edges added). Author `hole.thread` (designation, optional
+`class`, and `depth` — required for a blind hole) or a standalone
+`cosmetic_thread` node whose `ref` names the bore mouth by `edge_anchor`
+(`near` = the mouth circle's CENTRE, plus `radius`) or by `bore_face`.
+The pilot is a tapped hole's `diameter`, never the tap drill: the drill comes
+from the table (M5 4.2, M6 5.0, M8x1.25 6.8, M12x1.75 10.2, M40x2 38,
+M42x2 40 mm), and a `diameter` that disagrees with it is rejected as
+`PILOT_MISMATCH`. The diameter handed to SolidWorks is the NOMINAL MAJOR
+diameter in meters. Put the class-qualified spec in the callout/note (e.g.
+`M5-8H`): SolidWorks 2025 does not resolve `Size`, so the note carries it.
+A counterbore is cut BEFORE the pilot. `add_cosmetic_thread` is additive per
+edge — never retry it. Inch and real (cut) threads are out of scope.
+
 ## Existing Document Edits
 
 `apply_document_edits` accepts only an array of `{tool, params}` objects using

@@ -14,7 +14,7 @@ from .errors import FeatureError
 from .ir_schema import validate
 from .resolver import (resolve_center_on_face, resolve_component_entity_by_anchor,
                        resolve_edges_by_anchor, resolve_face_by_anchor, resolve_face_on_plane,
-                       resolve_top_face)
+                       resolve_thread_edge, resolve_top_face)
 
 
 class CompileResult(object):
@@ -100,7 +100,8 @@ def _compile_and_run(port, graph):
         ntype = node.get("type")
         rec = {"id": nid, "type": ntype, "status": "PENDING", "ops": []}
         try:
-            ops = _plan_node(port, node, sv, node_features)  # may do a live (read-only) resolve
+            ops = _plan_node(port, node, sv, node_features,
+                             graph.get("thread_defaults"))  # may do a live (read-only) resolve
             last_resp = None
             frame_fn = None  # 2D coord transform for this node's entities (sketch frame fix)
             frame_mirror = False
@@ -108,6 +109,20 @@ def _compile_and_run(port, graph):
                 params = _fill_placeholders(op, last_resp, node_features, nid, ntype)
                 if frame_fn is not None and op.tool == "add_sketch_entity":
                     params = _transform_entity_params(params, frame_fn, frame_mirror)
+                if params.get("edge_index") == lowering.THREAD_EDGE_PENDING:
+                    # The mouth circle did not exist when this node was planned (the cut that
+                    # makes it had not run yet). Resolve it NOW, against the post-cut geometry,
+                    # with a read-only analyze_model. This is the ONLY place a thread edge is
+                    # resolved for a `hole` node, and it happens exactly once per op: the
+                    # add_cosmetic_thread tool is ADDITIVE, so a second call would create a
+                    # second thread on the same edge — never re-issue this op.
+                    params = dict(params)
+                    anchor = lowering.thread_ref(params.pop("thread_ref", None) or {})
+                    params["edge_index"], edge_info = resolver.resolve_thread_edge(
+                        port, sv, anchor, node_id=nid)
+                    rec.setdefault("resolved", []).append(
+                        {"step": "thread_edge", "edge_index": params["edge_index"],
+                         "edge_center": edge_info.get("edge_center")})
                 resp = port.execute(op.tool, params, sv)
                 result.exec_calls += 1
                 previous_sv = sv
@@ -202,7 +217,46 @@ def _compile_and_run(port, graph):
     return result
 
 
-def _plan_node(port, node, state_version, node_features):
+def _thread_anchor(node, face_info):
+    """An EDGE anchor naming the mouth circle's CENTRE for a `hole`'s own bore.
+
+    Two things this gets right, both learned from live failures:
+
+    * It is an EDGE anchor, not a bore_face one. A bore_face anchor must lie ON the cylinder,
+      and the entry face's representative point is on the AXIS — exactly one radius away, so
+      that branch would reject it every time. An edge anchor names the mouth circle's centre,
+      which IS the point we have.
+    * With a COUNTERBORE the pilot's mouth is not on the entry face: the counterbore is cut
+      first and the pilot starts at the counterbore FLOOR, so the mouth centre is the entry
+      point pushed `counterbore.depth` INTO the material (along -entry normal). Anchoring at the
+      entry face would name a circle that is no longer the pilot's mouth (and, on a blind hole,
+      the resolver could then pick the pilot's BOTTOM).
+
+    `resolve_top_face` reports no normal, so the entry normal is +Y — the same _UP the top-face
+    resolver matched on (its selector only ever returns a +Y-facing face).
+    """
+    point = (face_info or {}).get("point")
+    if not (isinstance(point, list) and len(point) >= 3):
+        return {}
+    near = [float(c) for c in point[:3]]
+    counterbore = node.get("counterbore")
+    if counterbore and _is_pos(counterbore.get("depth")):
+        near[1] -= float(counterbore["depth"])       # +Y is the entry normal (see docstring)
+    anchor = {"near": near}
+    # Radius is a DISAMBIGUATOR, not a filter on the axis: a revolve end face can carry the
+    # bore mouth AND an outer rim as concentric coplanar circles, and only the radius tells
+    # them apart.
+    anchor["radius"] = float(node["diameter"]) / 2.0
+    return {"edge_anchor": anchor}
+
+
+def _is_pos(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and value > 0)
+
+
+def _plan_node(port, node, state_version, node_features, graph_thread_defaults=None):
+    """Resolve + lower ONE node into ops (may do read-only analyze calls, never a write)."""
     ntype = node["type"]
     if ntype == "box":
         return lowering.lower_box(node)
@@ -247,7 +301,25 @@ def _plan_node(port, node, state_version, node_features):
     if ntype == "hole":
         face_index, info = resolve_top_face(port, state_version, node_id=node.get("id"))
         center2d = resolve_center_on_face(info)
-        return lowering.lower_hole(node, face_index, center2d)
+        # A threaded hole needs its mouth CIRCLE, and that circle only exists AFTER the cuts —
+        # but every analyze read is read-only and a node's ops are planned before any of them
+        # execute, so the edge cannot be resolved here. The lowering emits a PLACEHOLDER op and
+        # the executor resolves the edge between the last cut and the thread (the loop in
+        # _compile_and_run, on THREAD_EDGE_PENDING). The anchor it resolves against is the entry
+        # face's centre, which IS the mouth circle's centre for a coaxial bore.
+        return lowering.lower_hole(node, face_index, center2d,
+                                   thread_edge=lowering.THREAD_EDGE_PENDING
+                                   if node.get("thread") else None,
+                                   defaults=graph_thread_defaults,
+                                   thread_anchor=_thread_anchor(node, info))
+    if ntype == "cosmetic_thread":
+        # The bore already exists, so its mouth edge is resolvable NOW (read-only) — no
+        # placeholder needed. Emitting exactly ONE add_cosmetic_thread is load-bearing: the tool
+        # is ADDITIVE (a second call on the same edge creates a second thread), so a retry that
+        # re-issued this op would silently double the annotation.
+        edge_index, _info = resolve_thread_edge(port, state_version, node.get("ref") or {},
+                                                node_id=node.get("id"))
+        return lowering.lower_cosmetic_thread(node, edge_index, defaults=graph_thread_defaults)
     if ntype == "fillet":
         edge_indices, _info = resolve_edges_by_anchor(port, state_version, node["edges"],
                                                       node_id=node.get("id"))

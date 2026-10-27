@@ -191,6 +191,7 @@ namespace SolidworksExecution.Controllers
                 case "add_edge_feature":       return _service.AddEdgeFeature(request);
                 case "create_rib":             return _service.CreateRib(request);
                 case "create_shell":           return _service.CreateShell(request);
+                case "add_cosmetic_thread":    return _service.AddCosmeticThread(request);
                 case "create_drawing":         return _service.CreateDrawing(request);
                 case "add_drawing_view":       return _service.AddDrawingView(request);
                 case "add_flat_pattern_view":  return _service.AddFlatPatternView(request);

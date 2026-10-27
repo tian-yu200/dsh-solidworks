@@ -11,7 +11,8 @@
   "units": "string (fixed: 'meters' — all lengths are SI meters, matching execution layer)",
   "nodes": "array of feature nodes (ordered; order defines build sequence — tree order is law, recipe.md C1)",
   "material": "object (optional, PART graphs only — {name: 'exact library material name, e.g. 1060 Alloy', library?: 'material database, default SolidWorks Materials'}. Material is DOCUMENT state, not a tree feature, so it lives at graph level, never as a node; the compiler applies it via ONE set_part_material call AFTER the last node. Rejected on assembly graphs.)",
-  "_params": "object (optional, additive, IGNORED by the compiler — the lifted parameter map {param_name: {node, field, value_si}} per recipe.md C3)"
+  "_params": "object (optional, additive, IGNORED by the compiler — the lifted parameter map {param_name: {node, field, value_si}} per recipe.md C3)",
+  "thread_defaults": "object (optional, PART graphs only — {series?: 'ISO_metric', standard?: ISO|GB|DIN|JIS, class?: '4H'..'8H'|'4G'..'8G', handedness?: right|left, representation?: cosmetic, callout_style?: ascii|unicode}. DOCUMENT state, exactly like `material`: the values a drawing's threads share, so no node repeats them. A node's own field always wins; these only fill what a node leaves out. Applied by the COMPILER (no tool call), so it is validated here only for vocabulary — 'representation' rejects the reserved 'real'/'auto' exactly as a node does.)"
  },
  "node_common": {
   "id": "string (required — stable node id, e.g. 'n1'; used as a reference target by later nodes)",
@@ -36,7 +37,6 @@
    ],
    "_why_it_matters": "The frame is what makes a recorded 2-D contour replayable: a sketch's coordinates are along these axes, so the same contour on 'top' is NOT the same shape on 'front' (top's +y runs toward -Z). For the reverse path this is the rule that turns a drawing's front view into model coordinates, and it is why extrude.reversed's '+normal' list is Front->+Z, Top->+Y, Right->+X."
   },
-
   "node_face": {
    "node": "string — id of an earlier node",
    "selector": "string — semantic face selector resolved at compile time by the reference resolver: 'top' (v0.5: only 'top')"
@@ -70,7 +70,8 @@
    "sheet_metal",
    "sketched_bend",
    "mirror",
-   "edge_flange"
+   "edge_flange",
+   "cosmetic_thread"
   ],
   "assembly_node_types": [
    "component",
@@ -179,8 +180,49 @@
    "sheet_metal",
    "sketched_bend",
    "mirror",
-   "edge_flange"
+   "edge_flange",
+   "cosmetic_thread"
   ],
+  "thread_series": [
+   "ISO_metric"
+  ],
+  "thread_classes": [
+   "4H",
+   "5H",
+   "6H",
+   "7H",
+   "8H",
+   "4G",
+   "5G",
+   "6G",
+   "7G",
+   "8G"
+  ],
+  "thread_standards": [
+   "ISO",
+   "GB",
+   "DIN",
+   "JIS"
+  ],
+  "thread_representations": [
+   "cosmetic",
+   "real",
+   "auto"
+  ],
+  "thread_handedness": [
+   "right",
+   "left"
+  ],
+  "threadable_producers": [
+   "hole",
+   "extrude",
+   "revolve",
+   "sweep"
+  ],
+  "thread_depth": [
+   "through_all"
+  ],
+  "_thread_note": "thread_representations advertises 'real' and 'auto' because the VOCABULARY is reserved, but pycompiler REJECTS both: v1 wires only 'cosmetic' (an annotation the drawing reads, zero topology change). A real (cut) thread needs the Metric Tap.SLDLFP profile library, selection mark 1 (not 0) and swThreadEndCondition_e. thread_depth reuses hole_depth's through token; threadable_producers is the set a cosmetic_thread's ref.node may point at (a node whose geometry can carry a bore).",
   "_grammar_note": "body_producers = node types whose body a 'hole' may reference (ref.node_face.node). feature_producers = node types that CREATE a named feature, so they are valid seeds for linear_pattern/circular_pattern/mirror (the compiler substitutes the seed's runtime feature name). Patterns are producers themselves — that is what lets a grid compose as a pattern OF a pattern.",
   "assumptions": "box centred on the datum origin ('center' -> sketch (0,0)); 'top' bound to global +Y; single body. Path-profile sketches carry EXACT 2D coordinates (from analyze_model(sketch)) — the sketch plane's 2D frame is assumed identical between original and rebuild (same datum/offset => same frame). General 3D-point->sketch-2D resolution for arbitrary faces remains P1.5 option B."
  },
@@ -195,8 +237,8 @@
   },
   "sketch": {
    "description": "A 2D profile on a plane. Entities are profile primitives, not tools. v0.5 adds PATH profiles: free line/arc chains with exact coordinates (the recipe's 7-line+2-arc bracket outline), plus construction scaffolding. Primitives sharing identical endpoint coordinates close the contour — do NOT add constraints (frozen-coordinate rebuild, see add_sketch_entity guidance). The compiler welds chain endpoints within 0.0001 m onto the first matching anchor before emitting entities; a sketch consumed by extrude/revolve/sheet_metal/sweep-PROFILE/loft whose contour is still open beyond that weld is REJECTED at plan time with the gap named (rib/bend/sweep-path sketches are open by design).",
-   "ref": "datum + optional offset (the sketch plane; offset != 0 => the compiler prefers an existing face on that plane, else creates a parallel reference plane) OR — since v0.5.5, for sketches on NON-axis-aligned support (a bent flange's face, 4-1's Sketch13/16) — { face: face_anchor }: the compiler resolves the anchor via analyze_model(faces) plane-containment (resolve_face_by_anchor) and sketches ON that face (create_sketch on_face). Record the ORIGINAL sketch's `frame` — the frame transform (IR-ADR-010) makes the 2D coordinates support-independent. For a datum support the 2-D axes are fixed and measured: see reference_model.datum_frame.",
-   "profile": "array of profile primitives:",
+   "ref": "datum + optional offset (offset != 0 => prefer an existing face on that plane, else a parallel reference plane), OR { face: face_anchor } for NON-axis-aligned support (plane-containment, then create_sketch on_face). Record the ORIGINAL sketch's `frame`. Datum 2-D axes: reference_model.datum_frame.",
+   "profile": "arr of profile primitives — the ORIGINAL sketch's segments in original 2D coords (line/arc/circle + construction flag)",
    "profile_primitives": {
     "rectangle": {
      "kind": "rectangle",
@@ -272,7 +314,7 @@
    "operation": "string — 'boss' (add material) | 'cut' (remove material)",
    "end": "string (optional) — 'blind' (default; requires depth) | 'through_all' | 'up_to_surface' (requires up_to) | 'mid_plane' (requires depth = the TOTAL width; extrudes symmetrically about the sketch plane). Back-compat: depth:'through_all'/'through' or through:true still mean through_all.",
    "depth": "number — meters (blind: the one-sided depth; mid_plane: the TOTAL symmetric width)",
-   "reversed": "boolean (optional, default false) — extrude toward the datum's NEGATIVE normal instead of the positive one (maps to the extrude tool's `reverse` param). Default direction is +normal: Front→+Z, Top→+Y, Right→+X. Per-datum 2-D axes and growth side: reference_model.datum_frame. IGNORED by mid_plane (symmetric by construction). THE HIGH-RISK FLAG ON THE REVERSE PATH: a boss on 'front' grows toward the direction the front view is looked at FROM, so WITHOUT `reversed` the sketch plane is the part's BACK face and every subsequent depth is measured from the wrong end — which produces a MIRRORED part that volume, area and topology all report as correct (recipe R6/R14; observed for real on f-2, IR-ADR-019).",
+   "reversed": "bool opt, dflt false — grow toward the datum's NEGATIVE normal (tool `reverse`). Default +normal: Front→+Z, Top→+Y, Right→+X. IGNORED by mid_plane. Per-datum 2-D axes and growth side: reference_model.datum_frame. HIGH-RISK: on 'front' the un-reversed plane is the part's BACK face, so every later depth is measured from the wrong end — a MIRRORED part volume/topology still report as correct.",
    "up_to": "object (up_to_surface only) — { face: face_anchor } : the face the feature terminates on, as a geometric anchor (+ optional hint)"
   },
   "revolve": {
@@ -302,14 +344,15 @@
    "direction": "string — 'x' | 'y' | 'z' (canonical model axis; the tool selects the default plane whose normal is that axis)",
    "spacing": "number — meters (> 0): distance between adjacent instances",
    "count": "integer >= 2 — total instances incl. the seed",
-   "flip": "boolean (optional, default false — pattern toward the NEGATIVE axis; exposed v0.7.0 via FeatureLinearPattern3's FlipDir1)"
+   "flip": "boolean (optional, default false — pattern toward the NEGATIVE axis; exposed v0.7.0 via FeatureLinearPattern3's FlipDir1)",
+   "fixed": "bool opt, dflt false — fixed occurrences take `transform` as their authoritative PLACEMENT"
   },
   "circular_pattern": {
    "description": "Circular feature pattern (COVERED since v0.5.1). References an EARLIER feature-producing node as the seed — the compiler substitutes that node's RUNTIME-created feature name (localization-proof, same principle as the offset-plane name) — and creates the pattern axis from two datum planes' intersection.",
    "feature": "string — id of an earlier feature-producing node (see covered_subset.feature_producers for the registered list): the pattern seed",
-   "axis": "{ datums: [d1, d2] } — two DISTINCT canonical datums ('front'|'top'|'right') whose intersection is the pattern axis (front∩right = the Y axis, etc.); the compiler creates the reference axis and threads its runtime name",
+   "axis": "{ datums: [d1, d2] } — two DISTINCT canonical datums whose intersection is the pattern axis",
    "count": "integer >= 2 — total instances incl. the seed",
-   "angle_deg": "number — DEGREES; with equal_spacing=true the TOTAL spread (360 = full ring), else the spacing BETWEEN instances (reproduce the recipe's CirPattern verbatim: count=instances, angle_deg=spacing_deg, equal_spacing as reported — see create_pattern's round-trip guidance)",
+   "angle_deg": "num deg; with equal_spacing=true the TOTAL spread (360 = full ring), else the spacing BETWEEN instances",
    "equal_spacing": "boolean (default true)"
   },
   "hole": {
@@ -350,7 +393,9 @@
    "bend_radius": "number (optional — default bend radius in meters; omitted = thickness)",
    "k_factor": "number (optional, 0..1 — neutral-axis factor, default 0.5)",
    "reverse_thickness": "boolean (optional, default false — thicken to the OPPOSITE side of the sketch plane. A wrong side puts every downstream bend-sketch plane off the sheet. PREFER reproducing the original's own flag (analyze_model(features) reports it on the SMBaseFlange) over deriving from face positions — see symmetric_thickness for why)",
-   "symmetric_thickness": "boolean (optional, default false — thicken BOTH ways off the sketch plane, ±t/2 mid-plane style. Reproduce the ORIGINAL's own flag (analyze_model(features) reports it on the SMBaseFlange): the thickness-direction flags also define the intrinsic sheet orientation that downstream bend directions fold against — an identical blank B-rep built via reverse flags folded 4-1's Bend1 the MIRRORED way)"
+   "symmetric_thickness": "boolean (optional, default false — thicken BOTH ways off the sketch plane, ±t/2 mid-plane style. Reproduce the ORIGINAL's own flag (analyze_model(features) reports it on the SMBaseFlange): the thickness-direction flags also define the intrinsic sheet orientation that downstream bend directions fold against — an identical blank B-rep built via reverse flags folded 4-1's Bend1 the MIRRORED way)",
+   "flip": "bool (opt, MODE A only, dflt false — InsertSketchForEdgeFlange FlipDir; at 90° flip-invariant)",
+   "fixed": "face anchor { near: [x,y,z], hint? } — a point (m) ON the face to keep put, in the PRE-flange state; that face is left OPEN"
   },
   "sketched_bend": {
    "description": "Sketched bend (SM3dBend; COVERED since v0.5.5 — grown for 4-1's five bends). Bends the sheet about the bend LINE(S) in the referenced sketch — a sketch with N bend lines yields ONE feature with N bends (4-1's Sketch6). Lowers to sheet_metal_feature(sketched_bend). The FIXED side is a 3D pick point: SolidWorks derives which half stays put from the POINT, so this anchor carries side semantics, not just face identity.",
@@ -373,9 +418,26 @@
    "length": "number — meters (> 0; MODE B only, mutually exclusive with frame/profile): the flange length along the bend direction",
    "radius": "number (optional, MODE A only — bend radius in meters; OMITTED = the sheet's default radius)",
    "position": "string (optional, MODE A only — 'material_inside' (tool default) | 'material_outside' | 'bend_outside' | 'centerline' | 'bend_sharp'; replay the recipe edge_flange block's `position` verbatim — 4-1's Edge-Flange1 is bend_outside)",
-   "flip": "boolean (optional, MODE A only, default false — InsertSketchForEdgeFlange's FlipDir; at 90° the flange plane is flip-invariant and the frame transform absorbs the orientation, but replay it when read)",
+   "flip": "bool opt, dflt false — MODE A only: InsertSketchForEdgeFlange's FlipDir",
    "frame": "{ origin, xdir, ydir } — the ORIGINAL profile sketch's frame (REQUIRED in mode A, ABSENT in mode B)",
-   "profile": "array of profile primitives — the ORIGINAL profile sketch's segments, original 2D coords (line/arc/circle + construction flags, same grammar as sketch.profile; REQUIRED in mode A, ABSENT in mode B)"
+   "profile": "arr of profile primitives — the ORIGINAL profile sketch's segments, original 2D coords (line/arc/circle + construction flag)",
+   "fixed": "{ near: [x,y,z], hint? } — a point (m) ON the sheet face, on the SIDE that stays put, in the PRE-flange geometry",
+   "end": "str opt — 'blind' (default; needs depth) | 'through_all' | 'up_to_surface' (needs up_to) | 'mid_plane' (needs depth = TOTAL)"
+  },
+  "cosmetic_thread": {
+   "description": "Cosmetic (annotation-only) ISO metric internal thread on the CIRCULAR edge at a bore MOUTH (v0.9.0 — the valve body's M42x2/M40x2 bores are revolve cuts, so no `hole` node). Lowers to ONE add_cosmetic_thread; adds ZERO faces/edges. Picks the MOUTH, not a blind hole's bottom circle.",
+   "ref": "obj — { node: <earlier id in threadable_producers>, edge_anchor | bore_face }, exactly one. edge_anchor {near, radius?, hint?}: `near` is the mouth circle's CENTRE (NOT a rim point); radius separates it from a concentric rim. bore_face {near, radius?, hint?}: a point ON the cylinder.",
+   "designation": "ISO metric size 'M6' | 'M42x2' (bare size takes the coarse pitch)",
+   "depth": "m (> 0, THREAD length) | 'through_all'; blind: <= pilot bottom",
+   "standard": "opt, dflt 'ISO' — ISO|GB|DIN|JIS -> swCosmeticStandardType_e 8/13/4/9",
+   "pitch": "m (opt; required out of table when the designation carries none)",
+   "tap_drill": "m (opt; REQUIRED out of table — D-P is wrong: M8x1.25 taps 6.8, not 6.75)",
+   "class": "opt — ISO 965-1 internal 4H-8H / 4G-8G; callout only, never the pilot",
+   "handedness": "opt, dflt 'right' — right|left (left appends LH)",
+   "representation": "opt, dflt 'cosmetic' — 'real'/'auto' RESERVED (rejected)",
+   "internal": "must not be false (external threads unsupported in v1)",
+   "callout": "opt — explicit drawing Note; overrides the derived callout",
+   "callout_style": "opt, dflt 'ascii' — ascii|unicode (avoids a missing-glyph box)"
   }
  },
  "validation_split": {
@@ -512,7 +574,7 @@
    "source": "{ path: '<part file>', hash?: 'sha256:...' } — the part FILE this occurrence references; hash makes staleness loud (ADR-040)",
    "config": "string (optional) — referenced configuration name",
    "fixed": "boolean (optional, default false) — fixed occurrences take `transform` as their authoritative PLACEMENT; floating ones use it as the initial placement + verification ground truth (mates do the constraining)",
-   "transform": "REQUIRED — 13 numbers: 3x3 rotation row-major + translation xyz (meters) + scale — exactly analyze_assembly(components)' reported layout"
+   "transform": "REQUIRED — 13 numbers: 3x3 rotation row-major + translation xyz (m) + scale — analyze_assembly(components)' reported layout"
   },
   "mate": {
    "description": "One mate between two component occurrences. Lowers to add_mate (AddMate5) with INDEX-first entity selection: each side's COMPONENT-LOCAL anchor resolves to a face/edge index via analyze_assembly(faces|edges, component) (KNOWN-LIMITATIONS #6). Read the original's type/alignment/value from the ENUMS verbatim (C7) — display names are localized and unreliable; never derive them from resulting positions.",
@@ -520,7 +582,7 @@
    "alignment": "'aligned' | 'anti_aligned' | 'closest' (optional; record the reader's RESOLVED alignment verbatim)",
    "value": "number (SI: meters for distance, RADIANS for angle — C4; the compiler converts to the tool boundary) — required for distance/angle",
    "flip": "boolean (optional)",
-   "sides": "EXACTLY 2 × { component: <earlier component node id>, anchor: { kind: 'plane'|'cylinder'|'cone'|'sphere'|'line'|'circle' (the reader's swMateEntity2ReferenceType_e name, verbatim), near: [x,y,z] COMPONENT-LOCAL meters (map the original mate's assembly-space EntityParams through the inverse component transform — local anchors are transform-invariant), hint?: string } }"
+   "sides": "EXACTLY 2 × { component: <earlier component node id>, anchor: { kind, near: [x,y,z] COMPONENT-LOCAL (m), hint? } }"
   }
  }
 }

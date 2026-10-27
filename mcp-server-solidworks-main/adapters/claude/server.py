@@ -23,7 +23,7 @@ from response_mapper import map_response
 # so valid selectors are never rejected. Editing this file requires reconnecting the
 # `solidworks` MCP server (no hot-reload — KNOWN-LIMITATIONS #4).
 
-# Every tool is registered with `structured_output=False`. All 46 return a `str`, so the
+# Every tool is registered with `structured_output=False`. Every one of them returns a `str`, so the
 # SDK's structured mirror is `{"result": "<the same string>"}` — the whole payload a second
 # time, for zero added information (measured: exactly 2.00x on both SDKs). Switching it off
 # halves the wire cost of every reader (the 33 KB `schema://feature-graph` read went over at
@@ -651,6 +651,72 @@ def add_edge_feature(
 
 
 # ---------------------------------------------------------------------------
+# Tool: add_cosmetic_thread
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def add_cosmetic_thread(
+    edge_index: Annotated[int, Field(ge=0, description="Index of the CIRCULAR edge at the bore mouth, from analyze_model(analysis_type='edges') — those edges report kind='circle' with center/normal/radius. A non-circular edge fails as COSMETIC_THREAD_FAILED")],
+    size: str,
+    diameter: Annotated[float, Field(gt=0, description="NOMINAL MAJOR diameter in METERS (0.005 = an M5) — NOT the tap-drill diameter")],
+    standard: Annotated[int, Field(ge=-2, le=16, description="swCosmeticStandardType_e: 8=ISO (default), 13=GB, 4=DIN, 9=JIS, 0=ANSI Inch, 1=ANSI Metric, 7=Helicoil Metric")] = 8,
+    standard_type: str = "Tapped Hole",
+    end_type: Annotated[int, Field(ge=0, le=3, description="swCosmeticEndConditions_e: 0=blind (default), 1=blind up to next, 2=through, 3=blind 2xDia. NOT the extrude end-condition enum")] = 0,
+    depth: Annotated[float, Field(ge=0, description="Blind thread length in METERS — required > 0 for end_type 0/1/3, ignored for 2")] = 0.0,
+    note: str = "",
+) -> str:
+    """Add a COSMETIC thread to the mouth of an existing bore — the annotation a drawing reads as a
+    tapped-hole / thread callout, with NO cut geometry. This is the default way to represent a thread:
+    the real (cut) Thread feature needs a thread-profile library an install without Toolbox may not
+    have, and it actually removes material.
+    edge_index: the `i` of the CIRCULAR EDGE at the bore mouth from
+        analyze_model(analysis_type='edges'). Only a closed edge that is a FULL circle reports
+        kind='circle' (plus center/normal/radius) — pick one of those. A face index or the cylindrical
+        bore face is NOT accepted. Use normal + the sign of the center along it to tell the mouth
+        circle from the identical circle at the far end of the same bore.
+    size: the thread size to record ('M5x0.8', 'M6x1', 'M40x2', 'M42x2'). MEASURED ON 33.0: this is
+        NOT looked up in a database — InsertCosmeticThread3 ignores standard/standard_type/size
+        entirely (the created feature reads them back as None/''), and the tool then writes your three
+        strings onto the feature, where they store VERBATIM and are never validated ('ZZZ-no-such-size'
+        stores and reads back identically). So no spelling is ever 'rejected', a typo is invisible in
+        the read-back, and the spec a drawing actually shows is `note` — put the class-qualified text
+        there ('M5-8H').
+    diameter: NOMINAL MAJOR diameter in METERS — 0.005 for an M5, 0.042 for an M42x2. Never the
+        tap-drill (4.2mm) value: an internal thread measures from the major diameter. Stored with no
+        unit conversion (5.0 in stores as 5.0 m), so document-mm makes a five-metre thread circle.
+    standard/standard_type: 8 (ISO) + 'Tapped Hole' is the metric internal-thread default; 13 is GB.
+        Recorded on the feature; selects no database row through this API.
+    end_type/depth: 0 (blind) needs depth; 2 (through) ignores it and threads the whole bore — for a
+        through thread the feature's own BlindDepth then reads back the bore's real length.
+    note: the Thread callout the drawing will show (default = size), e.g. 'M5-8H'. This is the only
+        thread spec the API is measured to apply as semantics, and it is verified by read-back.
+    Verification is strict and specific to this feature kind: a cosmetic thread is a SUBFEATURE of the
+    hole/cut it threads, so it never becomes the last feature in the tree — the tool walks the whole
+    tree recursively for a CosmeticThread it did not have before, reads the callout back, and asserts
+    the face/edge/vertex counts are UNCHANGED (a cosmetic thread adds zero topology; if topology moved,
+    something else was created and the call FAILS rather than reporting a thread you do not have).
+    NOT IDEMPOTENT PER EDGE: threading a mouth that already carries a thread adds a SECOND CosmeticThread
+    under the same parent, so retry a failed job only after confirming it left nothing behind —
+    result_geometry reports threads_in_document_before/_after to make a pile-up visible. Requires an
+    active PART document. On COMPLETED, result_geometry carries {cosmetic_thread, parent_feature, size,
+    callout, standard, standard_type, diameter, edge_index, edge_is_circle, faces/edges/vertices,
+    topology_unchanged, spec_stored, spec_writeback, edge_center/edge_normal/edge_radius (the circle
+    that was threaded), end_condition, diameter_type, blind_depth}."""
+    return _call(
+        "add_cosmetic_thread",
+        {
+            "edge_index": edge_index,
+            "standard": standard,
+            "standard_type": standard_type,
+            "size": size,
+            "diameter": diameter,
+            "end_type": end_type,
+            "depth": depth,
+            "note": note,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: create_drawing
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
@@ -956,7 +1022,12 @@ def analyze_model(
     analysis_type='edges': returns a JSON object listing EVERY solid edge with its start/end/MIDPOINT 3D coords
         in meters (rounded to 6 decimals; closed/circular edges also report length) and a stable index `i`. Use
         the index `i` for add_edge_feature(edge_indices=...) — robust for crowded/concave edges — or a MIDPOINT
-        for coordinate-based selection (e.g. edge_flange's ex/ey/ez). On a very large part (many hundreds of edges)
+        for coordinate-based selection (e.g. edge_flange's ex/ey/ez). A closed edge that is a FULL circle ALSO
+        reports kind='circle' with center=[x,y,z], normal=[x,y,z] (the circle's own axis) and radius (meters) —
+        exactly the bore-mouth circle add_cosmetic_thread(edge_index=...) needs. normal + the sign of the center
+        along it is what separates the mouth circle from the identical circle at the far end of the same bore.
+        Only CLOSED edges are probed for a circle, so a PARTIAL arc never carries kind='circle' — absence is not
+        proof of non-circularity. On a very large part (many hundreds of edges)
         this is the slowest mode; prefer 'features' for a general understanding. TARGETED (recommended when you
         already know roughly WHERE): pass near='[x,y,z]' (+ optional k, axis) to get only the k nearest edges to
         a point instead of the full dump — see near/k/axis below.

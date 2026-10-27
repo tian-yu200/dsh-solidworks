@@ -6,7 +6,10 @@ Batch 8 added two things to the C# service and to `execution/solidworks/contract
   * a `kind` on every curved face with that kind's parameters — cylinder, and the newly-read
     torus / sphere / cone, whose raw COM layouts were MEASURED on parts built through this service
     (TorusParams 8, SphereParams 4, ConeParams 8 — the cone's [0..2] is a point ON the axis, not the
-    apex, and its half-angle is index 7 in RADIANS).
+    apex, and its half-angle is index 7 in RADIANS);
+  * a `kind='circle'` descriptor (center / normal / radius) on every CLOSED edge whose curve is a
+    full circle — the bore-mouth handle `add_cosmetic_thread` selects by. `Curve.CircleParams` is
+    7 doubles ([0..2] center, [3..5] axis, [6] radius), the layout confirmed on a live part.
 
 A contract that describes a read the code does not perform is worse than no contract, so this test
 diffs the documented strings against the shipped emitter. It also pins the datum vocabulary that
@@ -73,6 +76,52 @@ def test_face_kinds_are_documented_as_the_service_emits_them():
     assert "sp.Length >= 4" in src and "cp2.Length >= 7" in src
     # the debug probe key used to measure the layouts must not have shipped
     assert "dbg_cone_raw" not in src
+
+
+def test_circular_edge_descriptor_is_documented_as_the_service_emits_it():
+    """The `kind='circle'` edge descriptor add_cosmetic_thread selects by (design §4.2).
+
+    Same rule as the two checks above: the contract describes the read, and this diffs the
+    description against the shipped emitter. The two facts a resolver depends on and that are easy
+    to break silently are (a) the new keys are APPENDED after start/end/mid/length — no existing key
+    or key order moves, because `get_selection` compares JSON built by this same reader on both
+    sides of an index lookup — and (b) the probe runs ONLY on the closed-edge path, so an arc is
+    never tagged and absence of `kind` must not be read as 'not circular'.
+    """
+    analyze = _contract()["analyze_model"]
+    for field in (analyze["description"], analyze["output"]):
+        for token in ("kind='circle'", "center", "normal", "radius"):
+            assert token in field, field[:300]
+        # the closed-only caveat, in both places that promise the keys
+        assert "closed" in field.lower()
+    assert "add_cosmetic_thread" in analyze["description"]
+
+    src = _service()
+
+    def pos(needle):
+        """Offset of a needle that must occur EXACTLY ONCE — so a key emitted twice (or renamed)
+        fails here instead of silently comparing the wrong pair of offsets."""
+        assert src.count(needle) == 1, needle
+        return src.index(needle)
+
+    for emit in ('ej["kind"] = "circle";', 'ej["center"] =', 'ej["normal"] =', 'ej["radius"] ='):
+        assert emit in src, emit
+    # the length guard the descriptor sits behind, and the read that sets the flag
+    assert "curve.IsCircle()" in src
+    assert "f.Circle.Length >= 7" in src, "the flag must be set from a SUCCESSFUL CircleParams read"
+    assert "CircleParams" in src and "SurfaceParamsArray(curve.CircleParams)" in src
+    # ORDER: the circle keys are appended after `length`, in the closed branch only
+    p_len = pos('ej["length"] =')
+    p_kind = pos('ej["kind"] = "circle"')
+    p_center = pos('ej["center"] =')
+    p_normal = pos('ej["normal"] =')
+    p_radius = pos('ej["radius"] = R6(c[6]);')   # `ej["radius"]` alone also names sketch circles
+    assert p_len < p_kind < p_center < p_normal < p_radius
+    # the open-edge branch returns before ANY of it — no per-edge extra COM call on the big path
+    p_open = pos("if (!f.Closed)")
+    assert p_open < p_len and "return ej;" in src[p_open:p_len]
+    # `normal` is documented as the circle's own axis, which is the mouth-vs-far-end discriminator
+    assert "the circle's own axis" in analyze["output"]
 
 
 def test_datum_vocabulary_matches_the_frame_table():

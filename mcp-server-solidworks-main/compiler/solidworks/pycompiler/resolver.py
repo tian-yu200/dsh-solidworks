@@ -37,6 +37,13 @@ _NORMAL_TOL = 0.9       # a face counts as "upward" when normal . up >= this
 _TIE_EPS = 1e-6         # two upward faces this close in height => ambiguous
 _PLANE_TOL = 1e-5       # anchor->plane distance for a face-anchor match (10x the 1µm grid)
 _EDGE_TOL = 1e-4        # anchor->mid distance ball for an edge-anchor match (0.1 mm)
+# Circular-edge (bore mouth) matching. A blind hole contributes TWO identical circles — the
+# mouth and the bottom — separated along the circle's own normal by the cut depth, so a
+# coordinate ball alone can never tell them apart; the MOUTH is the one further along the
+# direction that points OUT of the material at the entry face. These tolerances decide "is this
+# edge the circle I mean": same centre, same axis (sign-insensitive), same radius.
+_BORE_TOL = 1e-4        # centre/radius agreement for a bore-face-derived circle (0.1 mm)
+_AXIS_TOL = 1e-3        # |cos| slack when comparing circle axes
 
 
 # ---------------------------------------------------------------------------------------------
@@ -466,3 +473,278 @@ def resolve_edges_by_anchor(port, state_version, anchors, node_id=None):
         taken[idx] = k
         resolved.append(idx)
     return resolved, {"edge_indices": resolved}
+
+
+# ---------------------------------------------------------------------------------------------
+# Thread edge (v0.9.0) — the CIRCULAR edge at a bore MOUTH
+#
+# A cosmetic thread attaches to the circular edge at the mouth of a bore. analyze_model(edges)
+# tags ONLY closed full-circle edges with kind/center/normal/radius (a partial arc, a line and a
+# spline carry none), so the candidate set is exactly "edges that report kind == 'circle'".
+#
+# THE AMBIGUITY THAT MATTERS: a blind hole has TWO identical circles — the mouth and the bottom —
+# with the same axis and the same radius, separated along the axis by the cut depth. A coordinate
+# ball cannot tell them apart, and picking the wrong one threads the bottom of the hole. The
+# MOUTH is the one whose centre lies furthest along the direction pointing OUT of the material
+# at the entry face; for a bore cut into a top face (face normal +Z) that is the larger centre.z.
+# So every path below ends in one shared mouth rule, and a wrong-end pick is impossible by
+# construction. A through hole's two circles are its two mouths, so either is valid — the
+# extreme is still deterministic, which is what matters for reproducibility.
+# ---------------------------------------------------------------------------------------------
+
+def _circle_edges(data):
+    """[(edge_index, center, normal, radius)] for the edges the reader tagged kind='circle'."""
+    out = []
+    for e in data.get("edges") or []:
+        if e.get("kind") != "circle":
+            continue
+        c, n, r = e.get("center"), e.get("normal"), e.get("radius")
+        if not (isinstance(c, list) and len(c) >= 3 and isinstance(n, list) and len(n) >= 3
+                and _is_num(r)):
+            continue
+        out.append((int(e.get("i", -1)), c, n, float(r)))
+    return out
+
+
+def _body_centroid(port, state_version, node_id, step):
+    """The largest solid body's centroid — a point INSIDE the material. None if unavailable.
+
+    Used to orient a bore's axis: the MOUTH is the end further from the material's interior, so
+    "furthest from the centroid along the axis" needs no guess about the sign of a circle's
+    normal (the reader reports the curve's own axis, and its sign is arbitrary).
+
+    Read from analyze_model(bodies), which reports `centroid` per body — NOT from
+    mass_properties, whose payload is a list of "cx=.." STRINGS rather than JSON numbers. The
+    largest body by volume wins (a multibody part's thread belongs to the part, not a scrap).
+    Read-only and memoized like every other analyze read.
+    """
+    try:
+        data = _analyze_payload(port, state_version, "bodies", node_id, step)
+    except FeatureError:
+        return None
+    best = None
+    for body in data.get("bodies") or []:
+        c = body.get("centroid")
+        if not (isinstance(c, list) and len(c) >= 3 and all(_is_num(x) for x in c[:3])):
+            continue
+        vol = body.get("volume")
+        score = float(vol) if _is_num(vol) else 0.0
+        if best is None or score > best[0]:
+            best = (score, [float(x) for x in c[:3]])
+    return None if best is None else best[1]
+
+
+def _axial_rank(center, axis, reference):
+    """How far a circle's centre lies from `reference`, measured ALONG the bore axis.
+
+    This is an UNSIGNED distance on purpose. The caller always supplies the reference it means
+    and then sorts in the direction it means:
+
+      * entry_point  -> sort ASCENDING  (nearest the entry face = the mouth)
+      * interior     -> sort DESCENDING (furthest from inside the material = the mouth)
+
+    Do NOT read a direction into the number: `axis` is the circle's own reported normal and its
+    SIGN is arbitrary (SolidWorks reports the curve's axis, not an outward one), so any signed
+    reading would flip with the reader's choice of normal. A plain distance cannot.
+    """
+    d = [center[i] - reference[i] for i in range(3)]
+    t = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2]
+    return abs(t)
+
+
+def _pick_mouth(candidates, interior, axis_hint, node_id, step, what, entry_point=None,
+                 tie_is_one_bore=False):
+    """The bore MOUTH circle among `candidates` — deterministic, never ambiguous for one bore.
+
+    `candidates` is [(index, center, normal, radius)]. Two rules, in order:
+
+      1. ENTRY SIDE (authoritative when `entry_point` is known). The thread starts at the face
+         the bore was entered from, so the mouth is the circle whose centre is nearest that
+         point along the bore axis. This is the ONLY rule that can separate a THROUGH bore's two
+         identical end circles: they sit at the SAME distance from the material's interior
+         (that is what "through" means), so the interior rule ties on them by construction and
+         raising ambiguity there would block every through thread — M42x2/M40x2 included.
+      2. INTERIOR (fallback when there is no entry point). The circle FURTHEST from a point
+         inside the material: a blind bore's bottom is closer to the interior than its mouth.
+
+    A tie is only reported when NEITHER rule can order the candidates — two circles the same
+    distance from the interior AND the same distance from the entry point, which means two
+    genuinely different bores.
+    """
+    if not candidates:
+        raise FeatureError("%s: no circular edge candidates" % what,
+                           code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+    axis = axis_hint or candidates[0][2]
+
+    def _rank(entry):
+        return sorted(((_axial_rank(c, axis, entry), i, c, n, r) for (i, c, n, r) in candidates),
+                      key=lambda t: t[0])
+
+    if entry_point is not None:
+        ranked = _rank(entry_point)          # nearest the entry face wins
+        if len(ranked) == 1 or abs(ranked[0][0] - ranked[1][0]) > _BORE_TOL:
+            return ranked[0]
+        # The two ends are equidistant from the entry point too (a symmetric bore): fall
+        # through to the interior rule, which can still order a blind bore.
+
+    if interior is None:
+        # No centroid: the midpoint of the candidate centres stands in for "inside".
+        interior = [sum(c[i] for (_x, c, _n, _r) in candidates) / float(len(candidates))
+                    for i in range(3)]
+    ranked = _rank(interior)
+    ranked.reverse()                          # furthest from the interior wins
+    if tie_is_one_bore and len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) <= _BORE_TOL:
+        # Both ends of the SAME bore (same axis, same radius — the caller built the candidate
+        # set that way). Deterministic and honest: the lowest edge index wins, so the same
+        # graph always threads the same end and a rebuild is reproducible.
+        return min(ranked, key=lambda t: t[1])
+    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) <= _BORE_TOL:
+        raise FeatureError(
+            "%s: %d circular edges are the same distance from both the entry point and the "
+            "material's interior (%s) — they are two different bores, not the two ends of one. "
+            "Anchor the mouth circle's CENTRE with ref.edge_anchor instead of ref.bore_face."
+            % (what, len(ranked), ", ".join("#%d" % t[1] for t in ranked[:4])),
+            code="REFERENCE_AMBIGUOUS", node_id=node_id, step=step)
+    return ranked[0]
+
+
+def resolve_thread_edge(port, state_version, ref, node_id=None):
+    """A thread ref -> (edge_index, info) for the bore MOUTH circle.
+
+    Two anchor kinds, both validated structurally before they get here:
+
+      ref.edge_anchor {near}      `near` is the mouth circle's CENTRE (the reader reports it as
+                                  `center` for kind='circle'). A circle's `mid` is one arbitrary
+                                  point on its circumference, so a mid-ball test would depend on
+                                  where the reader happened to sample — hence the centre.
+      ref.bore_face {near, radius?}
+                                  a point ON the cylindrical face; from it, the circles sharing
+                                  that axis and radius, then the mouth rule.
+
+    Both paths end in the same mouth rule. Raises REFERENCE_UNRESOLVED / REFERENCE_AMBIGUOUS —
+    the same codes the rest of the resolver uses, so the failure surface does not grow.
+    """
+    step = "resolve_thread_edge"
+    edges = _analyze_payload(port, state_version, "edges", node_id, step)
+    circles = _circle_edges(edges)
+    if not circles:
+        raise FeatureError(
+            "analyze_model(edges) reported no circular edges (kind='circle') — a cosmetic "
+            "thread needs the CIRCULAR edge at a bore mouth. Does this build report circle "
+            "descriptors, and does the part actually contain a bore?",
+            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+
+    edge_anchor = ref.get("edge_anchor")
+    if edge_anchor is not None:
+        near = edge_anchor["near"]
+        want_radius = edge_anchor.get("radius")
+        # RADIUS IS A DISAMBIGUATOR, not an axis filter. A revolve end face carries the bore
+        # mouth AND an outer rim as CONCENTRIC COPLANAR circles; a counterbored hole carries the
+        # pilot mouth and the counterbore-floor rim the same way. Their centres are identical, so
+        # only the radius separates them.
+        pool = circles
+        if want_radius is not None:
+            pool = [c for c in circles if abs(c[3] - float(want_radius)) <= _BORE_TOL]
+            if not pool:
+                raise FeatureError(
+                    "ref.edge_anchor %s asks for a circle of radius %g m and no circular edge "
+                    "matches it (radii present: %s)."
+                    % (list(near), float(want_radius),
+                       ", ".join("%g" % c[3] for c in circles[:8])),
+                    code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+        near_c = [(_dist3(near, c), i, c, n, r) for (i, c, n, r) in pool]
+        near_c.sort(key=lambda t: t[0])
+        best = near_c[0]
+        if best[0] > _EDGE_TOL:
+            raise FeatureError(
+                "ref.edge_anchor %s matched no circular-edge CENTRE within %g m (nearest was "
+                "#%d at %.6f m). The anchor names the mouth circle's CENTRE (analyze_model"
+                "(edges) reports it as `center` for kind='circle'), not a point on the rim."
+                % (list(near), _EDGE_TOL, best[1], best[0]),
+                code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+        # Same centre, opposite ends of a bore (a blind bore's bottom, or a through bore's far
+        # end). Break the tie by the mouth rule with the anchor as the ENTRY reference: the
+        # anchor names the mouth, so the end nearest it is the mouth — and for a through bore,
+        # whose two ends are equidistant from the material's interior, this is the ONLY rule
+        # that can decide. Never raise for the two ends of one bore.
+        tied = [t for t in near_c if abs(t[0] - best[0]) <= _BORE_TOL]
+        if len(tied) == 1:
+            return best[1], {"edge_index": best[1], "edge_center": best[2],
+                             "edge_normal": best[3], "edge_radius": best[4],
+                             "matched": "edge_anchor"}
+        interior = _body_centroid(port, state_version, node_id, step)
+        _rank, idx, center, normal, radius = _pick_mouth(
+            [(t[1], t[2], t[3], t[4]) for t in tied], interior, best[3], node_id, step,
+            "ref.edge_anchor %s" % list(near),
+            entry_point=near)
+        return idx, {"edge_index": idx, "edge_center": center, "edge_normal": normal,
+                     "edge_radius": radius, "matched": "edge_anchor (mouth rule)"}
+
+    bore_face = ref["bore_face"]
+    near = bore_face["near"]
+    want_radius = bore_face.get("radius")
+    faces = _analyze_payload(port, state_version, "faces", node_id, step)
+
+    cylinders = []
+    for f in faces.get("faces") or []:
+        if f.get("kind") != "cylinder":
+            continue
+        origin, axis, radius = f.get("origin"), f.get("axis"), f.get("radius")
+        if not (isinstance(origin, list) and isinstance(axis, list) and _is_num(radius)):
+            continue
+        if want_radius is not None and abs(float(radius) - float(want_radius)) > _BORE_TOL:
+            continue
+        if abs(_point_axis_distance(near, origin, axis) - float(radius)) > _BORE_TOL:
+            continue
+        cylinders.append((int(f.get("i", -1)), origin, axis, float(radius)))
+    if not cylinders:
+        raise FeatureError(
+            "ref.bore_face %s matched no cylindrical face%s — check the point is ON the bore's "
+            "surface and, when given, that `radius` is that bore's radius."
+            % (list(near), "" if want_radius is None else " of radius %g m" % float(want_radius)),
+            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+    if len(cylinders) > 1:
+        # Coaxial same-radius faces cannot be told apart by the anchor; the reader reports one
+        # face per connected surface, so this is a real ambiguity worth refusing.
+        raise FeatureError(
+            "ref.bore_face %s matched %d cylindrical faces (%s) — add 'radius' to pin which "
+            "coaxial bore is meant, or anchor the mouth edge directly."
+            % (list(near), len(cylinders), ", ".join("#%d r=%g" % (c[0], c[3])
+                                                     for c in cylinders[:4])),
+            code="REFERENCE_AMBIGUOUS", node_id=node_id, step=step)
+    _fidx, origin, axis, radius = cylinders[0]
+
+    # The circles ON that cylinder: same axis line, same radius.
+    on_axis = []
+    for (i, c, n, r) in circles:
+        if abs(r - radius) > _BORE_TOL:
+            continue
+        if abs(abs(n[0] * axis[0] + n[1] * axis[1] + n[2] * axis[2]) - 1.0) > _AXIS_TOL:
+            continue
+        if _point_axis_distance(c, origin, axis) > _BORE_TOL:
+            continue
+        on_axis.append((i, c, n, r))
+    if not on_axis:
+        raise FeatureError(
+            "bore face #%d (r=%g m) has no circular edge on its own axis/radius — the bore's "
+            "mouth and bottom circles should be there; is the face a full cylinder?"
+            % (_fidx, radius),
+            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+
+    # The mouth is the circle nearest the ANCHOR, projected on this cylinder's axis: a bore_face
+    # anchor is a point on the bore's surface, so the end it is written next to is the end the
+    # author means. That resolves a THROUGH bore's two equidistant ends (the interior rule ties
+    # on them by construction) and it also beats the interior rule on a COUNTERBORED blind bore,
+    # where the counterbore floor makes the pilot's bottom look "further out" than its mouth.
+    # The axis is passed as the axis_hint so the ranking never depends on the sign of a circle's
+    # reported normal (which is the curve's axis, sign arbitrary).
+    interior = _body_centroid(port, state_version, node_id, step)
+    # `on_axis` is by construction the circles of ONE cylinder (same axis, same radius), so a
+    # tie between two of them is that bore's two ENDS — a through bore, where either end is a
+    # valid mouth (end_type 2 threads the whole bore). Never raise there: pick deterministically.
+    _rank, idx, center, normal, _r = _pick_mouth(on_axis, interior, axis, node_id, step,
+                                                 "ref.bore_face %s" % list(near),
+                                                 entry_point=near, tie_is_one_bore=True)
+    return idx, {"edge_index": idx, "edge_center": center, "edge_normal": normal,
+                 "edge_radius": radius, "bore_face": _fidx,
+                 "matched": "bore_face (mouth rule)"}

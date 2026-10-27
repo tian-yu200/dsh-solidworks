@@ -108,7 +108,7 @@ dsh-solidworks
 
 ## 安装与启动
 
-要求：Windows、SolidWorks 2026、.NET Framework 4.8、MSBuild、Python 3，以及 `mcp>=2.0.0,<3`。
+要求：Windows、SolidWorks 2025（已在 33.0 上实测）或更高版本、.NET Framework 4.8、MSBuild、Python 3，以及 `mcp>=2.0.0,<3`。
 
 ```powershell
 Set-Location .\dsh-solidworks

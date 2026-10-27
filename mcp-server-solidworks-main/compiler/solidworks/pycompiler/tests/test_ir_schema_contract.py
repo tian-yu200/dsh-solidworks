@@ -72,11 +72,22 @@ _PAIRS = {
     "anchor_kinds_edge":     ir_schema.ANCHOR_KINDS_EDGE,
     "body_producers":        ir_schema.BODY_PRODUCERS,
     "feature_producers":     ir_schema.FEATURE_PRODUCERS,
+    # Threads (v0.9.0). `thread_representations` advertises the RESERVED tokens too ('real',
+    # 'auto'): the schema is the vocabulary registry, and validation is what rejects them with an
+    # explicit message — hiding them would make the reservation invisible to an author.
+    "thread_series":         ir_schema.THREAD_SERIES,
+    "thread_classes":        ir_schema.THREAD_CLASSES,
+    "thread_standards":      ir_schema.THREAD_STANDARDS,
+    "thread_representations": ir_schema.THREAD_REPRESENTATIONS,
+    "thread_handedness":     ir_schema.THREAD_HANDEDNESS,
+    "thread_depth":          ir_schema.THROUGH_DEPTHS - _HOLE_DEPTH_ALIASES,
+    "threadable_producers":  ir_schema.THREADABLE_PRODUCERS,
 }
 
 # covered_subset keys that are deliberately PROSE, not contract. Any key that is in neither this
 # set nor _PAIRS is unclassified drift: someone added a subset key without deciding what it is.
-_PROSE_KEYS = frozenset(("_note", "_grammar_note", "datum_offset", "assumptions"))
+_PROSE_KEYS = frozenset(("_note", "_grammar_note", "_thread_note", "datum_offset",
+                         "assumptions"))
 
 
 def _covered_subset():

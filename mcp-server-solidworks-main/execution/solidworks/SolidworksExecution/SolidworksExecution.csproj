@@ -98,6 +98,7 @@
     <Compile Include="Services\SolidWorksService.Drawing.cs" />
     <Compile Include="Services\SolidWorksService.Analyze.cs" />
     <Compile Include="Services\SolidWorksService.Assembly.cs" />
+    <Compile Include="Services\SolidWorksService.Threads.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

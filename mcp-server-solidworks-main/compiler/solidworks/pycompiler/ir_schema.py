@@ -36,6 +36,7 @@ sweep-path sketches are open by design and never checked.
 import math
 
 from . import contours
+from . import thread_table
 
 DATUMS = frozenset(("front", "top", "right"))
 # Assembly sub-vocabulary (v0.6.0 — Phase B, ADR-047): component + mate. An assembly graph is
@@ -52,7 +53,8 @@ ANCHOR_KINDS_EDGE = frozenset(("line", "circle"))
 ANCHOR_KINDS = ANCHOR_KINDS_FACE | ANCHOR_KINDS_EDGE
 NODE_TYPES = frozenset(("box", "sketch", "extrude", "revolve", "sweep", "rib", "hole", "fillet",
                         "chamfer", "shell", "loft", "linear_pattern", "circular_pattern",
-                        "sheet_metal", "sketched_bend", "mirror", "edge_flange")) \
+                        "sheet_metal", "sketched_bend", "mirror", "edge_flange",
+                        "cosmetic_thread")) \
     | ASSEMBLY_NODE_TYPES
 PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spline",
                            "slot", "rounded_rect"))
@@ -71,8 +73,31 @@ BODY_PRODUCERS = frozenset(("box", "extrude", "revolve", "sweep"))  # node types
 # producers too: a grid composes as a pattern OF a pattern (the D2-less linear tool).
 FEATURE_PRODUCERS = frozenset(("box", "extrude", "revolve", "sweep", "rib", "hole", "fillet", "chamfer",
                                "shell", "loft", "linear_pattern", "circular_pattern", "sheet_metal",
-                               "sketched_bend", "mirror", "edge_flange"))
+                               "sketched_bend", "mirror", "edge_flange", "cosmetic_thread"))
 CHAMFER_TYPES = frozenset(("distance_angle", "distance_distance"))
+# --- Threads (v0.9.0) ---------------------------------------------------------------------
+# The COSMETIC representation is the only one wired end to end: it is an annotation the drawing
+# reads and it changes no topology, so it is the safe default. 'real' and 'auto' are RESERVED
+# vocabulary — accepted by the schema (so a graph can record the intent) and REJECTED by
+# validation with an explicit message, because the real (cut) Thread path needs a Metric
+# Tap.SLDLFP profile library, a different selection mark (1, not 0) and a different end-condition
+# enum. Rejecting is the module's C5 rule: never silently ignore, never silently substitute.
+THREAD_REPRESENTATIONS = frozenset(("cosmetic", "real", "auto"))
+THREAD_REPRESENTATION_IMPLEMENTED = frozenset(("cosmetic",))
+THREAD_SERIES = frozenset(("ISO_metric",))
+# ISO 965-1 internal tolerance classes: grades 4-8 in positions G (loose) and H (basic).
+THREAD_CLASSES = frozenset(("4H", "5H", "6H", "7H", "8H", "4G", "5G", "6G", "7G", "8G"))
+# Drawing-standard family -> the swCosmeticStandardType_e enum the tool takes. Only the metric
+# internal families are offered: an inch/pipe standard would need its own Size strings AND its
+# own tap-drill data, and the reference repo's roadmap explicitly refuses to reuse Metric Tap.
+THREAD_STANDARDS = frozenset(("ISO", "GB", "DIN", "JIS"))
+THREAD_STANDARD_ENUM = {"ISO": 8, "GB": 13, "DIN": 4, "JIS": 9}
+THREAD_HANDEDNESS = frozenset(("right", "left"))
+# Node types whose geometry can carry a cosmetic thread (a bore, i.e. an internal cylinder):
+# a drilled hole, or a revolve/sweep/extrude CUT. Deliberately NOT box/rib/loft: those produce
+# no bore the thread could sit on, and accepting them would let a graph validate and then fail
+# at resolve time with a confusing REFERENCE_UNRESOLVED.
+THREADABLE_PRODUCERS = frozenset(("hole", "extrude", "revolve", "sweep"))
 BEND_POSITIONS = frozenset(("centerline", "material_inside", "material_outside", "bend_outside"))
 # Edge flange adds 'bend_sharp' (swFlangePositionTypes_e 5) to the shared position set.
 EDGE_FLANGE_POSITIONS = BEND_POSITIONS | frozenset(("bend_sharp",))
@@ -100,6 +125,194 @@ def _is_number(v):
 
 def _is_point3(v):
     return isinstance(v, list) and len(v) == 3 and all(_is_number(c) for c in v)
+
+
+def _normalize_class(value):
+    """'6h' -> '6H'. Returns the canonical spelling, or None when it is not a known class."""
+    if not isinstance(value, str):
+        return None
+    upper = value.strip().upper()
+    return upper if upper in THREAD_CLASSES else None
+
+
+def _resolve_thread_size(designation, pitch):
+    """(major_m, pitch_m, tap_drill_m or None, pitch_given) for a designation, in METRES.
+
+    Raises ValueError with a human message on anything unresolvable — the caller turns that
+    into an error string. A bare 'M6' resolves its coarse pitch from the table; an explicit
+    pitch always wins (that is how a fine pitch is declared). `pitch_given` says whether a
+    pitch came from ANYWHERE (the `pitch` field or the designation text), which is what decides
+    between "you must state a pitch" and "you must state a tap_drill" for an out-of-table size.
+    """
+    major_mm, parsed_pitch, _canonical = thread_table.parse_designation(designation)
+    effective = pitch if pitch is not None else parsed_pitch
+    pitch_mm = thread_table.resolve_pitch(major_mm, effective)
+    return (major_mm / 1000.0, pitch_mm / 1000.0,
+            thread_table.tap_drill_m(major_mm, pitch_mm), effective is not None)
+
+
+def _check_thread_block(block, label, errors, declared_pilot=None, declared_pilot_depth=None,
+                        where="thread"):
+    """Shared validation for a thread declaration (hole.thread / a cosmetic_thread node).
+
+    `declared_pilot` (metres) is the hole's `diameter` when the block lives on a hole; for a
+    standalone cosmetic_thread node there is no pilot to cross-check, so pass None and only the
+    table-independent rules run. Returns the resolved (major_m, pitch_m) or None when the block
+    could not be resolved — the caller must not use it then.
+    """
+    if not isinstance(block, dict):
+        errors.append("%s: '%s' must be an object." % (label, where))
+        return None
+
+    desig = block.get("designation")
+    if not isinstance(desig, str) or not desig.strip():
+        errors.append("%s.%s: 'designation' is required — an ISO metric size like 'M6' or "
+                      "'M42x2'." % (label, where))
+        return None
+
+    series = block.get("series")
+    if series is not None and series not in THREAD_SERIES:
+        errors.append("%s.%s: 'series' %r unsupported (only %s in v1 — no UNC/UNF/NPT/BSP; "
+                      "an inch or pipe thread must not reuse the metric Size table)."
+                      % (label, where, series, sorted(THREAD_SERIES)))
+
+    standard = block.get("standard")
+    if standard is not None and standard not in THREAD_STANDARDS:
+        errors.append("%s.%s: 'standard' %r unsupported (only %s; each maps to a "
+                      "swCosmeticStandardType_e member)."
+                      % (label, where, standard, sorted(THREAD_STANDARDS)))
+
+    representation = block.get("representation")
+    if representation is not None:
+        if representation not in THREAD_REPRESENTATIONS:
+            errors.append("%s.%s: 'representation' %r unsupported (only %s)."
+                          % (label, where, representation, sorted(THREAD_REPRESENTATIONS)))
+        elif representation not in THREAD_REPRESENTATION_IMPLEMENTED:
+            errors.append("%s.%s: representation '%s' is RESERVED, not implemented — v1 wires "
+                          "only 'cosmetic' (an annotation the drawing reads, zero topology "
+                          "change). A real (cut) thread needs the Metric Tap.SLDLFP profile "
+                          "library, selection mark 1 and swThreadEndCondition_e; write "
+                          "representation 'cosmetic' or omit it (the default)."
+                          % (label, where, representation))
+
+    handedness = block.get("handedness")
+    if handedness is not None and handedness not in THREAD_HANDEDNESS:
+        errors.append("%s.%s: 'handedness' %r unsupported (only %s)."
+                      % (label, where, handedness, sorted(THREAD_HANDEDNESS)))
+
+    thread_class = block.get("class")
+    if thread_class is not None and _normalize_class(thread_class) is None:
+        errors.append("%s.%s: 'class' %r is not an ISO 965-1 internal tolerance class "
+                      "(one of %s)." % (label, where, thread_class, sorted(THREAD_CLASSES)))
+
+    if block.get("internal") is False:
+        errors.append("%s.%s: external threads ('internal': false) are NOT supported in v1 — "
+                      "InsertCosmeticThread3's DiameterType for a boss is the MINOR diameter "
+                      "and the whole tap-drill cross-check inverts. Remove 'internal' or set it "
+                      "true." % (label, where))
+
+    if block.get("callout") is not None and not isinstance(block.get("callout"), str):
+        errors.append("%s.%s: 'callout' must be a string when present." % (label, where))
+    if block.get("callout_style") is not None and block.get("callout_style") not in thread_table.CALLOUT_STYLES:
+        errors.append("%s.%s: 'callout_style' %r unsupported (only %s)."
+                      % (label, where, block.get("callout_style"),
+                         sorted(thread_table.CALLOUT_STYLES)))
+
+    # depth: 'through_all' or a finite positive length. Absent means "follow the hole" — but
+    # only for a THROUGH hole, where the thread is through as well. A blind hole with a thread
+    # and no thread depth is ambiguous (does the thread stop at the floor or 2 mm above it?),
+    # and the drawing always states it, so demand it rather than guessing.
+    depth = block.get("depth")
+    if depth is not None and depth not in THROUGH_DEPTHS and not _is_pos_number(depth):
+        errors.append("%s.%s: 'depth' must be a positive number of meters (blind thread length) "
+                      "or 'through_all' (got %r)." % (label, where, depth))
+    elif depth is None and _is_pos_number(declared_pilot_depth):
+        errors.append("%s.%s: 'depth' is required for a thread in a BLIND hole (the pilot is "
+                      "%s mm deep) — state the thread depth in meters, or 'through_all' if the "
+                      "thread runs the whole pilot."
+                      % (label, where, thread_table.format_mm(float(declared_pilot_depth))))
+
+    # --- resolve the size -------------------------------------------------------------
+    pitch = block.get("pitch")
+    if pitch is not None and not _is_pos_number(pitch):
+        errors.append("%s.%s: 'pitch' must be a positive number of meters (e.g. 0.002 for 2 mm)."
+                      % (label, where))
+        return None
+    try:
+        major_m, pitch_m, tap_m, pitch_given = _resolve_thread_size(desig, pitch)
+    except ValueError as ex:
+        errors.append("%s.%s: %s" % (label, where, ex))
+        return None
+
+    nominal = block.get("nominal")
+    if nominal is not None and not _is_pos_number(nominal):
+        errors.append("%s.%s: 'nominal' must be a positive number of meters (the MAJOR "
+                      "diameter the cosmetic thread is drawn on)." % (label, where))
+    elif nominal is not None and abs(float(nominal) - major_m) > 1e-6:
+        errors.append("%s.%s: 'nominal' %g mm contradicts the designation %r (%g mm) — the "
+                      "cosmetic thread's Diameter is the NOMINAL MAJOR diameter."
+                      % (label, where, float(nominal) * 1000.0, desig, major_m * 1000.0))
+
+    # --- the tap-drill rule: the whole reason thread_table.py exists -------------------
+    explicit_pilot = block.get("tap_drill")
+    if explicit_pilot is not None and not _is_pos_number(explicit_pilot):
+        errors.append("%s.%s: 'tap_drill' must be a positive number of meters." % (label, where))
+        explicit_pilot = None
+
+    if tap_m is None and not pitch_given:
+        errors.append("%s.%s: %r is not in the ISO metric tap-drill table and no 'pitch' was "
+                      "given — an out-of-table size needs BOTH an explicit 'pitch' and an "
+                      "explicit 'tap_drill' (the pilot cannot be guessed; D-P is not the "
+                      "standard drill)." % (label, where, desig))
+        return major_m, pitch_m
+    if tap_m is None and explicit_pilot is None:
+        errors.append("%s.%s: M%gx%g is not in the tap-drill table — give 'tap_drill' "
+                      "explicitly (meters). The table covers the ISO first-choice coarse and "
+                      "fine series; anything else must state its pilot."
+                      % (label, where, major_m * 1000.0, pitch_m * 1000.0))
+        return major_m, pitch_m
+
+    if declared_pilot is not None:
+        if tap_m is not None:
+            delta = abs(float(declared_pilot) - tap_m)
+            if delta > thread_table.PILOT_TOL_M:
+                errors.append("%s: PILOT_MISMATCH — diameter is %s mm but %r taps at %s mm "
+                              "(table, ISO 261/965-1; off by %s mm > %g mm). Either correct "
+                              "'diameter' or state an explicit 'tap_drill' if this is a "
+                              "form-tapped or non-standard pilot."
+                              % (label, thread_table.format_dia_mm(float(declared_pilot)), desig,
+                                 thread_table.format_dia_mm(tap_m),
+                                 thread_table.format_dia_mm(delta),
+                                 thread_table.PILOT_TOL_M * 1000.0))
+        elif explicit_pilot is not None:
+            delta = abs(float(declared_pilot) - float(explicit_pilot))
+            if delta > thread_table.PILOT_TOL_EXPLICIT_M:
+                errors.append("%s: PILOT_MISMATCH — diameter is %s mm but 'tap_drill' is %s mm "
+                              "(off by %s mm > %g mm)."
+                              % (label, thread_table.format_dia_mm(float(declared_pilot)),
+                                 thread_table.format_dia_mm(float(explicit_pilot)),
+                                 thread_table.format_dia_mm(delta),
+                                 thread_table.PILOT_TOL_EXPLICIT_M * 1000.0))
+        # The floor the reference repo enforces: a pilot at or above the major is not a thread.
+        if float(declared_pilot) >= major_m:
+            errors.append("%s: diameter %s mm is not smaller than the %r major diameter %s mm — "
+                          "a tapped hole is drilled UNDER the nominal size."
+                          % (label, thread_table.format_dia_mm(float(declared_pilot)), desig,
+                             thread_table.format_dia_mm(major_m)))
+
+    # Thread depth must fit inside the pilot: a thread cannot be longer than the hole.
+    if declared_pilot_depth is not None and _is_pos_number(declared_pilot_depth):
+        if depth is not None and depth not in THROUGH_DEPTHS:
+            if float(depth) > float(declared_pilot_depth) + 1e-9:
+                errors.append("%s.%s: thread 'depth' %s mm exceeds the pilot depth %s mm — the "
+                              "thread cannot run past the bottom of the hole."
+                              % (label, where, thread_table.format_mm(float(depth)),
+                                 thread_table.format_mm(float(declared_pilot_depth))))
+
+    # Engagement sanity: 75-85 % is the chart's band; outside 70-90 % is accepted with the
+    # table's warning only when the pilot was stated explicitly (a form tap legitimately runs
+    # a larger pilot). The hard numbers are checked above; this is a documented non-error.
+    return major_m, pitch_m
 
 
 def validate(graph):
@@ -138,6 +351,56 @@ def validate(graph):
         if "assembly" in kinds:
             errors.append("graph.material is PART-only — set_part_material requires a part "
                           "document, not an assembly.")
+
+    # Graph-level thread defaults (v0.9.0): DOCUMENT state, exactly like `material` — a drawing
+    # whose holes are all ISO 6H should not repeat that on every node. Node-level fields win;
+    # these only fill what a node leaves out. Prose keys are the vocabulary the node fields use,
+    # so a bad default is caught here rather than silently propagating into every node.
+    thread_defaults = graph.get("thread_defaults")
+    if thread_defaults is not None:
+        if not isinstance(thread_defaults, dict):
+            errors.append("graph.thread_defaults must be an object "
+                          "{series?, standard?, class?, handedness?, representation?, "
+                          "callout_style?} when present.")
+        else:
+            if "assembly" in kinds:
+                errors.append("graph.thread_defaults is PART-only — a cosmetic thread is a "
+                              "feature of a part document, not of an assembly.")
+            allowed = ("series", "standard", "class", "handedness", "representation",
+                       "callout_style")
+            for key in sorted(thread_defaults):
+                if key not in allowed:
+                    errors.append("graph.thread_defaults.%s is not a thread default (allowed: %s)."
+                                  % (key, ", ".join(allowed)))
+            series = thread_defaults.get("series")
+            if series is not None and series not in THREAD_SERIES:
+                errors.append("graph.thread_defaults.series %r unsupported (only %s)."
+                              % (series, sorted(THREAD_SERIES)))
+            standard = thread_defaults.get("standard")
+            if standard is not None and standard not in THREAD_STANDARDS:
+                errors.append("graph.thread_defaults.standard %r unsupported (only %s)."
+                              % (standard, sorted(THREAD_STANDARDS)))
+            default_class = thread_defaults.get("class")
+            if default_class is not None and _normalize_class(default_class) is None:
+                errors.append("graph.thread_defaults.class %r is not an ISO 965-1 internal "
+                              "tolerance class (one of %s)."
+                              % (default_class, sorted(THREAD_CLASSES)))
+            handedness = thread_defaults.get("handedness")
+            if handedness is not None and handedness not in THREAD_HANDEDNESS:
+                errors.append("graph.thread_defaults.handedness %r unsupported (only %s)."
+                              % (handedness, sorted(THREAD_HANDEDNESS)))
+            representation = thread_defaults.get("representation")
+            if representation is not None and representation not in THREAD_REPRESENTATIONS:
+                errors.append("graph.thread_defaults.representation %r unsupported (only %s)."
+                              % (representation, sorted(THREAD_REPRESENTATIONS)))
+            elif representation is not None \
+                    and representation not in THREAD_REPRESENTATION_IMPLEMENTED:
+                errors.append("graph.thread_defaults.representation '%s' is RESERVED, not "
+                              "implemented — v1 wires only 'cosmetic'." % representation)
+            style = thread_defaults.get("callout_style")
+            if style is not None and style not in thread_table.CALLOUT_STYLES:
+                errors.append("graph.thread_defaults.callout_style %r unsupported (only %s)."
+                              % (style, sorted(thread_table.CALLOUT_STYLES)))
 
     seen = {}  # id -> type (in declaration order)
     seen_mate = False
@@ -224,6 +487,129 @@ def validate(graph):
             if depth not in THROUGH_DEPTHS and not _is_pos_number(depth):
                 errors.append("%s: 'depth' must be a positive number of meters (blind hole) or "
                               "'through_all' (got %r)." % (label, depth))
+
+            # --- counterbore (v0.9.0) — the M6 counterbored holes -------------------------
+            # A coaxial counterbore is cut FIRST by the lowering (see lowering.lower_hole): it
+            # changes the entry face, and cutting it after the pilot would re-intersect the
+            # already-threaded mouth edge, dropping the cosmetic thread (a subfeature of the
+            # cut). `hole.depth` is measured from the COUNTERBORE FLOOR when present, so the
+            # pilot's absolute cut depth is counterbore.depth + hole.depth.
+            counterbore = node.get("counterbore")
+            if counterbore is not None:
+                if not isinstance(counterbore, dict):
+                    errors.append("%s: 'counterbore' must be an object {diameter, depth}." % label)
+                else:
+                    cb_dia = counterbore.get("diameter")
+                    cb_depth = counterbore.get("depth")
+                    if not _is_pos_number(cb_dia):
+                        errors.append("%s.counterbore: 'diameter' must be a positive number "
+                                      "(meters)." % label)
+                    elif _is_pos_number(node.get("diameter")) \
+                            and float(cb_dia) <= float(node["diameter"]):
+                        errors.append("%s.counterbore: 'diameter' %s mm must be LARGER than the "
+                                      "hole diameter %s mm — a counterbore is the wider, "
+                                      "shallower cut at the entry."
+                                      % (label, thread_table.format_dia_mm(float(cb_dia)),
+                                         thread_table.format_dia_mm(float(node["diameter"]))))
+                    if not _is_pos_number(cb_depth):
+                        errors.append("%s.counterbore: 'depth' must be a positive number "
+                                      "(meters)." % label)
+                    elif _is_pos_number(depth) and float(cb_depth) >= float(depth):
+                        errors.append("%s.counterbore: 'depth' %s mm must be SHALLOWER than the "
+                                      "hole depth %s mm (measured from the counterbore floor)."
+                                      % (label, thread_table.format_mm(float(cb_depth)),
+                                         thread_table.format_mm(float(depth))))
+                    for key in sorted(counterbore):
+                        if key not in ("diameter", "depth"):
+                            errors.append("%s.counterbore.%s is not a counterbore field "
+                                          "(allowed: diameter, depth — a spot-face or countersink "
+                                          "is not modelled in v1)." % (label, key))
+
+            # --- thread (v0.9.0) — the M5-8H style tapped hole ---------------------------
+            thread = node.get("thread")
+            if thread is not None:
+                if thread.get("depth") is None and depth in THROUGH_DEPTHS:
+                    # A tapped THROUGH hole needs no thread depth (it is through); a blind one
+                    # does, and _check_thread_block reports it.
+                    pass
+                _check_thread_block(thread, label, errors,
+                                    declared_pilot=node.get("diameter"),
+                                    declared_pilot_depth=depth, where="thread")
+
+        elif ntype == "cosmetic_thread":
+            # A thread on a bore that already exists (v0.9.0) — the M42x2 / M40x2 valve-body
+            # bores come from `revolve` cuts, so there is no `hole` node to hang a `thread`
+            # block on. One node, one op: add_cosmetic_thread on a resolver-matched circular
+            # edge. It consumes NO geometry (a cosmetic thread adds zero faces/edges), so its
+            # ref is resolved against the geometry as it stands — no pre-consumption rule.
+            ref = node.get("ref")
+            if not isinstance(ref, dict):
+                errors.append("%s: 'ref' is required — {node, edge_anchor|bore_face}." % label)
+                ref = {}
+            tgt = ref.get("node")
+            if not isinstance(tgt, str) or not tgt:
+                errors.append("%s: ref.node (an earlier node id) is required — the node that "
+                              "created the bore." % label)
+            elif seen.get(tgt) not in THREADABLE_PRODUCERS:
+                errors.append("%s: ref.node '%s' must be an earlier %s node (a node whose "
+                              "geometry can carry a bore)."
+                              % (label, tgt, "/".join(sorted(THREADABLE_PRODUCERS))))
+            edge_anchor = ref.get("edge_anchor")
+            bore_face = ref.get("bore_face")
+            if edge_anchor is None and bore_face is None:
+                errors.append("%s: exactly ONE of ref.edge_anchor / ref.bore_face is required — "
+                              "the circular edge at the bore mouth (exact, from "
+                              "analyze_model(edges)) or the cylindrical face to derive it from."
+                              % label)
+            elif edge_anchor is not None and bore_face is not None:
+                errors.append("%s: ref.edge_anchor and ref.bore_face are mutually exclusive — "
+                              "give the mouth edge, or the bore face it is derived from." % label)
+            if edge_anchor is not None:
+                if not isinstance(edge_anchor, dict) or not _is_point3(edge_anchor.get("near")):
+                    errors.append("%s: ref.edge_anchor must be {near:[x,y,z], radius?, hint?} — "
+                                  "`near` is the mouth circle's CENTRE (analyze_model(edges) "
+                                  "reports it as `center` for kind='circle'), NOT a point on the "
+                                  "rim and NOT an edge midpoint." % label)
+                else:
+                    # radius is a DISAMBIGUATOR: a bore mouth can be concentric and coplanar with
+                    # an outer rim (a revolve end face) or with a counterbore-floor rim, and only
+                    # the radius tells them apart.
+                    anchor_radius = edge_anchor.get("radius")
+                    if anchor_radius is not None and not _is_pos_number(anchor_radius):
+                        errors.append("%s: ref.edge_anchor.radius must be a positive number of "
+                                      "meters (it separates the mouth from a concentric rim)."
+                                      % label)
+                    if edge_anchor.get("hint") is not None \
+                            and not isinstance(edge_anchor.get("hint"), str):
+                        errors.append("%s: ref.edge_anchor.hint must be a string when present."
+                                      % label)
+                    for key in sorted(edge_anchor):
+                        if key not in ("near", "radius", "hint"):
+                            errors.append("%s: ref.edge_anchor.%s is not an edge-anchor field "
+                                          "(allowed: near, radius, hint)." % (label, key))
+            if bore_face is not None:
+                if not isinstance(bore_face, dict) or not _is_point3(bore_face.get("near")):
+                    errors.append("%s: ref.bore_face must be {near:[x,y,z], radius?, hint?} — "
+                                  "a point ON the bore's cylindrical surface." % label)
+                else:
+                    radius = bore_face.get("radius")
+                    if radius is not None and not _is_pos_number(radius):
+                        errors.append("%s: ref.bore_face.radius must be a positive number of "
+                                      "meters (it pins WHICH coaxial cylinder is meant)."
+                                      % label)
+                    for key in sorted(bore_face):
+                        if key not in ("near", "radius", "hint"):
+                            errors.append("%s: ref.bore_face.%s is not a bore-face field "
+                                          "(allowed: near, radius, hint)." % (label, key))
+            # The thread block IS the node body: designation/depth/class/... live at the top
+            # level, so the same validator serves hole.thread and this node unchanged.
+            _check_thread_block(node, label, errors, where="cosmetic_thread")
+            for key in ("edge_index", "diameter"):
+                if node.get(key) is not None:
+                    errors.append("%s: '%s' is not a cosmetic_thread field — the edge is "
+                                  "resolved from ref (never given as an index in the IR), and "
+                                  "the Diameter is the designation's nominal major."
+                                  % (label, key))
 
         elif ntype == "revolve":
             sk = node.get("sketch")

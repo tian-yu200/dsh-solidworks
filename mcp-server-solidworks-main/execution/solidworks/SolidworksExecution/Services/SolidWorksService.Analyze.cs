@@ -1353,9 +1353,10 @@ namespace SolidworksExecution.Services
         // resulting strings), so a filtered response is byte-identical to the old build-everything path.
         // ------------------------------------------------------------------
 
-        // Single-edge JSON (start/end/MIDPOINT, +length for closed edges) — the shared reader behind both
-        // ReadEdges and get_selection, so an analyzed edge and a user-selected edge report identical fields
-        // (the "analyze ⊆ everything else" invariant, ADR-023 spirit). `idx` is the edge's stable index.
+        // Single-edge JSON (start/end/MIDPOINT, +length for closed edges, +kind/center/normal/radius for
+        // closed edges whose curve is a circle) — the shared reader behind both ReadEdges and get_selection,
+        // so an analyzed edge and a user-selected edge report identical fields (the "analyze ⊆ everything
+        // else" invariant, ADR-023 spirit). `idx` is the edge's stable index.
         private JObject BuildEdgeJson(IEdge edge, int idx)
         {
             return AssembleEdge(FetchEdge(edge), idx);
@@ -1368,6 +1369,8 @@ namespace SolidworksExecution.Services
             public Curve Curve;         // closed edges only (IEdge.IGetCurve returns SolidWorks.Interop.sldworks.Curve)
             public bool CurveRead;      // Evaluate2 returned: today a throw there also skips `length`
             public double[] CurveMid;   // on-curve midpoint of a closed edge
+            public bool IsCircle;       // closed edges only: Curve.IsCircle() said yes
+            public double[] Circle;     // CircleParams raw [0..2]=center [3..5]=normal [6]=radius
         }
 
         private static EdgeFacts FetchEdge(IEdge edge)
@@ -1395,6 +1398,25 @@ namespace SolidworksExecution.Services
                             var mid = curve.Evaluate2((cp[6] + cp[7]) / 2.0, 0) as double[];
                             f.CurveRead = true;
                             if (mid != null && mid.Length >= 3) f.CurveMid = mid;
+                            // CIRCLE descriptor (its own try: a throw here must not drop `mid`/`length`).
+                            // Asked for by the cosmetic-thread resolver: a thread attaches to the CIRCULAR EDGE
+                            // at a bore mouth, and the only robust way to NAME that edge among several same-radius
+                            // circles (a bore's mouth and its far end are identical circles; add a counterbore and
+                            // you get four) is center + axis + radius. Probed ONLY on the closed path, where the
+                            // curve is already in hand — the open-edge path stays COM-call-free on purpose (see
+                            // ReadEdges' note: per-edge curve calls were 26 s of a 58 s read on a 304-edge gear).
+                            try
+                            {
+                                if (curve.IsCircle())
+                                {
+                                    f.Circle = SurfaceParamsArray(curve.CircleParams);
+                                    // Set the flag from the READ, not from IsCircle alone: the JSON keys are
+                                    // emitted together or not at all, so `kind` never promises a center it
+                                    // cannot deliver.
+                                    if (f.Circle != null && f.Circle.Length >= 7) f.IsCircle = true;
+                                }
+                            }
+                            catch { }
                         }
                     }
                 }
@@ -1426,6 +1448,19 @@ namespace SolidworksExecution.Services
                 ej["mid"] = new JArray { R6(f.CurveMid[0]), R6(f.CurveMid[1]), R6(f.CurveMid[2]) };
             if (withLength && f.Curve != null && f.CurveRead)
                 try { ej["length"] = R6(f.Curve.GetLength3(cp[6], cp[7])); } catch { }
+            // Circular-edge descriptor, APPENDED after the pre-existing keys so no existing key or
+            // key ORDER moves (the same rule the bbox and face-kind additions follow). Meters, R6.
+            // `normal` is the circle's own axis — for the mouth edge of a vertical bore that is
+            // [0,0,+/-1], which is what tells a bore mouth apart from the identical circle at its
+            // far end once you know the sign of the center along that axis.
+            if (f.IsCircle)
+            {
+                var c = f.Circle;
+                ej["kind"] = "circle";
+                ej["center"] = new JArray { R6(c[0]), R6(c[1]), R6(c[2]) };
+                ej["normal"] = new JArray { R6(c[3]), R6(c[4]), R6(c[5]) };
+                ej["radius"] = R6(c[6]);
+            }
             return ej;
         }
 
