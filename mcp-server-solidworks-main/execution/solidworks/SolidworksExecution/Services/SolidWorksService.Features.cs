@@ -10,7 +10,7 @@ using SolidworksExecution.Models;
 
 namespace SolidworksExecution.Services
 {
-    // SolidWorksService partial: part-modeling features (extrude/revolve/sweep/loft, rib, edge fillet/chamfer, reference geometry, patterns, material, dimension/feature edits).
+    // SolidWorksService partial: part-modeling features (extrude/revolve/sweep/loft, rib, shell, edge fillet/chamfer, reference geometry, patterns, material, dimension/feature edits).
     public partial class SolidWorksService
     {
 
@@ -84,12 +84,16 @@ namespace SolidworksExecution.Services
 
                 // Capture the active sketch name before exiting — it is the PROFILE for sweep (and is
                 // useful context generally). Re-selected by name after exit (names resolve post-exit).
-                string activeProfileSketchName = (modelDoc.SketchManager.ActiveSketch as IFeature)?.Name;
+                // The sweep profile could never be named while create_sketch echoed a "Sketch"
+                // placeholder instead of the real feature name: the name reaching this line is the
+                // same string the compiler recorded for the sketch node, so see ActiveSketchName for
+                // how it is resolved.
+                string activeProfileSketchName = ActiveSketchName(modelDoc);
 
-                // Exit sketch mode if a sketch is still active. EXCEPTION: revolve selects its axis
-                // line by coordinate, which only works while the sketch is still active (a closed
-                // sketch's segments are not coordinate-pickable). Revolve handles its own selection
-                // below with the sketch open; FeatureRevolve2 consumes the sketch as the profile.
+                // Exit sketch mode if a sketch is still active. EXCEPTION: revolve resolves its axis
+                // against the sketch's own segments (and may add a centerline to it), which only works
+                // while the sketch is open — a closed sketch's segments are not enumerable through
+                // SketchManager. Revolve handles the axis and the exit itself below.
                 if (featureType != "revolve" && modelDoc.SketchManager.ActiveSketch != null)
                     modelDoc.SketchManager.InsertSketch(true);
 
@@ -111,37 +115,70 @@ namespace SolidworksExecution.Services
                     // (guards float rounding). Partial revolves (e.g. 180°) are unaffected.
                     if (Math.Abs(angle - 2.0 * Math.PI) < 1e-3) angle = 2.0 * Math.PI;
 
-                    // The sketch is still active here (the generic exit above skips revolve), so the
-                    // axis line is coordinate-pickable. Select it at the midpoint of the two endpoints.
+                    // is_cut (IR revolve.operation='cut'): FeatureRevolve2's 4TH argument is IsCut — true
+                    // removes the swept material instead of adding a boss. Reflection-verified over
+                    // SolidWorks.Interop.sldworks.dll: (1 SingleDir, 2 IsSolid, 3 IsThin, 4 IsCut,
+                    // 5 ReverseDir, 6 BothDirectionUpToSameEntity, 7 Dir1Type, 8 Dir2Type, 9 Dir1Angle,
+                    // 10 Dir2Angle, ...). Everything else is unchanged from the boss call.
+                    bool revolveCut = p?.Value<bool?>("is_cut") ?? false;
+
+                    // The sketch is still active here (the generic exit above skips revolve), so its
+                    // segments are enumerable and construction geometry can still be added to it.
                     if (modelDoc.SketchManager.ActiveSketch == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "SKETCH_NOT_ACTIVE", "revolve needs the profile+axis sketch active. Call create_sketch and draw the profile + axis line first.");
 
-                    modelDoc.ClearSelection2(true);
-                    bool axSel = modelDoc.Extension.SelectByID2("", "SKETCHSEGMENT", (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0, 0, false, 0, null, 0);
-                    if (!axSel)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "AXIS_NOT_FOUND", $"No sketch segment found at midpoint of provided axis coords. Provide axis_x1/y1/x2/y2 as two endpoints of the centerline.");
+                    // Make the sketch hold exactly ONE construction centerline on the requested axis,
+                    // without editing any profile edge (see EnsureRevolveAxis for why this replaces the
+                    // old midpoint pick). The call below selects NOTHING: FeatureRevolve2 runs with
+                    // UseAutoSelect, and the selection is cleared again before it, so the axis can only
+                    // come from the sketch's own centerline — which is what this guarantees.
+                    string axisHow;
+                    if (!EnsureRevolveAxis(modelDoc, ax1, ay1, ax2, ay2, out axisHow))
+                    {
+                        // Last resort: the pre-batch-2 behaviour — pick a segment at the axis midpoint and
+                        // convert it. Kept so a sketch whose axis lives in a drawn edge still builds.
+                        modelDoc.ClearSelection2(true);
+                        bool axSel = modelDoc.Extension.SelectByID2("", "SKETCHSEGMENT", (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0, 0, false, 0, null, 0);
+                        if (!axSel)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "AXIS_NOT_FOUND", $"No sketch segment found on the axis ({ax1}, {ay1})-({ax2}, {ay2}) and no centerline could be added ({axisHow}). Provide axis_x1/y1/x2/y2 as two endpoints of the centerline.");
 
-                    // Convert the selected axis line to construction geometry (a centerline) so SolidWorks
-                    // treats it as the axis of revolution and the remaining closed loop as the sole profile
-                    // — mirrors the manual flow (axis-of-revolution = line, selected-contour = sketch region).
-                    var revSelMgr = modelDoc.SelectionManager as ISelectionMgr;
-                    var axisSeg = revSelMgr?.GetSelectedObject6(1, -1) as ISketchSegment;
-                    if (axisSeg != null) axisSeg.ConstructionGeometry = true;
+                        var revSelMgr = modelDoc.SelectionManager as ISelectionMgr;
+                        var axisSeg = revSelMgr?.GetSelectedObject6(1, -1) as ISketchSegment;
+                        if (axisSeg != null) axisSeg.ConstructionGeometry = true;
+                        ExecLog.Write($"revolve axis: legacy midpoint pick fallback ({axisHow})");
+                    }
+                    else
+                        ExecLog.Write($"revolve axis: {axisHow}");
 
                     // Remember the profile sketch, then exit it (post-exit, re-select it by name — names
                     // resolve after exit even though coordinates do not).
-                    string profileSketchName = (modelDoc.SketchManager.ActiveSketch as IFeature)?.Name;
+                    string profileSketchName = ActiveSketchName(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
                     modelDoc.ClearSelection2(true);
                     if (!string.IsNullOrEmpty(profileSketchName))
                         modelDoc.Extension.SelectByID2(profileSketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
 
                     feature = featureMgr.FeatureRevolve2(
-                        true, true, false, false, false, false,
+                        true, true, false, revolveCut, false, false,
                         0, 0, angle, 0, false, false,
                         0.0, 0.0, 0, 0.0, 0.0, true, true, true) as IFeature;
+                    if (feature == null && revolveCut)
+                    {
+                        // A null cut revolve is most often the WRONG direction (the cut swept away from
+                        // material). Retry with ReverseDir (5th arg) flipped — the same recovery the
+                        // blind cut-extrude path uses. Boss revolves never reach here (unchanged call).
+                        // The rollback clears the selection, so re-select the profile sketch by name.
+                        modelDoc.ClearSelection2(true);
+                        if (!string.IsNullOrEmpty(profileSketchName))
+                            modelDoc.Extension.SelectByID2(profileSketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                        feature = featureMgr.FeatureRevolve2(
+                            true, true, false, true, true, false,
+                            0, 0, angle, 0, false, false,
+                            0.0, 0.0, 0, 0.0, 0.0, true, true, true) as IFeature;
+                        ExecLog.Write($"revolve cut: flipped-direction retry → feature={(feature != null)}");
+                    }
                 }
                 else if (featureType == "sweep")
                 {
@@ -425,6 +462,141 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "RIB_FAILED",
                         "InsertRib created no feature (tried both material directions). Check the profile sketch is open geometry whose extensions hit existing walls, and thickness is sensible.");
+
+                var response = new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "COMPLETED",
+                    Verified = true,
+                    StateVersion = _guard.GetCurrentStateVersion() + 1,
+                    CadState = new CadState
+                    {
+                        StateVersion = _guard.GetCurrentStateVersion() + 1,
+                        ActiveDocument = modelDoc.GetTitle(),
+                        DocumentType = "PART",
+                        ActiveSketch = null,
+                        Features = new List<string> { lastAfter },
+                        Dimensions = new List<string>()
+                    },
+                    ResultGeometry = BuildBodySummary(modelDoc),
+                    Error = null
+                };
+
+                _guard.RegisterCompleted(request.OperationId, response);
+                return response;
+            }
+            catch (COMException ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ERROR", ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "UNEXPECTED_ERROR", ex.Message);
+            }
+        }
+
+        public ExecutionResponse CreateShell(ToolRequest request)
+        {
+            if (_guard.IsDuplicate(request.OperationId))
+                return _guard.GetDuplicate(request.OperationId);
+
+            if (!_guard.IsStateVersionValid(request.StateVersion))
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
+
+            if (!EnsureConnected())
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+
+            try
+            {
+                var p = request.Params as JObject;
+                double? thickness = p?.Value<double?>("thickness");
+                if (thickness == null || thickness.Value <= 0)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "MISSING_PARAMETER", "thickness (> 0 meters) is required.");
+                bool outward = p?.Value<bool?>("outward") ?? false;
+
+                var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
+                if (modelDoc == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+                if (!(modelDoc is IPartDoc))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "WRONG_DOCUMENT_TYPE", "create_shell hollows a solid BODY — the active document must be a part.");
+
+                // The shell works on the solid, so any open sketch is exited first (same as
+                // add_edge_feature): a sketch in edit mode would capture the face selection.
+                if (modelDoc.SketchManager.ActiveSketch != null)
+                    modelDoc.SketchManager.InsertSketch(true);
+
+                // face_indices: a JSON-array STRING of indices into the SAME
+                // GetBodies2(swSolidBody,true) → GetFaces() enumeration analyze_model(faces) reports
+                // and create_sketch(on_face, face_index) walks — the add_edge_feature/edge_indices
+                // idiom (ADR-022). Those faces are the ones LEFT OPEN. Absent or empty = a CLOSED
+                // shell: InsertFeatureShell with nothing selected hollows the body keeping every face.
+                string faceIndicesJson = p?.Value<string>("face_indices");
+                JArray indexArray = null;
+                if (!string.IsNullOrEmpty(faceIndicesJson))
+                {
+                    try { indexArray = JArray.Parse(faceIndicesJson); }
+                    catch
+                    {
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "face_indices must be a valid JSON array of integers, e.g. \"[3]\".");
+                    }
+                }
+
+                modelDoc.ClearSelection2(true);
+                int removedCount = 0;
+                if (indexArray != null)
+                {
+                    for (int i = 0; i < indexArray.Count; i++)
+                    {
+                        int fi = indexArray[i].Value<int>();
+                        // Mark 0 (plain selection): the shell's faces carry no end-condition
+                        // semantics, unlike the Mark 1 up-to-surface reference FeatureExtrusion3 wants.
+                        if (fi < 0 || !SelectFaceByIndexAppend(modelDoc, fi, 0))
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "FACE_NOT_FOUND",
+                                $"Face index {fi} could not be selected on the live body (face #{i} of face_indices). Call analyze_model(faces) for valid indices.");
+                        removedCount++;
+                    }
+                }
+
+                // IModelDoc2.InsertFeatureShell(Thickness, Outward) is VOID — and there is no
+                // shell method on IFeatureManager at all (reflected off the LOCAL
+                // SolidWorks.Interop.sldworks.dll: only GetPlasticsShellType exists there), so there
+                // is no return value to test. Creation is therefore confirmed from the feature tree,
+                // exactly like create_rib confirms InsertRib.
+                string lastBefore = LastFeatureName(modelDoc);
+                // RAW volumes for the delta: BuildBodySummary's "volume" is R6-rounded (1e-6 m3),
+                // which is coarser than the 1e-12 threshold below and would call a successful shell
+                // of a small or thin part (dV < ~5e-7 m3) SHELL_FAILED. The R6 echo stays in
+                // result_geometry.
+                double? volBefore = RawVolume(modelDoc);
+
+                modelDoc.InsertFeatureShell(thickness.Value, outward);
+                modelDoc.EditRebuild3();
+
+                string lastAfter = LastFeatureName(modelDoc);
+                double? volAfter = RawVolume(modelDoc);
+                if (lastAfter == lastBefore)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "SHELL_FAILED",
+                        $"InsertFeatureShell created no feature at thickness {thickness.Value} m " +
+                        $"({removedCount} face(s) to remove, outward={outward}). Usually the wall is " +
+                        "thicker than the thinnest section of the body, or a selected face cannot be removed.");
+                if (volBefore != null && volAfter != null && Math.Abs(volAfter.Value - volBefore.Value) < 1e-12)
+                    // SolidWorks can append an errored feature to the tree and leave the body alone,
+                    // so a tree diff alone would report success on a shell that hollowed nothing.
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "SHELL_FAILED",
+                        $"InsertFeatureShell added '{lastAfter}' but the body volume is unchanged " +
+                        $"({volBefore.Value:R} m3) — the shell feature is in error at thickness " +
+                        $"{thickness.Value} m; reduce it below the thinnest wall of the body.");
 
                 var response = new ExecutionResponse
                 {
@@ -1426,6 +1598,148 @@ namespace SolidworksExecution.Services
                 false, false, false,
                 (int)swStartConditions_e.swStartSketchPlane, 0,
                 false, false) as IFeature;
+        }
+
+        // -----------------------------------------------------------------------
+        // Revolve axis
+        // -----------------------------------------------------------------------
+
+        // Metres, the same order as the compiler's contour weld tolerance: an axis named with the
+        // segment's EXACT coordinates (what ir_schema demands) always matches, and a near-miss never
+        // wins by rounding.
+        private const double AXIS_MATCH_TOL = 1e-6;
+
+        private static bool AxisClose(double a, double b) { return Math.Abs(a - b) <= AXIS_MATCH_TOL; }
+
+        // How well the sketch line (bx1,by1)-(bx2,by2) serves as the revolution axis
+        // (ax1,ay1)-(ax2,ay2), both in SKETCH-space coordinates:
+        //   3 = endpoints coincide, either orientation — the documented idiom (the IR carries the
+        //       axis SEGMENT's own exact coordinates, so the drawn centerline scores 3).
+        //   2 = collinear and the segment spans both axis endpoints (a centerline drawn long).
+        //   1 = collinear and the segment contains the axis midpoint (a centerline drawn short — still
+        //       the same infinite axis line, which is all SolidWorks uses).
+        //   0 = not the axis.
+        private static int AxisLineScore(double ax1, double ay1, double ax2, double ay2,
+                                         double bx1, double by1, double bx2, double by2)
+        {
+            if (AxisClose(bx1, ax1) && AxisClose(by1, ay1) && AxisClose(bx2, ax2) && AxisClose(by2, ay2)) return 3;
+            if (AxisClose(bx1, ax2) && AxisClose(by1, ay2) && AxisClose(bx2, ax1) && AxisClose(by2, ay1)) return 3;
+
+            double dx = bx2 - bx1, dy = by2 - by1;
+            double sq = dx * dx + dy * dy;
+            if (sq < 1e-24) return 0;
+            double len = Math.Sqrt(sq);
+            // perpendicular distance of each axis endpoint from the segment's INFINITE line
+            if (Math.Abs((ax1 - bx1) * dy - (ay1 - by1) * dx) / len > AXIS_MATCH_TOL) return 0;
+            if (Math.Abs((ax2 - bx1) * dy - (ay2 - by1) * dx) / len > AXIS_MATCH_TOL) return 0;
+
+            double t1 = ((ax1 - bx1) * dx + (ay1 - by1) * dy) / sq;
+            double t2 = ((ax2 - bx1) * dx + (ay2 - by1) * dy) / sq;
+            if (t1 >= -AXIS_MATCH_TOL && t1 <= 1.0 + AXIS_MATCH_TOL &&
+                t2 >= -AXIS_MATCH_TOL && t2 <= 1.0 + AXIS_MATCH_TOL) return 2;
+
+            double tm = (((ax1 + ax2) / 2.0 - bx1) * dx + ((ay1 + ay2) / 2.0 - by1) * dy) / sq;
+            return (tm >= -AXIS_MATCH_TOL && tm <= 1.0 + AXIS_MATCH_TOL) ? 1 : 0;
+        }
+
+        // Guarantee the active sketch carries exactly one construction centerline on the requested axis,
+        // editing NO profile edge. Returns false only when nothing could be determined (no enumerable
+        // sketch / the centerline could not be created), so the caller may fall back.
+        //
+        // WHY THIS EXISTS. FeatureRevolve2 is called with UseAutoSelect and the selection is cleared
+        // right before it, so the axis of revolution can only ever be the sketch's own centerline —
+        // the previous SelectByID2 at the axis midpoint never actually fed the axis. Its one real effect
+        // was CONVERTING whatever it picked to construction geometry, and a shaft drawn the textbook way
+        // has the profile's own edge ON the axis and a centerline on the same line (the 1-2 flange idiom
+        // the compiler tests use). That midpoint names TWO segments, SolidWorks may return the profile
+        // edge, and converting it opens the contour — the revolve then sweeps an open chain or fails.
+        // Matching against the sketch's segments instead is deterministic, compares in sketch space
+        // (SelectByID2 wants model space, so the same numbers were not even the same coordinates), and
+        // never touches a profile edge: an existing on-axis centerline is used as it is, and when the
+        // only thing on the axis is a real edge, a dedicated centerline is created at the given
+        // coordinates instead of converting that edge.
+        private bool EnsureRevolveAxis(IModelDoc2 modelDoc, double ax1, double ay1,
+                                       double ax2, double ay2, out string how)
+        {
+            how = "";
+            ISketch sk = modelDoc.SketchManager.ActiveSketch as ISketch;
+            if (sk == null)
+            {
+                how = "active sketch is not an ISketch";
+                return false;
+            }
+
+            object[] segs;
+            try { segs = sk.GetSketchSegments() as object[]; }
+            catch (Exception ex)
+            {
+                how = $"GetSketchSegments failed: {ex.Message}";
+                return false;
+            }
+
+            ISketchSegment conMatch = null, realMatch = null;
+            int conScore = 0, realScore = 0, offAxisCenterlines = 0;
+            if (segs != null)
+            {
+                foreach (var o in segs)
+                {
+                    var seg = o as ISketchSegment;
+                    if (seg == null) continue;
+                    bool con = false;
+                    try { con = seg.ConstructionGeometry; } catch { }
+                    if (seg.GetType() != 0)          // swSketchSegments_e: 0 = line
+                    {
+                        if (con) offAxisCenterlines++;   // arcs/splines are never the axis line
+                        continue;
+                    }
+                    var ln = seg as ISketchLine;
+                    if (ln == null) continue;
+                    ISketchPoint pa = ln.IGetStartPoint2(), pb = ln.IGetEndPoint2();
+                    if (pa == null || pb == null) continue;
+
+                    int score = AxisLineScore(ax1, ay1, ax2, ay2, pa.X, pa.Y, pb.X, pb.Y);
+                    if (score == 0) { if (con) offAxisCenterlines++; continue; }
+                    if (con) { if (score > conScore) { conScore = score; conMatch = seg; } }
+                    else if (score > realScore) { realScore = score; realMatch = seg; }
+                }
+            }
+
+            if (conMatch != null)
+            {
+                // Nothing to create and nothing to convert: the drawn centerline is the axis.
+                how = $"using the sketch's own centerline (endpoint-match score {conScore})";
+                if (realMatch != null)
+                    how += $"; left the coincident profile edge (score {realScore}) as real geometry so the contour stays closed";
+                return true;
+            }
+
+            // No centerline on the axis. Create a dedicated one at the exact requested coordinates —
+            // whether or not a profile edge happens to lie there. Converting that edge (the old move)
+            // would open the contour.
+            ISketchSegment added;
+            try { added = modelDoc.SketchManager.CreateLine(ax1, ay1, 0, ax2, ay2, 0) as ISketchSegment; }
+            catch (Exception ex)
+            {
+                how = $"centerline create failed: {ex.Message}";
+                return false;
+            }
+            if (added == null)
+            {
+                how = "centerline create returned null";
+                return false;
+            }
+            try { added.ConstructionGeometry = true; }
+            catch (Exception ex)
+            {
+                how = $"centerline created but not convertible to construction geometry: {ex.Message}";
+                return false;
+            }
+
+            how = $"added a dedicated construction centerline at ({ax1}, {ay1})-({ax2}, {ay2})";
+            if (realMatch != null) how += $" (profile edge on that line kept real, score {realScore})";
+            if (offAxisCenterlines > 0)
+                how += $" — WARNING: {offAxisCenterlines} other centerline(s) in the sketch, so the axis may be ambiguous";
+            return true;
         }
     }
 }

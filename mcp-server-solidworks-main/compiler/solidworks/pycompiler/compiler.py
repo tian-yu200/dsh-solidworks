@@ -9,6 +9,7 @@ Public API (consumed by pycompiler/__init__.py and the adapter):
     compile_and_run(port, graph) -> CompileResult
 """
 from . import lowering
+from . import resolver
 from .errors import FeatureError
 from .ir_schema import validate
 from .resolver import (resolve_center_on_face, resolve_component_entity_by_anchor,
@@ -57,6 +58,19 @@ class CompileResult(object):
 
 
 def compile_and_run(port, graph):
+    """Public entry: one graph in, one CompileResult out.
+
+    Opens the analyze-payload memo scope for THIS run and always closes it (SPEED task A) — a
+    cached read must never outlive the graph that produced it, and a previous graph's reads must
+    never be served here."""
+    resolver.begin_run()
+    try:
+        return _compile_and_run(port, graph)
+    finally:
+        resolver.end_run()
+
+
+def _compile_and_run(port, graph):
     result = CompileResult()
 
     # 1) Structural validation. If it fails, NO execution call is made.
@@ -96,7 +110,13 @@ def compile_and_run(port, graph):
                     params = _transform_entity_params(params, frame_fn, frame_mirror)
                 resp = port.execute(op.tool, params, sv)
                 result.exec_calls += 1
+                previous_sv = sv
                 sv = _advance(resp, sv, nid, ntype, op)
+                if sv != previous_sv:
+                    # A write advanced the document: every analyze payload read at the old
+                    # state_version is stale (SPEED task A). Reads that did NOT bump
+                    # state_version (analyze_* itself) stay cached.
+                    resolver.invalidate(sv)
                 last_resp = resp
                 feats = ((resp.get("cadState") or {}).get("features")) or []
                 if nid and feats and feats[0]:
@@ -236,6 +256,23 @@ def _plan_node(port, node, state_version, node_features):
         edge_indices, _info = resolve_edges_by_anchor(port, state_version, node["edges"],
                                                       node_id=node.get("id"))
         return lowering.lower_chamfer(node, edge_indices)
+    if ntype == "shell":
+        # The faces left OPEN are anchor-resolved on the PRE-shell geometry — the shell consumes
+        # them, exactly the fillet/chamfer pre-consumption anchor rule (IR-ADR-008). One
+        # analyze_model(faces) read serves all anchors (resolver memo).
+        taken = {}
+        face_indices = []
+        for k, anchor in enumerate(node.get("faces_to_remove") or []):
+            idx, _info = resolve_face_by_anchor(port, state_version, anchor["near"],
+                                                node_id=node.get("id"))
+            if idx in taken:
+                raise FeatureError(
+                    "shell face anchors %d and %d resolved to the SAME face #%d — duplicate anchor"
+                    % (taken[idx], k, idx),
+                    code="REFERENCE_AMBIGUOUS", node_id=node.get("id"))
+            taken[idx] = k
+            face_indices.append(idx)
+        return lowering.lower_shell(node, face_indices)
     if ntype == "sheet_metal":
         return lowering.lower_sheet_metal(node)
     if ntype == "sketched_bend":

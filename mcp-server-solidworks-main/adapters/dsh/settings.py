@@ -17,5 +17,11 @@ FEATURE_GRAPH_SCHEMA_PATH = (
 )
 
 ACTION_TTL_SECONDS = int(os.getenv("DSH_SOLIDWORKS_ACTION_TTL_SECONDS", "1800"))
+
+# Cheap identity probe (GET /api/tool/identity, served by ToolController.Identity). Read-only,
+# no state_version check — the same budget family as /health and /state.
+EXECUTION_BASE_URL = os.getenv("EXECUTION_BASE_URL", "http://localhost:5000")
+IDENTITY_ENDPOINT = f"{EXECUTION_BASE_URL}/api/tool/identity"
+IDENTITY_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT", "30"))
 BATCH_NODE_THRESHOLD = int(os.getenv("DSH_SOLIDWORKS_BATCH_NODE_THRESHOLD", "10"))
 BATCH_EDIT_THRESHOLD = int(os.getenv("DSH_SOLIDWORKS_BATCH_EDIT_THRESHOLD", "5"))

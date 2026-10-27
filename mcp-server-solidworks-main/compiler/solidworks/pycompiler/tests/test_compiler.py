@@ -1963,6 +1963,137 @@ def test_huge_int_coordinates_never_overflow():
 _TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
 
 
+# ---------------------------------------------------------------------------------------------
+# SPEED task A — analyze payload memo
+#
+# The resolver re-read the same full faces/edges dump once per resolver call even though
+# nothing had been written in between (264 of 463 analyze_model calls in the production log
+# repeated a read at the SAME state_version — 2 573 s, 32% of all backend time). The memo is
+# scoped to ONE compile_and_run and keyed by state_version, so a write must force a re-read.
+# ---------------------------------------------------------------------------------------------
+def _two_hole_graph():
+    """Two `hole` nodes: each resolves the top face, so the same faces dump is wanted twice."""
+    return {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+        {"id": "n1", "type": "box", "ref": {"datum": "top"},
+         "width": 0.05, "depth": 0.05, "height": 0.05},
+        {"id": "n2", "type": "hole",
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "diameter": 0.01, "depth": "through_all"},
+        {"id": "n3", "type": "hole",
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "diameter": 0.008, "depth": "through_all"},
+    ]}
+
+
+def _count(port, tool, analysis_type=None):
+    return len([
+        1 for (t, p) in port.calls
+        if t == tool and (analysis_type is None or p.get("analysis_type") == analysis_type)
+    ])
+
+
+def test_resolver_reads_the_same_payload_once_per_state_version():
+    # Two resolver lookups at the SAME state_version must cost ONE backend call. This is the
+    # real production shape: a node plans several references (a hole's top face, an up-to
+    # face anchor, an offset sketch's support face) and each used to re-issue the full dump.
+    from pycompiler import resolver as _resolver
+
+    port = FakePort()
+    _resolver.begin_run()
+    try:
+        first, _info = _resolver.resolve_top_face(port, 7)
+        second, _info = _resolver.resolve_top_face(port, 7)
+        # a DIFFERENT analysis_type at the same state_version is a different read
+        _resolver.resolve_face_on_plane(port, 7, "top", 0.05)
+    finally:
+        _resolver.end_run()
+    assert first == second
+    assert _count(port, "analyze_model", "faces") == 1, port.calls
+
+
+def test_resolver_invalidate_forces_a_fresh_read_after_a_write():
+    # The compiler calls invalidate(new_sv) whenever an op advances the counter. A lookup at
+    # the NEW state_version must hit the wire even though the OLD payload is still memoized.
+    from pycompiler import resolver as _resolver
+
+    port = FakePort()
+    _resolver.begin_run()
+    try:
+        _resolver.resolve_top_face(port, 7)
+        assert _count(port, "analyze_model", "faces") == 1, port.calls
+        _resolver.invalidate(8)                      # a write advanced the document
+        _resolver.resolve_top_face(port, 8)
+        assert _count(port, "analyze_model", "faces") == 2, port.calls
+        # ...and the read at the OLD state_version was dropped, not merely shadowed
+        _resolver.resolve_top_face(port, 7)
+        assert _count(port, "analyze_model", "faces") == 3, port.calls
+    finally:
+        _resolver.end_run()
+
+
+def test_resolver_write_in_between_forces_a_fresh_read():
+    # A fillet forces a faces read, then the box's extrude advances state_version, then the
+    # hole forces a SECOND read: the memo must not serve the pre-write dump.
+    g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+        {"id": "n1", "type": "box", "ref": {"datum": "top"},
+         "width": 0.05, "depth": 0.05, "height": 0.05},
+        {"id": "n2", "type": "hole",
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "diameter": 0.01, "depth": "through_all"},
+        # a second body-producing box ADVANCES state_version between the two reads
+        {"id": "n3", "type": "box", "ref": {"datum": "top"},
+         "width": 0.02, "depth": 0.02, "height": 0.02},
+        {"id": "n4", "type": "hole",
+         "ref": {"node_face": {"node": "n3", "selector": "top"}, "position": "center"},
+         "diameter": 0.005, "depth": "through_all"},
+    ]}
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    assert _count(port, "analyze_model", "faces") == 2, port.calls
+
+
+def test_resolver_memo_never_leaks_across_runs():
+    # Same port, same state_version, TWO separate compile_and_run calls: the second run must
+    # re-read, because a payload from a previous graph may describe a document that has since
+    # been replaced on disk without the counter moving.
+    graph = _two_hole_graph()
+    port = FakePort()
+    first = compile_and_run(port, graph)
+    assert first.status == "COMPLETED", first.to_dict()
+    before = _count(port, "analyze_model", "faces")
+
+    # Simulate the document being swapped behind the same counter.
+    port._faces = json.dumps({"face_count": 0, "faces": []})
+    second = compile_and_run(port, graph)
+    assert _count(port, "analyze_model", "faces") == before + 1, port.calls
+    # ...and the second run really SAW the new (empty) dump rather than the cached old one.
+    assert second.status == "FAILED"
+    assert second.error["code"] == "REFERENCE_UNRESOLVED"
+
+
+def test_resolver_memo_key_includes_analysis_type():
+    # faces and edges are different reads: one must never satisfy the other.
+    g = {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
+        {"id": "n1", "type": "box", "ref": {"datum": "top"},
+         "width": 0.05, "depth": 0.05, "height": 0.05},
+        {"id": "n2", "type": "hole",
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "diameter": 0.01, "depth": "through_all"},
+        {"id": "n3", "type": "fillet", "radius": 0.001,
+         "edges": [{"near": [0.025, 0.05, 0.025], "hint": "top"}]},
+    ]}
+    port = FakePort(edges=json.dumps({"edge_count": 1, "edges": [
+        {"i": 0, "mid": [0.025, 0.05, 0.025], "kind": "line"}]}))
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    assert _count(port, "analyze_model", "faces") == 1, port.calls
+    assert _count(port, "analyze_model", "edges") == 1, port.calls
+
+
+_TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+
+
 if __name__ == "__main__":
     failed = 0
     for t in _TESTS:

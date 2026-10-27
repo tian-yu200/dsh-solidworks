@@ -68,8 +68,9 @@ original — these rules replace the readback discipline there. C1–C5 still ap
   the target's coordinate IN THE STATE the node executes (after all earlier nodes). Compute it
   from your own intended dimensions — and know the TOOL DEFAULTS that decide where geometry
   lands: a base flange thickens to the sketch plane's −normal side by default
-  (`reverse_thickness` flips, `symmetric_thickness` splits ±t/2); box/rectangle profiles are
-  centred on the sketch origin; extrude runs toward +normal (`reversed` flips). A missed
+  (`reverse_thickness` flips, `symmetric_thickness` splits ±t/2); box profiles are centred on
+  the sketch origin while a rectangle accepts optional `cx`/`cy` (default 0) that offset its
+  centre; extrude runs toward +normal (`reversed` flips). A missed
   anchor fails LOUD with the nearest distance — read it, correct the coordinate ONCE (the miss
   distance usually names the mistake, e.g. exactly one sheet thickness), never iterate blindly.
 - **Build direction from the datum.** A boss/extrude on a canonical datum builds toward the
@@ -83,8 +84,8 @@ original — these rules replace the readback discipline there. C1–C5 still ap
   those exist for verbatim replay); `material {name, library?}` at graph level; a GRID as a
   pattern OF a pattern (a `linear_pattern` seeding on an earlier `linear_pattern` — the tool
   has no second direction).
-- **Know what is NOT expressible** (state it, don't improvise a lookalike): sweep/revolve/loft
-  are BOSS-only; no shell/draft/dome/wrap/hole-wizard/thread; `linear_pattern` is
+- **Know what is NOT expressible** (state it, don't improvise a lookalike): sweep/loft
+  are BOSS-only (a revolve takes `operation: "boss" | "cut"`); no draft/dome/wrap/hole-wizard/thread; `linear_pattern` is
   single-direction (+`flip`); mirror planes are canonical datums only. If the intent needs one
   of these, report the gap (C5).
 - **Self-verify without an original:** before submitting, COMPUTE the expected outcome from
@@ -101,9 +102,9 @@ original — these rules replace the readback discipline there. C1–C5 still ap
 
 1. Walk `recipe.features` in order; classify each against the CURRENT covered vocabulary —
    **the schema IS the registry**: read the node types from `feature-graph.schema.json`
-   (the `schema://feature-graph` resource). Part vocabulary (0.7.4-draft): `box`,
+   (the `schema://feature-graph` resource). Part vocabulary (0.8.0-draft): `box`,
    `sketch`+`extrude` boss/cut (ends blind / through_all / up_to_surface / mid_plane),
-   `hole`-on-face, `fillet`, `chamfer`, `revolve`, `sweep`, `rib`, `loft`, `linear_pattern`,
+   `hole`-on-face, `fillet`, `chamfer`, `shell`, `revolve`, `sweep`, `rib`, `loft`, `linear_pattern`,
    `circular_pattern`, `mirror`, `sheet_metal`, `sketched_bend`, `edge_flange` (custom-profile
    or simple length mode); profiles rectangle/circle/line/arc/ellipse/spline + construction;
    sketch supports = datums front/top/right with a signed `offset` OR a `ref.face` anchor; an

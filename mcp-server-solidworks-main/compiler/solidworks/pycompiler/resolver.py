@@ -39,24 +39,81 @@ _PLANE_TOL = 1e-5       # anchor->plane distance for a face-anchor match (10x th
 _EDGE_TOL = 1e-4        # anchor->mid distance ball for an edge-anchor match (0.1 mm)
 
 
+# ---------------------------------------------------------------------------------------------
+# analyze payload memo (SPEED task A)
+#
+# The geometry a resolver reads is a pure function of (state_version, analysis_type, name,
+# narrowing args): no resolver call mutates the document, so a read taken at state_version N
+# stays valid until something BUMPS state_version. A single feature graph still re-reads the
+# same full faces/edges dump once per resolver call (a fillet with 8 anchors, a hole plus a
+# face anchor, ...), and the production log shows 264 of 463 analyze_model calls repeating a
+# read already taken at the SAME state_version — 2 573 s, 32% of all backend time.
+#
+# Scope is deliberately ONE compile_and_run: `begin_run` clears the memo, the compiler calls
+# `invalidate` whenever an op returns a NEW state_version, and `end_run` clears it again so
+# nothing survives into the next graph (a live run's cache must never leak a stale document).
+# A cached entry is therefore only ever served for the exact state_version it was read at.
+# ---------------------------------------------------------------------------------------------
+class _AnalyzeMemo(object):
+    """Per-run cache of analyze_model/analyze_assembly payloads, keyed by read identity."""
+
+    def __init__(self):
+        self._entries = {}
+
+    def reset(self):
+        self._entries.clear()
+
+    def key(self, tool, state_version, analysis_type, name, narrowing):
+        # `narrowing` is the tool's own narrowing args (near/k/axis/component). Sorted items so
+        # an equal set of args always maps to the same key; JSON keeps lists hashable+comparable.
+        return (
+            tool,
+            state_version,
+            analysis_type,
+            name,
+            json.dumps(narrowing or {}, sort_keys=True, default=str),
+        )
+
+    def get(self, key):
+        return self._entries.get(key)
+
+    def put(self, key, value):
+        self._entries[key] = value
+
+    def invalidate(self, state_version):
+        """Drop every entry not read at `state_version` (a write advanced the document)."""
+        for key in [k for k in self._entries if k[1] != state_version]:
+            del self._entries[key]
+
+    def __len__(self):
+        return len(self._entries)
+
+
+MEMO = _AnalyzeMemo()
+
+
+def begin_run():
+    """Start a compile_and_run scope: nothing from a previous run may be reused."""
+    MEMO.reset()
+
+
+def end_run():
+    """Close the scope so no payload outlives the graph that produced it."""
+    MEMO.reset()
+
+
+def invalidate(state_version):
+    """A write op advanced the document — drop reads taken at any other state_version."""
+    MEMO.invalidate(state_version)
+
+
 def resolve_top_face(port, state_version, node_id=None):
     """Return (face_index, info) for the semantic 'top' face. Raises FeatureError on
-    REFERENCE_UNRESOLVED (no upward face / analyze failed) or REFERENCE_AMBIGUOUS (a tie)."""
-    resp = port.execute("analyze_model", {"analysis_type": "faces", "name": ""}, state_version)
-    if resp.get("status") != "COMPLETED":
-        err = resp.get("error") or {}
-        raise FeatureError("analyze_model(faces) failed: %s" % err.get("message"),
-                           code="REFERENCE_UNRESOLVED", node_id=node_id, step="resolve_top_face")
+    REFERENCE_UNRESOLVED (no upward face / analyze failed) or REFERENCE_AMBIGUOUS (a tie).
 
-    feats = (resp.get("cadState") or {}).get("features") or []
-    if not feats:
-        raise FeatureError("analyze_model(faces) returned no face data (is there a solid body?)",
-                           code="REFERENCE_UNRESOLVED", node_id=node_id, step="resolve_top_face")
-    try:
-        data = json.loads(feats[0])
-    except Exception as ex:
-        raise FeatureError("could not parse analyze_model(faces) payload: %s" % ex,
-                           code="REFERENCE_UNRESOLVED", node_id=node_id, step="resolve_top_face")
+    Routed through _analyze_payload so it shares the per-run memo (SPEED task A): a hole, an
+    up-to face anchor and an offset sketch on the same body all want this same dump."""
+    data = _analyze_payload(port, state_version, "faces", node_id, "resolve_top_face")
 
     candidates = []  # (centroid_y, face_index, face)
     for f in data.get("faces") or []:
@@ -93,8 +150,18 @@ def resolve_center_on_face(face_info):
 
 
 def _analyze_payload(port, state_version, analysis_type, node_id, step):
-    """Run read-only analyze_model(analysis_type) through the port and parse its JSON payload."""
-    resp = port.execute("analyze_model", {"analysis_type": analysis_type, "name": ""}, state_version)
+    """Run read-only analyze_model(analysis_type) through the port and parse its JSON payload.
+
+    Memoized for the duration of one compile_and_run (SPEED task A): the SAME read at the SAME
+    state_version is issued to the backend once. A write bumps state_version, the compiler calls
+    invalidate(), and the next resolver call re-reads. Errors are never cached — a failed read
+    raises and is retried by the caller's own control flow."""
+    params = {"analysis_type": analysis_type, "name": ""}
+    key = MEMO.key("analyze_model", state_version, analysis_type, "", None)
+    cached = MEMO.get(key)
+    if cached is not None:
+        return cached
+    resp = port.execute("analyze_model", params, state_version)
     if resp.get("status") != "COMPLETED":
         err = resp.get("error") or {}
         raise FeatureError("analyze_model(%s) failed: %s" % (analysis_type, err.get("message")),
@@ -104,10 +171,12 @@ def _analyze_payload(port, state_version, analysis_type, node_id, step):
         raise FeatureError("analyze_model(%s) returned no data (is there a solid body?)" % analysis_type,
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
     try:
-        return json.loads(feats[0])
+        data = json.loads(feats[0])
     except Exception as ex:
         raise FeatureError("could not parse analyze_model(%s) payload: %s" % (analysis_type, ex),
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+    MEMO.put(key, data)
+    return data
 
 
 def _dist3(a, b):
@@ -197,9 +266,17 @@ def resolve_face_on_plane(port, state_version, datum, offset, node_id=None):
 
 
 def _analyze_assembly_payload(port, state_version, analysis_type, component, node_id, step):
-    """Run read-only analyze_assembly(analysis_type, component) and parse its JSON payload."""
-    resp = port.execute("analyze_assembly",
-                        {"analysis_type": analysis_type, "component": component}, state_version)
+    """Run read-only analyze_assembly(analysis_type, component) and parse its JSON payload.
+
+    Memoized per (component, analysis_type, state_version) for the duration of ONE
+    compile_and_run (SPEED task A) — a mate graph resolves several anchors on the same
+    component at the same state_version and used to re-read the same dump each time."""
+    params = {"analysis_type": analysis_type, "component": component}
+    key = MEMO.key("analyze_assembly", state_version, analysis_type, component, None)
+    cached = MEMO.get(key)
+    if cached is not None:
+        return cached
+    resp = port.execute("analyze_assembly", params, state_version)
     if resp.get("status") != "COMPLETED":
         err = resp.get("error") or {}
         raise FeatureError("analyze_assembly(%s, %s) failed: %s"
@@ -210,10 +287,12 @@ def _analyze_assembly_payload(port, state_version, analysis_type, component, nod
         raise FeatureError("analyze_assembly(%s, %s) returned no data" % (analysis_type, component),
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
     try:
-        return json.loads(feats[0])
+        data = json.loads(feats[0])
     except Exception as ex:
         raise FeatureError("could not parse analyze_assembly(%s) payload: %s" % (analysis_type, ex),
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+    MEMO.put(key, data)
+    return data
 
 
 _FACE_ANCHOR_KINDS = frozenset(("plane", "cylinder", "cone", "sphere"))

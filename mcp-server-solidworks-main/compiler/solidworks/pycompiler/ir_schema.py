@@ -19,6 +19,9 @@ preceding sketch, path = an earlier sketch node by id), linear_pattern (canonica
 flip; single direction — the tool's D2 is unwired in C#), ellipse/spline profile primitives,
 graph-level `material` (part graphs only, applied after the last node), edge_flange SIMPLE
 length mode (length XOR frame+profile).
+v0.8 (capability batch 4) adds `shell` — hollow an EXISTING body (a body_producer node) to a
+uniform wall, leaving zero or more faces open. The open faces are FACE anchors on the body being
+consumed, the same pre-consumption anchor rule fillet/chamfer use for edges.
 Anything outside the covered set is rejected here with an explicit 'unsupported' message —
 never silently ignored (recipe.md C5).
 
@@ -48,8 +51,8 @@ ANCHOR_KINDS_FACE = frozenset(("plane", "cylinder", "cone", "sphere"))
 ANCHOR_KINDS_EDGE = frozenset(("line", "circle"))
 ANCHOR_KINDS = ANCHOR_KINDS_FACE | ANCHOR_KINDS_EDGE
 NODE_TYPES = frozenset(("box", "sketch", "extrude", "revolve", "sweep", "rib", "hole", "fillet",
-                        "chamfer", "loft", "linear_pattern", "circular_pattern", "sheet_metal",
-                        "sketched_bend", "mirror", "edge_flange")) \
+                        "chamfer", "shell", "loft", "linear_pattern", "circular_pattern",
+                        "sheet_metal", "sketched_bend", "mirror", "edge_flange")) \
     | ASSEMBLY_NODE_TYPES
 PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spline",
                            "slot", "rounded_rect"))
@@ -67,7 +70,7 @@ BODY_PRODUCERS = frozenset(("box", "extrude", "revolve", "sweep"))  # node types
 # (the compiler substitutes the seed's runtime-created feature name). Patterns themselves are
 # producers too: a grid composes as a pattern OF a pattern (the D2-less linear tool).
 FEATURE_PRODUCERS = frozenset(("box", "extrude", "revolve", "sweep", "rib", "hole", "fillet", "chamfer",
-                               "loft", "linear_pattern", "circular_pattern", "sheet_metal",
+                               "shell", "loft", "linear_pattern", "circular_pattern", "sheet_metal",
                                "sketched_bend", "mirror", "edge_flange"))
 CHAMFER_TYPES = frozenset(("distance_angle", "distance_distance"))
 BEND_POSITIONS = frozenset(("centerline", "material_inside", "material_outside", "bend_outside"))
@@ -215,9 +218,12 @@ def validate(graph):
                               % (label, ref.get("position"), sorted(POSITIONS)))
             if not _is_pos_number(node.get("diameter")):
                 errors.append("%s: 'diameter' must be a positive number (meters)." % label)
+            # depth is either the through-all token or a BLIND hole depth in metres
+            # (finite, > 0) — the same positive-number rule as 'diameter'.
             depth = node.get("depth")
-            if depth not in THROUGH_DEPTHS:
-                errors.append("%s: 'depth' must be 'through_all' in v0.5 (got %r)." % (label, depth))
+            if depth not in THROUGH_DEPTHS and not _is_pos_number(depth):
+                errors.append("%s: 'depth' must be a positive number of meters (blind hole) or "
+                              "'through_all' (got %r)." % (label, depth))
 
         elif ntype == "revolve":
             sk = node.get("sketch")
@@ -227,8 +233,8 @@ def validate(graph):
             elif seen.get(sk) != "sketch":
                 errors.append("%s: 'sketch' must reference an earlier sketch node (got '%s')." % (label, sk))
             elif not (isinstance(prev, dict) and prev.get("id") == sk):
-                # Like extrude: a revolve consumes the ACTIVE sketch (the axis segment is
-                # coordinate-selected, which only works while the sketch is open).
+                # Like extrude: a revolve consumes the ACTIVE sketch (the executor resolves the axis
+                # against the sketch's own segments, which only works while the sketch is open).
                 errors.append("%s: a revolve must immediately follow its sketch node '%s'." % (label, sk))
             axis = node.get("axis")
             if not isinstance(axis, dict) or not all(_is_number(axis.get(k)) for k in ("x1", "y1", "x2", "y2")):
@@ -239,6 +245,10 @@ def validate(graph):
             angle = node.get("angle")
             if angle is not None and not _is_pos_number(angle):
                 errors.append("%s: 'angle' must be a positive number (RADIANS; omit for a full 360°)." % label)
+            # operation is optional; omitting it keeps the historical boss behaviour.
+            if node.get("operation", "boss") not in ("boss", "cut"):
+                errors.append("%s: 'operation' must be 'boss' or 'cut' (got %r; omit for boss)."
+                              % (label, node.get("operation")))
 
         elif ntype == "rib":
             sk = node.get("sketch")
@@ -363,6 +373,34 @@ def validate(graph):
                     if not isinstance(e, dict) or not _is_point3(e.get("near")):
                         errors.append("%s.edges[%d]: 'near' must be a 3D point [x, y, z] in meters."
                                       % (label, j))
+
+        elif ntype == "shell":
+            # Hollow an EXISTING solid to a uniform wall (v0.8.0). `body` fixes the ORDER and
+            # records which solid is hollowed; the faces left open are face anchors resolved on
+            # the PRE-shell geometry (the shell consumes them) — the same pre-consumption rule
+            # as fillet/chamfer's edge anchors. Zero or one removal faces; none = closed shell.
+            tgt = node.get("body")
+            if not isinstance(tgt, str) or not tgt:
+                errors.append("%s: 'body' (id of an earlier body-producing node) is required." % label)
+            elif seen.get(tgt) not in BODY_PRODUCERS:
+                errors.append("%s: 'body' must reference an earlier %s node (got '%s')."
+                              % (label, "/".join(sorted(BODY_PRODUCERS)), tgt))
+            if not _is_pos_number(node.get("thickness")):
+                errors.append("%s: 'thickness' must be a positive number (meters), smaller than "
+                              "the thinnest section of the body." % label)
+            faces = node.get("faces_to_remove")
+            if faces is not None:
+                if not isinstance(faces, list):
+                    errors.append("%s: 'faces_to_remove' must be an array of face anchors "
+                                  "({near:[x,y,z], hint?}) — omit it or pass [] for a closed shell."
+                                  % label)
+                else:
+                    for j, f in enumerate(faces):
+                        if not isinstance(f, dict) or not _is_point3(f.get("near")):
+                            errors.append("%s.faces_to_remove[%d]: 'near' must be a 3D point "
+                                          "[x, y, z] in meters." % (label, j))
+            if node.get("outward") is not None and not isinstance(node.get("outward"), bool):
+                errors.append("%s: 'outward' must be a boolean." % label)
 
         elif ntype == "sheet_metal":
             # Base flange: consumes the ACTIVE sketch, so it must immediately follow its sketch
@@ -585,11 +623,14 @@ _CLOSURE_CONSUMERS = frozenset(("extrude", "revolve", "sheet_metal", "sweep"))
 
 
 def _check_contour_closure(nodes):
-    """Plan-time contour closure for sketches whose consumer needs a closed region.
+    """Plan-time contour checks for sketches whose consumer needs a closed region.
 
-    Zero execution calls. Each still-open endpoint is reported with the exact gap and
-    its nearest neighbour, so the planner fixes coordinates instead of discovering the
-    failure as a mid-build EXTRUSION_FAILED + rollback.
+    Zero execution calls. Two independent jobs, because the two failure classes differ:
+      - the CHAIN walk (line/arc): every still-open endpoint is reported with the exact gap and
+        its nearest neighbour, so the planner fixes coordinates instead of discovering the
+        failure as a mid-build EXTRUSION_FAILED + rollback.
+      - the CLOSED-primitive walk (contours.loop_conflicts): the five kinds that enclose a region
+        by construction, which have no endpoints to weld and so are invisible to the chain walk.
     """
     consumer_of = {}  # sketch node id -> "extrude 'e1'"-style consumer label
     for node in nodes:
@@ -664,7 +705,57 @@ def _check_contour_closure(nodes):
                 "remains. Widen the profile."
                 % (pos, label, consumers, ext[2] - ext[0], ext[3] - ext[1],
                    contours.CONTOUR_WELD_TOL))
+        # v0.8.0 batch 6: the chain walk above is blind to the CLOSED-by-construction kinds
+        # (slot, rounded_rect, rectangle, circle, ellipse) — they enclose a region on their own,
+        # so they have no endpoints to weld and never show up as a gap. Two of them that overlap
+        # in one sketch passed validation and only failed in SolidWorks as a null cut
+        # (EXTRUSION_FAILED, 2026-10-26: the five-slot fan, all drawn horizontal). Run the
+        # polygon overlap check on every closure-consuming sketch, in ADDITION to the chain
+        # checks — a profile may mix chains and composites.
+        errors.extend("nodes[%d] (%s): %s" % (pos, label, msg)
+                      for msg in _loop_conflict_errors(profile, consumers))
     return errors
+
+
+def _loop_conflict_errors(profile, consumers):
+    """VALIDATION_FAILED text for closed loops in one sketch that cannot both be built."""
+    conflicts = contours.loop_conflicts(profile)
+    if not conflicts:
+        return []
+    parts = []
+    for c in conflicts[:4]:
+        # "cross"/"self-cross" name the exact crossing; "collinear"/"mutual" have no single
+        # crossing to point at, so the coordinate is the shared region's centre and is labelled
+        # as near rather than at.
+        at = "near" if c["how"] in ("collinear", "mutual") else "at"
+        where = "" if c["point"] is None else " %s (%.6g, %.6g)" % (at, c["point"][0],
+                                                                    c["point"][1])
+        if c["how"] == "degenerate":
+            parts.append("profile[%d] (%s) encloses no area" % (c["a"], c["a_kind"]))
+        elif c["how"] == "self-cross":
+            parts.append("profile[%d] (%s) crosses itself%s" % (c["a"], c["a_kind"], where))
+        elif c["how"] == "collinear":
+            parts.append("profile[%d] (%s) runs along profile[%d] (%s) with coincident edges%s"
+                         " — the same contour written twice?"
+                         % (c["a"], c["a_kind"], c["b"], c["b_kind"], where))
+        elif c["how"] == "mutual":
+            parts.append("profile[%d] (%s) overlaps profile[%d] (%s) — each reaches inside the "
+                         "other%s" % (c["a"], c["a_kind"], c["b"], c["b_kind"], where))
+        else:
+            parts.append("profile[%d] (%s) crosses profile[%d] (%s)%s"
+                         % (c["a"], c["a_kind"], c["b"], c["b_kind"], where))
+        if c["more"]:
+            parts[-1] += " (+%d more crossings)" % c["more"]
+    if len(conflicts) > 4:
+        parts.append("+%d more overlapping pair(s)" % (len(conflicts) - 4))
+    return [
+        "overlapping closed contours for %s — %s. A closed primitive (slot, rounded_rect, "
+        "rectangle, circle, ellipse) is a contour by itself, so two of them in one sketch must "
+        "be DISJOINT or properly NESTED (a hole inside an outline) — never crossing, touching "
+        "along an edge, or running through each other, and never a loop that crosses itself. "
+        "Separate them, delete the duplicate, or if they must share a boundary merge them into "
+        "one chain of line/arc segments."
+        % (consumers, "; ".join(parts))]
 
 
 def _check_extrude_end(node, op, label, errors):
@@ -740,6 +831,12 @@ def _check_profile_prim(prim, label, errors):
         for k in ("width", "height"):
             if not _is_pos_number(prim.get(k)):
                 errors.append("%s: rectangle '%s' must be a positive number." % (label, k))
+        # v0.8.0 batch 7: an optional centre, the same idiom circle/slot/rounded_rect use. Before
+        # it lowering IGNORED cx/cy and drew the rectangle on the origin anyway — a planner that
+        # wrote a plausible-looking centre got wrong geometry with no error at all.
+        for k in ("cx", "cy"):
+            if prim.get(k) is not None and not _is_number(prim.get(k)):
+                errors.append("%s: rectangle '%s' must be a number." % (label, k))
     elif kind == "circle":
         if not _is_pos_number(prim.get("diameter")):
             errors.append("%s: circle 'diameter' must be a positive number." % label)
@@ -785,6 +882,20 @@ def _check_profile_prim(prim, label, errors):
         for k in ("cx", "cy"):
             if prim.get(k) is not None and not _is_number(prim.get(k)):
                 errors.append("%s: slot '%s' must be a number." % (label, k))
+        # v0.8.0 batch 5: 'angle' turns the composite about (cx, cy) — CCW in the sketch plane, RADIANS
+        # like every other angular IR field (revolve / chamfer / bend). Bounded to one turn
+        # because rotation is PERIODIC: a larger magnitude cannot mean anything the author
+        # intended, and in practice it means degrees were passed (90 instead of pi/2), which
+        # would silently draw a near-horizontal slot again — the exact defect the field fixes.
+        angle = prim.get("angle")
+        if angle is not None:
+            if not _is_number(angle):
+                errors.append("%s: slot 'angle' must be a number (RADIANS, CCW about cx/cy; "
+                              "omit for length along +X)." % label)
+            elif abs(angle) > 2 * math.pi:
+                errors.append("%s: slot 'angle' must be within +/-2*pi RADIANS (got %r) — a "
+                              "vertical slot is angle = pi/2 = 1.5707963267948966, not 90."
+                              % (label, angle))
     elif kind == "rounded_rect":
         # v0.7.4 convenience primitive: centred like rectangle, corner radius must leave all
         # four edges non-degenerate.

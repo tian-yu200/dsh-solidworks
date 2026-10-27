@@ -120,6 +120,7 @@
     "axis_y1": "number (revolve only — Y of first endpoint of centerline segment)",
     "axis_x2": "number (revolve only — X of second endpoint of centerline segment)",
     "axis_y2": "number (revolve only — Y of second endpoint of centerline segment; default 0.001)",
+    "is_cut": "boolean (revolve only — optional, default false; true makes the revolve remove material (FeatureRevolve2 IsCut) instead of adding a boss — the feature_graph revolve node's operation='cut' lowers to this)",
     "path_sketch": "string (sweep only — name of the sketch containing the sweep path)",
     "profiles": "string (loft only — JSON array of sketch names e.g. '[\"Sketch1\",\"Sketch2\"]', minimum 2)",
     "reverse": "boolean (boss/cut — flip feature direction; needed for a cut/boss sketched on a part face where material is on the opposite side)",
@@ -144,6 +145,19 @@
    }
   },
   "output": "→ see execution-response.json (returns the created rib feature name; result_geometry {volume, faces, edges} after the rib)"
+ },
+ "create_shell": {
+  "description": "Hollows the existing solid body to a uniform wall thickness, optionally leaving faces open (the thin-wall-part / casting shape). Uses IModelDoc2.InsertFeatureShell(thickness, outward) — void-returning, and IFeatureManager has NO shell method, so creation is verified from the feature tree AND from the body volume (a Shell feature SolidWorks appends in error without changing the body still fails SHELL_FAILED rather than reporting success). The faces to leave open are selected first, from face_indices — indices into the same GetBodies2(swSolidBody,true) → GetFaces() enumeration analyze_model(faces) reports (the add_edge_feature/edge_indices idiom). No face selected = a CLOSED (fully hollow) shell. Part documents only.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "thickness": "number (required — shell wall thickness in meters, > 0 and smaller than the thinnest section of the body)",
+    "face_indices": "string (optional — JSON array of integer face indices from analyze_model(faces), e.g. \"[3]\"; the faces to leave OPEN. Omit for a closed shell)",
+    "outward": "boolean (optional, default false — false = the wall grows inward from the existing skin so the envelope keeps its dimensions; true = material is added outside and the envelope grows by the thickness)"
+   }
+  },
+  "output": "→ see execution-response.json (returns the created shell feature name; result_geometry {volume, faces, edges} after the shell)"
  },
  "add_edge_feature": {
   "description": "Applies a 3D edge modifier to solid body edges. Operates post-extrusion on the solid, NOT on sketch segments. feature_type='fillet': rounds edge(s) with radius_or_distance as radius. feature_type='chamfer': cuts a chamfer — chamfer_type='distance_angle' (setback + angle, default 45°) or 'distance_distance' (D1 + distance2, directional, chamfer_flip swaps sides). PREFERRED edge selection: edge_indices (JSON array of integer indices from analyze_model(edges)) — robust for crowded/concave (inner-corner, small-radius) edges that coordinate picks can't disambiguate. Fallback: ex/ey/ez (single) or edges_json (multiple {ex,ey,ez}).",

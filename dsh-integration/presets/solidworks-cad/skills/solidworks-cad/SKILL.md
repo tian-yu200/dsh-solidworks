@@ -156,15 +156,17 @@ face/edge indexes may no longer identify the same geometry.
 
 Reference topics are `contract`, `canonicalization`, `forward`, `mapping`,
 `mapping_part`, `mapping_sheet_metal`, `mapping_assembly`, `verification`,
-`reverse`, `coverage`, and `feature_graph_schema`. A reference comes back one
-page at a time inside `verification` as `topic`, `content`, and `page` (`offset`,
-`limit`, `returned_lines`, `total_lines`, `total_chars`, `has_more`,
-`next_offset`, `line_truncated`; `0` means the defaults, a smaller
-`reference_limit` may be requested, larger is clamped; each page is at most 40
-lines and about 4000 characters). Follow `page.next_offset` while
-`page.has_more` is true, or jump with `reference_offset` to
-`page.index.sections[].line`. For `feature_graph_schema`, `page.index` also has
-`sections` (`section`, `line`, `entries`) and `feature_types`.
+`reverse`, `coverage`, `feature_graph_quickref`, `feature_graph_schema`, and
+`feature_graph_changelog`. A reference comes back one page at a time inside
+`verification` as `topic`, `content`, and `page` (`offset`, `limit`,
+`returned_lines`, `total_lines`, `total_chars`, `has_more`, `next_offset`,
+`line_truncated`; `0` means the defaults, a smaller `reference_limit` may be
+requested, larger is clamped; each page is at most 120 lines and about 6000
+characters, and every serialized page stays under 7000 characters). Follow
+`page.next_offset` while `page.has_more` is true, or jump with
+`reference_offset` to `page.index.sections[].line`. For `feature_graph_schema`,
+`page.index` also has `sections` (`section`, `line`, `entries`) and
+`feature_types`.
 
 If an evidence read is too broad, never repeat it unchanged. Traverse `L1` once
 using a smaller image/PDF region or a narrower supported `inspect_state` scope;
@@ -174,15 +176,24 @@ do not invent unsupported flags. On another failure emit `RETRY_EXHAUSTED`.
 
 For a new part or assembly:
 
-1. Read `forward`, the relevant mapping topic, `verification`, and
-   `feature_graph_schema`; `feature_graph_schema` is read by paging (about 15
-   pages at the default limit), and `page.index.feature_types` lists the
-   available node kinds.
-2. Build one complete graph in feature-tree dependency order.
-3. Use meters for all Feature Graph distances and radians for all Feature Graph
+1. Default pre-build reading is THREE calls: `feature_graph_quickref` (1-2
+   pages, generated from the schema — every node type with its required and
+   optional fields, units, and a one-line meaning), `forward`, and the one
+   mapping topic that matches the target (`mapping_part`,
+   `mapping_sheet_metal`, or `mapping_assembly`). Read `verification` when the
+   build will be judged on objective evidence.
+2. `feature_graph_quickref` is enough to write a graph. Read
+   `feature_graph_schema` ONLY for a construct the quickref cannot settle —
+   an end condition, a grammar rule, or a worked example — and then jump
+   straight to that section with `reference_offset =
+   page.index.sections[].line` instead of walking its pages (it is about 9
+   pages in full). `feature_graph_changelog` is revision history; do not read
+   it to build.
+3. Build one complete graph in feature-tree dependency order.
+4. Use meters for all Feature Graph distances and radians for all Feature Graph
    angles.
-4. Call `submit_feature_graph(..., fresh_document=true)`.
-5. Check compiler node results, rebuilt CAD state, topology, dimensions, bounds,
+5. Call `submit_feature_graph(..., fresh_document=true)`.
+6. Check compiler node results, rebuilt CAD state, topology, dimensions, bounds,
    and physical properties available in `partial_state` and `verification`.
 
 Do not split a complete graph into low-level modeling calls. Do not invent graph
@@ -224,6 +235,12 @@ For `status="pending_confirmation"`, stop mutation and call
 `action_summary`; wait for a new message explicitly approving it; then call
 `confirm_action` with the returned action ID/token, exact `confirmation_text` as
 `user_confirmation`, and exact summary.
+
+Saving always confirms when it names a path: the first save of an untitled document
+(including one this job just created) and any save to a different path than the document's
+existing one are Save As operations that rename the open document in memory. Expect
+`risk="save_as"` with an action_summary naming the document and the target path; a save
+without `file_path` keeps the existing-file overwrite rule.
 
 Do not infer approval from the original request. Do not reuse an old or consumed
 confirmation token. If risk or summary changes, present the new summary and wait

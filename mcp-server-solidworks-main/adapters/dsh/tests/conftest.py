@@ -21,6 +21,10 @@ class FakeBackend:
         self.events = []
         self.call_handler = None
         self.feature_graph_handler = None
+        self.cheap_probes = []
+        # When True, the /api/tool/identity endpoint is treated as missing/failed and
+        # identity() exercises the same verify_state fallback the real backend uses.
+        self.identity_endpoint_down = False
         self._document_stack = []
         self._undo_state = None
 
@@ -46,6 +50,60 @@ class FakeBackend:
             "status": "COMPLETED",
             "stateVersion": self.state.get("stateVersion", 1),
             "cadState": copy.deepcopy(self.state),
+            "error": None,
+        }
+
+    def current_state_version(self):
+        """GET /api/tool/state stand-in: the counter only, no CAD state (SPEED task C)."""
+        self.events.append(("current_state_version", {}))
+        self.cheap_probes.append("current_state_version")
+        return (self.state or {}).get("stateVersion", 1)
+
+    def probe_identity(self):
+        """GET /health stand-in: attach state + active TITLE + counter (no path/type)."""
+        self.events.append(("probe_identity", {}))
+        self.cheap_probes.append("probe_identity")
+        return {
+            "comAttached": True,
+            "stateVersion": (self.state or {}).get("stateVersion", 1),
+            "activeDocument": (self.state or {}).get("activeDocument"),
+        }
+
+    def identity(self):
+        """GET /api/tool/identity stand-in: the identity subset of verify_state, no walk.
+
+        Same response SHAPE as verify_state, but cadState carries ONLY the identity fields
+        the C# endpoint reports (stateVersion, activeDocument, activeDocumentPath,
+        documentType, isDirty) — so a test that passes while reading CAD content from an
+        identity response would be lying. Mirrors the real backend's fallback: when
+        identity_endpoint_down is set, the full verify_state runs instead.
+        """
+        self.events.append(("identity", {}))
+        if self.identity_endpoint_down:
+            self.cheap_probes.append("identity_fallback_verify_state")
+            return self.verify_state()
+        self.cheap_probes.append("identity")
+        if self.state is None:
+            return {
+                "status": "FAILED",
+                "stateVersion": 1,
+                "cadState": None,
+                "error": {
+                    "code": "NO_ACTIVE_DOCUMENT",
+                    "message": "No active document.",
+                },
+            }
+        state_version = self.state.get("stateVersion", 1)
+        return {
+            "status": "COMPLETED",
+            "stateVersion": state_version,
+            "cadState": {
+                "stateVersion": state_version,
+                "activeDocument": self.state.get("activeDocument"),
+                "activeDocumentPath": self.state.get("activeDocumentPath"),
+                "documentType": self.state.get("documentType"),
+                "isDirty": self.state.get("isDirty"),
+            },
             "error": None,
         }
 

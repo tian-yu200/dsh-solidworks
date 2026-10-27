@@ -6,11 +6,11 @@ common part-drawing constructs to the Feature Graph vocabulary and records what
 the vocabulary cannot express, so gaps are declared in the plan instead of
 discovered mid-build.
 
-The runtime reference topic `feature_graph_schema` (read it page by page with
-`inspect_state(scope="reference", reference_topic="feature_graph_schema")`,
-following `page.next_offset` while `page.has_more` is true; a smaller
-`reference_limit` may be requested, larger is clamped; `page.index.feature_types`
-lists the node kinds) and
+The runtime reference topics `feature_graph_quickref` (generated from the schema: every
+node type with its required/optional fields, units and a one-line meaning — read this
+first) and `feature_graph_schema` (the full prose, read only the section you need by
+jumping to `page.index.sections[].line`; a smaller `reference_limit` may be requested,
+larger is clamped; `page.index.feature_types` lists the node kinds) plus
 `cad-planner/contracts/feature-graph.schema.json` are authoritative. This map is
 decision support as of schema 0.7.4 with recipe notes through 0.9.0; re-verify
 any capability it claims before relying on it. Never invent node types, fields,

@@ -1,3 +1,4 @@
+import atexit
 import os
 import subprocess
 import threading
@@ -27,11 +28,81 @@ class ExecutionLayerError(Exception):
 _spawn_lock = threading.Lock()
 
 
+# ------------------------------------------------------------------------------
+# Shared HTTP client (SPEED task)
+#
+# Every request used to construct and close its own httpx.Client — ~150 ms per call of pure
+# setup/teardown (connection pool, SSL context, transport thread) against ~1 ms for a reused
+# one. SolidWorks call sequences are hundreds of small calls (one add_sketch_entity per
+# sketch segment), so that overhead dominated everything the server actually did.
+#
+# One module-level client is reused instead. It is safe across threads: httpx.Client is
+# thread-safe for concurrent requests. The per-call TIMEOUT still varies by endpoint (the
+# long TOOL_EXEC_TIMEOUT for /execute, the short HTTP_TIMEOUT for /health and /state,
+# ENSURE_TIMEOUT for /ensure_ready), so the client is built with a default timeout and each
+# request passes its own — httpx applies the per-request value over the client default.
+#
+# The client is discarded (and lazily rebuilt on next use) after:
+#   * a transport-level failure (ConnectError / pool breakage) — a broken pool must not be
+#     reused; the autostart path then respawns the service and the retry gets a fresh client;
+#   * an explicit `_reset_client()` after a successful autostart, because the old pool is
+#     pointing at a dead socket.
+# It is closed at interpreter exit via atexit.
+# ------------------------------------------------------------------------------
+_client_lock = threading.Lock()
+_client = None
+
+
+def _build_client():
+    """A new pooled client. Timeouts are per-request; this is only the default."""
+    return httpx.Client(
+        timeout=httpx.Timeout(HTTP_TIMEOUT),
+        trust_env=False,
+        limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
+    )
+
+
+def _get_client():
+    """The shared client, created on first use (and after any reset)."""
+    global _client
+    with _client_lock:
+        if _client is None:
+            _client = _build_client()
+        return _client
+
+
+def _reset_client():
+    """Drop the shared client so the next request builds a fresh pool.
+
+    Called on a transport error and after an autostart, where the previous pool's sockets
+    point at a process that is gone. Never raises: closing a broken pool can itself fail.
+    """
+    global _client
+    with _client_lock:
+        client, _client = _client, None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - a dead pool must not mask the real error
+            pass
+
+
+def _close_client_at_exit():
+    _reset_client()
+
+
+atexit.register(_close_client_at_exit)
+
+
+def _client_count():
+    """Test hook: 1 while a client is live, 0 after a reset/exit."""
+    return 1 if _client is not None else 0
+
+
 def _server_is_up() -> bool:
     """Cheap liveness probe — True if /health answers 200."""
     try:
-        with httpx.Client(timeout=2.0, trust_env=False) as client:
-            return client.get(HEALTH_ENDPOINT).status_code == 200
+        return _get_client().get(HEALTH_ENDPOINT, timeout=2.0).status_code == 200
     except Exception:
         return False
 
@@ -85,16 +156,24 @@ def _request_with_autostart(do_request, label: str):
 
     Makes every tool call self-heal the "server is down" case transparently. Timeouts are
     NOT caught here (they propagate to each caller's own timeout handling).
+
+    A ConnectError means the shared pool is pointing at a socket nobody is listening on, so
+    the client is dropped BEFORE the retry — otherwise the retry would reuse the same dead
+    pool. `_ensure_server_up` may also have respawned the process, which invalidates every
+    kept-alive connection.
     """
     try:
         return do_request()
     except httpx.ConnectError:
         _log(f"<- {label} CONNECT_ERROR — attempting server auto-start")
+        _reset_client()
         _ensure_server_up()  # raises ExecutionLayerError if it can't bring the server up
+        _reset_client()  # the spawn replaced the process: no kept-alive socket survives it
         try:
             return do_request()
         except httpx.ConnectError:
             _log(f"<- {label} CONNECT_ERROR after auto-start")
+            _reset_client()
             raise ExecutionLayerError(
                 "Cannot connect to solidworks-execution even after auto-start. "
                 f"Is {HEALTH_ENDPOINT} reachable?"
@@ -104,8 +183,7 @@ def _request_with_autostart(do_request, label: str):
 def get_health() -> dict:
     """GET /health — server status + COM attach state (does not touch state_version)."""
     def _do():
-        with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as client:
-            return client.get(HEALTH_ENDPOINT)
+        return _get_client().get(HEALTH_ENDPOINT, timeout=HTTP_TIMEOUT)
 
     try:
         response = _request_with_autostart(_do, "health")
@@ -129,8 +207,7 @@ def get_state() -> int:
     _log("-> get_state (resync)")
 
     def _do():
-        with httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False) as client:
-            return client.get(STATE_ENDPOINT)
+        return _get_client().get(STATE_ENDPOINT, timeout=HTTP_TIMEOUT)
 
     try:
         response = _request_with_autostart(_do, "get_state")
@@ -171,8 +248,7 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     _log(f"-> {tool_name} op={operation_id} sv={state_version}")
 
     def _do():
-        with httpx.Client(timeout=TOOL_EXEC_TIMEOUT, trust_env=False) as client:
-            return client.post(EXECUTE_ENDPOINT, json=payload)
+        return _get_client().post(EXECUTE_ENDPOINT, json=payload, timeout=TOOL_EXEC_TIMEOUT)
 
     try:
         response = _request_with_autostart(_do, tool_name)
@@ -216,8 +292,7 @@ def ensure_ready() -> dict:
         _ensure_server_up()
 
     def _do():
-        with httpx.Client(timeout=ENSURE_TIMEOUT, trust_env=False) as client:
-            return client.post(ENSURE_ENDPOINT)
+        return _get_client().post(ENSURE_ENDPOINT, timeout=ENSURE_TIMEOUT)
 
     try:
         response = _request_with_autostart(_do, "ensure_ready")

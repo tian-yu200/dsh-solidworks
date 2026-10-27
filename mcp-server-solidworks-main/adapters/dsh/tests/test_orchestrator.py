@@ -1089,3 +1089,626 @@ def test_post_verify_exception_rolls_back_and_is_recorded_for_drawing_workflow(
     assert job["failure_history"]
     assert job["failure_history"][-1]["phase"] == "verification"
     assert job["verification_status"] == "failed"
+
+
+# ---------------------------------------------------------------------------------------------
+# SPEED task C — finish_job reuses an unchanged post-verify instead of re-running it
+#
+# finish_job used to always pay verify_state + two analyze_model calls even when the preceding
+# write had JUST verified the same document at the same state_version. It now asks the cheap
+# counter (GET /api/tool/state, ~2 ms vs ~2.5 s) first and only re-verifies when something
+# actually changed. The document-switch guard is NOT weakened: a stamp carries the identity and
+# is compared with the same same_document() predicate the write path uses.
+# ---------------------------------------------------------------------------------------------
+def _six_node_graph():
+    """A representative small part graph: box, 2 holes, fillet, linear pattern, mirror."""
+    return {
+        "schema_version": "0.7.4-draft",
+        "units": "meters",
+        "nodes": [
+            {"id": "n1", "type": "box", "ref": {"datum": "top"},
+             "width": 0.05, "depth": 0.05, "height": 0.02},
+            {"id": "n2", "type": "hole",
+             "ref": {"node_face": {"node": "n1", "selector": "top"},
+                     "position": "center"},
+             "diameter": 0.008, "depth": "through_all"},
+            {"id": "n3", "type": "hole",
+             "ref": {"node_face": {"node": "n1", "selector": "top"},
+                     "position": "center"},
+             "diameter": 0.006, "depth": "through_all"},
+            {"id": "n4", "type": "fillet", "radius": 0.002,
+             "edges": [{"near": [0.025, 0.02, 0.025], "hint": "top"}]},
+            {"id": "n5", "type": "linear_pattern", "feature": "n2",
+             "direction": "x", "spacing": 0.01, "count": 2},
+            {"id": "n6", "type": "mirror", "plane": {"datum": "right"},
+             "features": ["n2"]},
+        ],
+    }
+
+
+def _build_save_finish(env, tmp_path):
+    """The task's scenario: build a fresh 6-node graph, save it, then finish the job.
+
+    fresh_document=True on purpose: the Save As safeguard requires confirmation when a
+    job-bound SAVED document is saved to another path, while the first save of a document
+    the job itself created is exempt. This is the normal build->save flow.
+    """
+    built = env.orchestrator.feature_graph(
+        "job-1", env.token, json.dumps(_six_node_graph()), fresh_document=True
+    )
+    assert built["status"] == "completed", built
+    saved = env.orchestrator.save_or_export(
+        "job-1", env.token, "save", file_path=str(tmp_path / "out.SLDPRT")
+    )
+    # The first save of a job-created untitled document confirms too (USER DECISION on hermes
+    # F1), so the canonical build->save->finish flow runs through the confirmation protocol.
+    assert saved["status"] == "pending_confirmation", saved
+    assert saved["risk"] == "save_as"
+    confirmation = _request_confirmation(env, saved)
+    saved = env.orchestrator.confirm_action(
+        "job-1",
+        env.token,
+        saved["action_id"],
+        confirmation["confirmation_token"],
+        confirmation["confirmation_text"],
+        confirmation["action_summary"],
+    )
+    assert saved["status"] == "completed", saved
+    return built, saved
+
+
+def test_finish_job_reuses_unchanged_post_verify(cad_env, tmp_path):
+    _build_save_finish(cad_env, tmp_path)
+    probes_before = len(cad_env.backend.cheap_probes)
+    calls_before = len(cad_env.backend.calls)
+
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+
+    assert finished["status"] == "completed"
+    assert finished["verification"]["deep_checks_reused"] is True
+    # The cheap counter WAS consulted...
+    assert len(cad_env.backend.cheap_probes) == probes_before + 1
+    assert cad_env.backend.cheap_probes[-1] == "current_state_version"
+    # ...and the expensive path was NOT: no verify_state, no analyze_model.
+    new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
+    assert new_calls == [], new_calls
+    assert finished["verification"]["all_completed"] is True
+    assert finished["trust_level"] == "verified"
+
+
+def test_finish_job_reverifies_when_state_version_advanced(cad_env, tmp_path):
+    _build_save_finish(cad_env, tmp_path)
+    # Something wrote to the document after the last post-verify (a manual edit, a rebuild).
+    cad_env.backend.state["stateVersion"] += 1
+    calls_before = len(cad_env.backend.calls)
+
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+
+    assert finished["status"] == "completed"
+    assert finished["verification"].get("deep_checks_reused") is not True
+    new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
+    assert "verify_state" in [name for name, _p in cad_env.backend.events]
+    assert new_calls.count("analyze_model") == 2, new_calls
+
+
+def test_finish_job_reverifies_when_document_switched(cad_env, tmp_path):
+    """A document switch does NOT bump state_version, so the stamp must carry identity too."""
+    _build_save_finish(cad_env, tmp_path)
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+    # Same counter, different document: exactly the case a counter-only shortcut would miss.
+    cad_env.backend.state.update(
+        activeDocument=other.name, activeDocumentPath=str(other)
+    )
+    calls_before = len(cad_env.backend.calls)
+
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+
+    new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
+    assert new_calls.count("analyze_model") == 2, new_calls
+    assert [e for e, _p in cad_env.backend.events[calls_before:] if e == "verify_state"]
+    # The switch is detected and the job does NOT come back verified.
+    assert finished["status"] != "completed"
+    assert finished["verification"]["all_completed"] is False
+
+
+def test_finish_job_without_a_stamp_still_verifies(cad_env, tmp_path):
+    """No prior post-verify (e.g. a read-only job): the full path must still run."""
+    calls_before = len(cad_env.backend.calls)
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+    new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
+    assert new_calls.count("analyze_model") == 2, new_calls
+    assert finished["verification"].get("deep_checks_reused") is not True
+
+
+def test_measure_backend_calls_for_typical_build_save_finish(cad_env, tmp_path):
+    """SPEED task C measurement: backend calls for a 6-node build + save + finish.
+
+    Prints the counted totals so the before/after numbers can be compared from the raw run
+    output. The assertions pin the AFTER numbers (the reuse path) so a regression that
+    reintroduces the redundant final verification fails here.
+    """
+    _build_save_finish(cad_env, tmp_path)
+    after_save = len(cad_env.backend.calls)
+
+    cad_env.orchestrator.finish_job("job-1", cad_env.token)
+    total = len(cad_env.backend.calls)
+    finish_calls = [tool for tool, _p in cad_env.backend.calls[after_save:]]
+    verify_states = [name for name, _p in cad_env.backend.events].count("verify_state")
+
+    # Measured BEFORE the identity work (every guard a full verify_state feature walk):
+    #   build (fresh doc): open + 2 analyze + begin + commit execute calls, verify_state x2;
+    #   save: assess verify_state + execute verify_state + 2 analyze + save execute, post verify_state;
+    #   finish: full re-verify (verify_state + 2 analyze).
+    # AFTER: the save assessment/execution guards use GET /api/tool/identity (identity-only
+    # cadState) and finish_job reuses the stamp, so the whole flow pays verify_state only
+    # where CAD content is genuinely consumed (post-open, and after each write).
+    assert after_save == 8, after_save
+    assert finish_calls == [], finish_calls
+    assert total == 8, total
+    # Post-open, post-build, post-save, and the finish's own identity re-check inside
+    # _post_verify (its deep checks come from the stamp, so no analyze_model runs).
+    assert verify_states == 4, verify_states
+    identities = [name for name, _p in cad_env.backend.events].count("identity")
+    # save assessment + confirm-time reassessment + save execution guards
+    assert identities == 3, identities
+    assert cad_env.backend.cheap_probes[-1] == "current_state_version"
+
+
+# ---------------------------------------------------------------------------------------------
+# IDENTITY task C — Save As safeguard
+#
+# A save to a path DIFFERENT from the active document's existing path is a SolidWorks Save
+# As: it renames the user's open document in memory. That now requires confirmation, with an
+# action_summary naming BOTH paths. Exempt: a document this job created that is still
+# untitled (the normal first save of a fresh build).
+# ---------------------------------------------------------------------------------------------
+def test_save_to_a_different_path_requires_save_as_confirmation(cad_env, tmp_path):
+    target = tmp_path / "renamed.SLDPRT"
+    pending = cad_env.orchestrator.save_or_export(
+        "job-1", cad_env.token, "save", file_path=str(target)
+    )
+    assert pending["status"] == "pending_confirmation"
+    assert pending["risk"] == "save_as"
+    assert "confirmation_token" not in pending
+    assert not cad_env.backend.calls
+    # the summary must name BOTH paths: where the document is open from, and where it lands
+    assert str(cad_env.source) in pending["action_summary"]
+    assert str(target) in pending["action_summary"]
+    assert "renam" in pending["action_summary"].lower()
+
+    confirmation = _request_confirmation(cad_env, pending)
+    result = cad_env.orchestrator.confirm_action(
+        "job-1",
+        cad_env.token,
+        pending["action_id"],
+        confirmation["confirmation_token"],
+        confirmation["confirmation_text"],
+        confirmation["action_summary"],
+    )
+    assert result["status"] == "completed", result
+    assert [tool for tool, _ in cad_env.backend.calls].count("save_document") == 1
+    job = cad_env.store.load("job-1", cad_env.token)
+    # the in-memory rename is real: the job's binding followed the document
+    assert job["expected_document"]["path"] == str(target)
+
+
+def test_first_save_of_a_job_created_untitled_document_confirms_too(
+    cad_env, tmp_path
+):
+    # USER DECISION (hermes F1): the job-created exemption is GONE. An unsaved document is
+    # bound by TITLE only (same_document compares titles when there is no path), so a title
+    # collision could point an unconfirmed first save at the USER's document — the first
+    # save of an untitled document therefore ALWAYS confirms, even for a fresh build.
+    built = cad_env.orchestrator.feature_graph(
+        "job-1", cad_env.token, json.dumps({"nodes": []}), fresh_document=True
+    )
+    assert built["status"] == "completed", built
+    assert cad_env.store.load("job-1", cad_env.token)[
+        "expected_document"
+    ]["path"] == ""
+
+    pending = cad_env.orchestrator.save_or_export(
+        "job-1", cad_env.token, "save", file_path=str(tmp_path / "first.SLDPRT")
+    )
+    assert pending["status"] == "pending_confirmation"
+    assert pending["risk"] == "save_as"
+    assert "Part1" in pending["action_summary"]
+    assert str(tmp_path / "first.SLDPRT") in pending["action_summary"]
+    assert not any(
+        tool == "save_document" for tool, _ in cad_env.backend.calls
+    )
+
+    confirmation = _request_confirmation(cad_env, pending)
+    result = cad_env.orchestrator.confirm_action(
+        "job-1",
+        cad_env.token,
+        pending["action_id"],
+        confirmation["confirmation_token"],
+        confirmation["confirmation_text"],
+        confirmation["action_summary"],
+    )
+    assert result["status"] == "completed", result
+    assert [tool for tool, _ in cad_env.backend.calls].count("save_document") == 1
+
+
+def test_first_save_of_an_untitled_document_the_job_did_not_create_confirms(
+    cad_env, tmp_path
+):
+    # The exemption is load-bearing: without it, ANY untitled save would pass unconfirmed.
+    # A document the job did NOT create gets the confirmation even untitled.
+    cad_env.backend.state.update(
+        activeDocument="Part1", activeDocumentPath="", isDirty=True
+    )
+    job = cad_env.store.load("job-1", cad_env.token)
+    job["expected_document"] = {"title": "Part1", "path": ""}
+    cad_env.store.save(job)
+
+    pending = cad_env.orchestrator.save_or_export(
+        "job-1", cad_env.token, "save", file_path=str(tmp_path / "named.SLDPRT")
+    )
+    assert pending["status"] == "pending_confirmation"
+    assert pending["risk"] == "save_as"
+    assert "Part1" in pending["action_summary"]
+    assert str(tmp_path / "named.SLDPRT") in pending["action_summary"]
+    assert not cad_env.backend.calls
+
+
+def test_save_to_the_document_s_own_path_still_only_needs_overwrite_confirmation(
+    cad_env,
+):
+    # Same path (even a differing case) is a plain save, not a Save As; the existing
+    # overwrite confirmation semantics are untouched.
+    upper = Path(str(cad_env.source).upper())
+    pending = cad_env.orchestrator.save_or_export(
+        "job-1", cad_env.token, "save", file_path=str(upper)
+    )
+    assert pending["status"] == "pending_confirmation"
+    assert pending["risk"] == "overwrite"
+    assert not any(tool == "save_document" for tool, _ in cad_env.backend.calls)
+
+
+# ---------------------------------------------------------------------------------------------
+# IDENTITY task B — document switches stay detected through the cheap identity guards
+#
+# The per-step / per-edit guards now compare identity via GET /api/tool/identity, but the
+# predicate is the same same_document() as before and backend.identity() falls back to a
+# full verify_state whenever the endpoint is missing or fails — so a switch must be caught
+# identically through both paths.
+# ---------------------------------------------------------------------------------------------
+def _switch_to(other):
+    return {
+        "activeDocument": other.name,
+        "activeDocumentPath": str(other),
+        "documentType": "PART",
+    }
+
+
+def test_document_switch_between_edit_steps_is_detected_via_identity(
+    cad_env, tmp_path
+):
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+
+    def handler(tool, _params):
+        if tool == "modify_dimension":
+            cad_env.backend.state.update(**_switch_to(other))
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.document_edits(
+        "job-1",
+        cad_env.token,
+        json.dumps([_edit("modify_dimension", name="D1", value=0.01)] * 2),
+    )
+
+    events = [name for name, _p in cad_env.backend.events]
+    assert "identity" in events
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
+    assert result["recovery_status"] == "rolled_back"
+
+
+def test_document_switch_is_still_detected_via_the_verify_state_fallback(
+    cad_env, tmp_path
+):
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+    cad_env.backend.identity_endpoint_down = True
+
+    def handler(tool, _params):
+        if tool == "modify_dimension":
+            cad_env.backend.state.update(**_switch_to(other))
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.document_edits(
+        "job-1",
+        cad_env.token,
+        json.dumps([_edit("modify_dimension", name="D1", value=0.01)] * 2),
+    )
+
+    # the fallback ran the FULL verify_state instead of the probe...
+    assert "identity_fallback_verify_state" in cad_env.backend.cheap_probes
+    assert "verify_state" in [name for name, _p in cad_env.backend.events]
+    # ...and the switch was caught exactly the same way.
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
+
+
+def test_drawing_document_switch_between_steps_is_detected_via_identity(
+    cad_env, tmp_path
+):
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+
+    def handler(tool, _params):
+        if tool == "add_drawing_view":
+            # a switch behind the tool's back, as a user clicking another window would
+            cad_env.backend.state.update(**_switch_to(other))
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.drawing_workflow(
+        "job-1",
+        cad_env.token,
+        json.dumps(
+            {
+                "model_path": str(cad_env.source),
+                "views": [{"view_type": "front"}, {"view_type": "top"}],
+            }
+        ),
+    )
+
+    events = [name for name, _p in cad_env.backend.events]
+    assert "identity" in events
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
+    # recovery closed the created drawing and restored the previous document
+    job = cad_env.store.load("job-1", cad_env.token)
+    assert job["recovery_status"] == "rolled_back"
+    assert job["expected_document"]["title"] == "part.SLDPRT"
+
+
+def test_drawing_switch_is_still_detected_via_the_verify_state_fallback(
+    cad_env, tmp_path
+):
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+    cad_env.backend.identity_endpoint_down = True
+
+    def handler(tool, _params):
+        if tool == "add_drawing_view":
+            cad_env.backend.state.update(**_switch_to(other))
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.drawing_workflow(
+        "job-1",
+        cad_env.token,
+        json.dumps(
+            {
+                "model_path": str(cad_env.source),
+                "views": [{"view_type": "front"}, {"view_type": "top"}],
+            }
+        ),
+    )
+
+    assert "identity_fallback_verify_state" in cad_env.backend.cheap_probes
+    assert "verify_state" in [name for name, _p in cad_env.backend.events]
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
+
+
+# -----------------------------------------------------------------------------
+# IDENTITY task D — backend call counts for the two canonical workflows (FakeBackend)
+#
+# BEFORE (every guard a full verify_state feature walk):
+#   3-edit batch:   7 execute calls, verify_state x5 (initial + 3 per-edit + post)
+#   3-step drawing: 7 execute calls, verify_state x9 (pre-check + created + 6 per-step + post)
+# AFTER (identity-only guards):
+#   3-edit batch:   7 execute calls, verify_state x2 (initial + post), identity x3
+#   3-step drawing: 7 execute calls, verify_state x1 (post), identity x8
+# -----------------------------------------------------------------------------
+
+
+def _count_events(backend, name):
+    return [event for event, _p in backend.events].count(name)
+
+
+def test_measure_backend_calls_for_a_three_edit_batch(cad_env):
+    result = cad_env.orchestrator.document_edits(
+        "job-1",
+        cad_env.token,
+        json.dumps(
+            [
+                _edit("modify_dimension", name="D1", value=0.01),
+                _edit("modify_dimension", name="D2", value=0.02),
+                _edit("modify_dimension", name="D3", value=0.03),
+            ]
+        ),
+    )
+    assert result["status"] == "completed", result
+
+    tools = [tool for tool, _p in cad_env.backend.calls]
+    assert len(tools) == 7, tools  # begin + 3 edits + 2 analyze + commit
+    assert tools.count("modify_dimension") == 3
+    assert tools.count("analyze_model") == 2
+    # the per-edit guards are identity probes, not feature walks
+    assert _count_events(cad_env.backend, "identity") == 3
+    assert _count_events(cad_env.backend, "verify_state") == 2
+    assert "identity_fallback_verify_state" not in cad_env.backend.cheap_probes
+
+
+def test_measure_backend_calls_for_a_three_step_drawing_workflow(cad_env):
+    result = cad_env.orchestrator.drawing_workflow(
+        "job-1",
+        cad_env.token,
+        json.dumps(
+            {
+                "model_path": str(cad_env.source),
+                "views": [
+                    {"view_type": "front"},
+                    {"view_type": "top"},
+                    {"view_type": "right"},
+                ],
+            }
+        ),
+    )
+    assert result["status"] == "completed", result
+
+    tools = [tool for tool, _p in cad_env.backend.calls]
+    assert len(tools) == 7, tools  # create_drawing + begin + 3 views + analyze + commit
+    assert tools.count("add_drawing_view") == 3
+    # every identity-only guard (pre-check, created-check, 3x before/after) is the probe
+    assert _count_events(cad_env.backend, "identity") == 8
+    # only the final _post_verify still walks the feature tree
+    assert _count_events(cad_env.backend, "verify_state") == 1
+    assert "identity_fallback_verify_state" not in cad_env.backend.cheap_probes
+
+
+# -----------------------------------------------------------------------------
+# Reporting fix (safety-fresh-doc.md section 6): when a fresh_document build or a drawing
+# workflow FAILS, recovery rolls back, discards the created untitled document and re-activates
+# the previous one. The failure envelope used to report that restored previous document as
+# target_document — reading as if the previous file had been written into and restored. The
+# envelope now names the DISCARDED created document as the write target, flags the discard,
+# and surfaces the re-activated previous document under restored_active_document. Reporting
+# only: no behaviour change.
+# -----------------------------------------------------------------------------
+_FAILURE_ENVELOPE_KEYS = {
+    "job_id",
+    "status",
+    "risk",
+    "action_id",
+    "target_document",
+    "backup_path",
+    "completed_steps",
+    "partial_state",
+    "verification",
+    "error",
+    "created_document_discarded",
+    "restored_active_document",
+    "execution_status",
+    "verification_status",
+    "recovery_status",
+    "trust_level",
+}
+
+
+def test_fresh_feature_graph_failure_reports_the_discarded_created_document(cad_env):
+    def feature_graph_handler(_graph, _fresh_document):
+        return {
+            "status": "FAILED",
+            "stateVersion": 99,
+            "compiler": {
+                "nodes_completed": 2,
+                "node_log": [
+                    {"id": "n1", "status": "COMPLETED"},
+                    {"id": "n2", "status": "COMPLETED"},
+                    {"id": "n3", "status": "FAILED"},
+                ],
+            },
+            "error": {"code": "FEATURE_GRAPH_FAILED", "message": "node n3 failed."},
+        }
+
+    cad_env.backend.feature_graph_handler = feature_graph_handler
+    result = cad_env.orchestrator.feature_graph(
+        "job-1", cad_env.token, json.dumps({"nodes": []}), fresh_document=True
+    )
+
+    assert result["status"] == "failed"
+    assert result["recovery_status"] == "rolled_back"
+    # the write target is the DISCARDED created untitled part, never the restored file
+    assert result["target_document"] == "Part1"
+    assert result["created_document_discarded"] is True
+    assert result["restored_active_document"] == str(cad_env.source)
+    # the restored previous document appears as recovered CAD state, not as the target
+    assert result["partial_state"]["cad"]["activeDocumentPath"] == str(
+        cad_env.source
+    )
+    # completed steps still list the nodes that ran (in the discarded part)
+    assert result["completed_steps"] == ["n1", "n2"]
+    # reporting-only change: nothing else was added to or removed from the envelope
+    assert set(result) == _FAILURE_ENVELOPE_KEYS
+    job = cad_env.store.load("job-1", cad_env.token)
+    assert job["expected_document"]["path"] == str(cad_env.source)
+
+
+def test_drawing_step_failure_reports_the_discarded_created_drawing(cad_env):
+    def handler(tool, _params):
+        if tool == "add_drawing_view":
+            return _failed("DRAWING_STEP_FAILED")
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.drawing_workflow(
+        "job-1",
+        cad_env.token,
+        json.dumps(
+            {
+                "model_path": str(cad_env.source),
+                "views": [{"view_type": "front"}, {"view_type": "top"}],
+            }
+        ),
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "DRAWING_STEP_FAILED"
+    assert result["recovery_status"] == "rolled_back"
+    assert result["target_document"] == "Drawing1"
+    assert result["created_document_discarded"] is True
+    assert result["restored_active_document"] == str(cad_env.source)
+    assert set(result) == _FAILURE_ENVELOPE_KEYS
+    job = cad_env.store.load("job-1", cad_env.token)
+    assert job["expected_document"]["path"] == str(cad_env.source)
+
+
+def test_drawing_post_verify_failure_reports_the_discarded_created_drawing(cad_env):
+    from backend import ExecutionLayerError
+
+    def handler(tool, params):
+        if tool == "analyze_slddrw_test":
+            raise ExecutionLayerError("post-verify transport failure")
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.drawing_workflow(
+        "job-1",
+        cad_env.token,
+        json.dumps({"views": [{"view_type": "front"}]}),
+    )
+
+    assert result["status"] == "verification_failed"
+    assert result["target_document"] == "Drawing1"
+    assert result["created_document_discarded"] is True
+    assert result["restored_active_document"] == str(cad_env.source)
+
+
+def test_failure_without_a_created_document_has_no_discard_fields(cad_env, tmp_path):
+    # document_edits never creates a document, so its failure envelope must stay exactly
+    # as before — no discard flag, no restored-document key, target unchanged.
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+
+    def handler(tool, _params):
+        if tool == "modify_dimension":
+            cad_env.backend.state.update(
+                activeDocument=other.name,
+                activeDocumentPath=str(other),
+            )
+        return None
+
+    cad_env.backend.call_handler = handler
+    result = cad_env.orchestrator.document_edits(
+        "job-1",
+        cad_env.token,
+        json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
+    )
+
+    assert result["status"] == "failed"
+    assert "created_document_discarded" not in result
+    assert "restored_active_document" not in result
+    # document_edits writes really did happen in part.SLDPRT and the rollback restored it,
+    # so target_document stays the restored document here — unchanged pre-existing behavior.
+    assert result["target_document"] == str(cad_env.source)

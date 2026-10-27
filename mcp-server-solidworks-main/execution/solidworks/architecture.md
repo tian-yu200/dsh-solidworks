@@ -19,6 +19,11 @@ The compiler (deterministic) drives this layer over plain REST. In Phase 1 the M
 - State management (documents, sketches, features) — single source of truth for CAD state.
 - Input validation and safety checks.
 - REST endpoints for all tool operations (`POST /api/tool/execute`).
+- Read-only GET endpoints outside the tool envelope: `/api/tool/state` (the current `state_version`,
+  for adapter resync), `/api/tool/identity` (which document is open: `activeDocument`,
+  `activeDocumentPath`, `documentType`, `isDirty`, `stateVersion` — the identity subset of
+  `verify_state` WITHOUT the feature-tree walk, so it is the cheap way to re-validate a document),
+  `/health` (liveness + COM attach probe), `/ensure_ready` (POST: launches and attaches SolidWorks).
 - Idempotency + `state_version` optimistic concurrency (`OperationGuard`).
 
 ## Constraints

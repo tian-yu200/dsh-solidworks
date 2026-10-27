@@ -7,7 +7,8 @@ straight to /api/tool/execute. No new execution tool is introduced — a single 
 many tool calls, which is the whole point of the IR (one model call -> many ops).
 
 Conventions reused from the low-level tools:
-  - lengths in meters; box/rectangle centred on the sketch origin.
+  - lengths in meters; box centred on the sketch origin, a rectangle profile centred on its
+    optional cx/cy (default the origin).
   - through-all cut relies on the universal flipped-direction auto-retry (ADR-033), so the
     compiler does not compute 'reverse'.
   - path profiles (line/arc) carry EXACT frozen coordinates; no constraints are added — segments
@@ -60,10 +61,15 @@ def _offset(node):
     return float(ref.get("offset") or 0.0)
 
 
-def _rectangle_op(width, height, note, construction=False):
+def _rectangle_op(width, height, note, construction=False, cx=0.0, cy=0.0):
+    # cx/cy (v0.8.0 batch 7) shift the rectangle in the sketch plane, exactly like a circle's
+    # centre: the corners are EMITTED (the tool's rectangle is two opposite corners), so a graph
+    # without cx/cy sends 0.0 - w and 0.0 + w — bit-for-bit -w and +w — and lowers unchanged.
     w = float(width) / 2.0
     h = float(height) / 2.0
-    params = {"entity_type": "rectangle", "x1": -w, "y1": -h, "x2": w, "y2": h}
+    cx, cy = float(cx or 0.0), float(cy or 0.0)
+    params = {"entity_type": "rectangle", "x1": cx - w, "y1": cy - h,
+              "x2": cx + w, "y2": cy + h}
     if construction:
         params["construction"] = True
     return Op("add_sketch_entity", params, note)
@@ -128,7 +134,8 @@ def _profile_op(prim):
     kind = prim.get("kind")
     construction = prim.get("construction") is True
     if kind == "rectangle":
-        return _rectangle_op(prim["width"], prim["height"], "rectangle", construction)
+        return _rectangle_op(prim["width"], prim["height"], "rectangle", construction,
+                             prim.get("cx"), prim.get("cy"))
     if kind == "circle":
         params = {"entity_type": "circle",
                   "cx": float(prim.get("cx") or 0.0), "cy": float(prim.get("cy") or 0.0),
@@ -177,24 +184,46 @@ def _profile_op(prim):
         # v0.7.4 convenience primitive: ONE closed slot -> 4 exact line/arc entities (overall
         # length x width, centred on cx/cy). Traversal order left cap -> top -> right cap ->
         # bottom; endpoints are computed exact, so the chain closes without welding.
+        #
+        # `angle` (v0.8.0 batch 5, RADIANS, CCW about cx/cy) rotates that whole chain as a RIGID BODY.
+        # Without it the composite could only ever lie along +X, so a vertical or radial slot
+        # was silently drawn horizontal: the 3D01 fan's five angled slots came out as five
+        # OVERLAPPING horizontal ones running off the body, and their through_all cut returned
+        # null (live 2026-10-26 — a1 and graph_diag_slotsonly failed at n7 while the identical
+        # shape drawn as explicit arc/line chains cut first try).
         length = float(prim["length"])
         width = float(prim["width"])
         cx = float(prim.get("cx") or 0.0)
         cy = float(prim.get("cy") or 0.0)
+        angle = float(prim.get("angle") or 0.0)
         r = width / 2.0
         half = (length - width) / 2.0
-        left, right = cx - half, cx + half
+        cos_t, sin_t = math.cos(angle), math.sin(angle)
+
+        def frame(dx, dy):
+            """A slot-frame point (local: axis along +X, centre at the origin) in sketch coords.
+            Rounded ONCE here and then reused verbatim by both entities that meet at it, so the
+            contour still closes with NO weld at any angle. The `+ 0.0` drops a signed -0.0
+            (a rotated zero comes out negative for some angles): numerically identical, but it
+            keeps a shared endpoint the SAME TEXT in both entities' params."""
+            return (round(cx + dx * cos_t - dy * sin_t, 9) + 0.0,
+                    round(cy + dx * sin_t + dy * cos_t, 9) + 0.0)
+
+        lc, rc = frame(-half, 0.0), frame(half, 0.0)   # cap centres, on the slot axis
+        a, b = frame(-half, -r), frame(-half, r)       # left cap: bottom -> top
+        c, d = frame(half, r), frame(half, -r)         # right cap: top -> bottom
         return [
-            _arc_op(left, cy, left, cy - r, left, cy + r, -1,
+            _arc_op(lc[0], lc[1], a[0], a[1], b[0], b[1], -1,
                     "slot: left cap", construction),
-            _line_op(left, cy + r, right, cy + r, "slot: top edge", construction),
-            # The right cap sweeps CW (-1) from its TOP point to its BOTTOM point: that arc
-            # passes through +X (the outward bulge). +1 would sweep the 180 deg complement
-            # through -X, carving the cap INWARD (the right end would sit at cx+half-r
-            # instead of cx+half+r) — a silently wrong closed profile.
-            _arc_op(right, cy, right, cy + r, right, cy - r, -1,
+            _line_op(b[0], b[1], c[0], c[1], "slot: top edge", construction),
+            # Both caps sweep CW (-1): the left cap's A->B passes through -X (its outward bulge)
+            # and the right cap's C->D passes through +X. +1 would sweep the 180 deg complement
+            # inward (the right end would sit at cx+half-r instead of cx+half+r) — a silently
+            # wrong closed profile. A rotation preserves sweep SENSE, so these signs hold at
+            # every angle; the outward-bulge test samples the arcs to prove it.
+            _arc_op(rc[0], rc[1], c[0], c[1], d[0], d[1], -1,
                     "slot: right cap", construction),
-            _line_op(right, cy - r, left, cy - r, "slot: bottom edge", construction),
+            _line_op(d[0], d[1], a[0], a[1], "slot: bottom edge", construction),
         ]
     if kind == "rounded_rect":
         # v0.7.4 convenience primitive: centred rectangle with corner radius -> 8 exact
@@ -339,20 +368,28 @@ def lower_material(material):
 
 
 def lower_revolve(node):
-    """revolve -> extrude_feature(revolve) on the active sketch. The axis segment (normally the
-    profile's construction centerline) is passed as its exact 2D endpoints; the tool selects it
-    at the segment midpoint while the sketch is still active and treats it as the centerline.
+    """revolve -> extrude_feature(revolve) on the active sketch. The axis (normally the
+    profile's construction centerline) is passed as its exact 2D endpoints; the tool locates the
+    centerline ON that line among the sketch's own segments — matching endpoints, then collinearity
+    — and adds a dedicated construction centerline there if the sketch has none. It never converts
+    a profile edge, so a shaft drawn with its edge ON the axis keeps a closed contour.
     Angle: IR carries RADIANS (the recipe's SI dimension, C4); the tool boundary takes DEGREES
-    (the execution layer snaps near-360° to an exact full revolve)."""
+    (the execution layer snaps near-360° to an exact full revolve).
+    operation: 'boss' (default) adds material; 'cut' removes it — the tool flips the revolve's
+    IsCut flag. Omitted operation emits byte-identical params to the boss-only historical path."""
     axis = node["axis"]
     angle_rad = float(node.get("angle") or (2.0 * math.pi))
-    return [Op("extrude_feature",
-               {"feature_type": "revolve",
-                "angle": round(math.degrees(angle_rad), 6),
-                "axis_x1": float(axis["x1"]), "axis_y1": float(axis["y1"]),
-                "axis_x2": float(axis["x2"]), "axis_y2": float(axis["y2"])},
-               "revolve %.6g rad about (%g,%g)-(%g,%g)"
-               % (angle_rad, axis["x1"], axis["y1"], axis["x2"], axis["y2"]))]
+    is_cut = node.get("operation", "boss") == "cut"
+    params = {"feature_type": "revolve",
+              "angle": round(math.degrees(angle_rad), 6),
+              "axis_x1": float(axis["x1"]), "axis_y1": float(axis["y1"]),
+              "axis_x2": float(axis["x2"]), "axis_y2": float(axis["y2"])}
+    if is_cut:
+        params["is_cut"] = True
+    return [Op("extrude_feature", params,
+               "revolve %s %.6g rad about (%g,%g)-(%g,%g)"
+               % ("cut" if is_cut else "boss", angle_rad,
+                  axis["x1"], axis["y1"], axis["x2"], axis["y2"]))]
 
 
 def lower_circular_pattern(node):
@@ -543,15 +580,24 @@ def lower_mate(node, sides):
 
 
 def lower_hole(node, face_index, center2d):
-    """hole -> create_sketch(on_face, face_index) + circle at the resolved centre + through cut."""
+    """hole -> create_sketch(on_face, face_index) + circle at the resolved centre + a cut.
+    depth 'through_all' (or the 'through' alias) is a through-all cut; a positive NUMBER of metres
+    is a BLIND cut of that depth (the tool's existing blind-cut end condition)."""
     r = float(node["diameter"]) / 2.0
     cx, cy = center2d
+    is_through = node["depth"] in ("through_all", "through")
+    if is_through:
+        cut_params = {"feature_type": "cut", "through": True}
+        cut_note = "hole: through-all cut"
+    else:
+        cut_params = {"feature_type": "cut", "depth": float(node["depth"])}
+        cut_note = "hole: blind cut %.6g m deep" % float(node["depth"])
     return [
         Op("create_sketch", {"on_face": True, "face_index": int(face_index)},
            "hole: sketch on top face #%d" % face_index),
         Op("add_sketch_entity", {"entity_type": "circle", "cx": cx, "cy": cy, "radius": r},
            "hole: circle at centre"),
-        Op("extrude_feature", {"feature_type": "cut", "through": True}, "hole: through-all cut"),
+        Op("extrude_feature", cut_params, cut_note),
     ]
 
 
@@ -589,3 +635,21 @@ def lower_chamfer(node, edge_indices):
         params["angle"] = round(math.degrees(angle_rad), 6)
         note = "chamfer d=%g @ %.6g rad on edges %s" % (float(node["distance"]), angle_rad, idx)
     return [Op("add_edge_feature", params, note)]
+
+
+def lower_shell(node, face_indices):
+    """shell -> ONE create_shell over the resolver-matched FACE indices (the faces left open).
+
+    Indices are serialized as a JSON-array STRING — the add_edge_feature contract idiom (ADR-022).
+    An EMPTY list is a closed (fully hollow) shell, so the param is omitted entirely rather than
+    sent as "[]": the tool then calls InsertFeatureShell with nothing selected. Non-default flags
+    are emitted only when set (lower_rib discipline)."""
+    idx = sorted(set(int(i) for i in face_indices))
+    params = {"thickness": float(node["thickness"])}
+    if idx:
+        params["face_indices"] = "[%s]" % ",".join(str(i) for i in idx)
+    if node.get("outward") is True:
+        params["outward"] = True
+    return [Op("create_shell", params,
+               "shell t=%g outward=%s removing faces %s"
+               % (float(node["thickness"]), bool(node.get("outward")), idx))]

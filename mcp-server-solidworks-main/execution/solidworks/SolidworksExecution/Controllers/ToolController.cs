@@ -36,6 +36,39 @@ namespace SolidworksExecution.Controllers
             });
         }
 
+        // Cheap read-only identity probe: GET /api/tool/identity returns ONLY which document is open
+        // (activeDocument / activeDocumentPath / documentType), its isDirty flag and the current
+        // stateVersion — the identity subset of verify_state, WITHOUT walking the feature tree
+        // (SolidWorksService.GetIdentityInfo). Like /state it is a pure read: no state_version check,
+        // no increment, no idempotency registration, and it accepts no operation_id. COM calls run on
+        // the STA thread and use the cached attach. 503 + {error} when SolidWorks is not attached or
+        // no document is open — a state the caller can act on, never a 500.
+        [HttpGet]
+        [Route("identity")]
+        public HttpResponseMessage Identity()
+        {
+            Dictionary<string, object> info;
+            try
+            {
+                info = StaExecutor.Instance.Run(() => _service.GetIdentityInfo());
+            }
+            catch (System.Exception ex)
+            {
+                ExecLog.Write($"<- identity UNHANDLED {ex.GetType().Name}: {ex.Message}");
+                return Request.CreateResponse(HttpStatusCode.InternalServerError,
+                    new { error = ex.Message });
+            }
+
+            if (info.ContainsKey("error"))
+            {
+                ExecLog.Write($"<- identity UNAVAILABLE {info["error"]}");
+                return Request.CreateResponse(HttpStatusCode.ServiceUnavailable, info);
+            }
+
+            ExecLog.Write($"<- identity {info["activeDocument"]} sv={info["stateVersion"]}");
+            return Request.CreateResponse(HttpStatusCode.OK, info);
+        }
+
         // Health endpoint (P0.6). `~/` escapes the api/tool prefix → GET /health. Reports the server is
         // up, the current state_version, and whether SolidWorks COM is currently attachable (probed on the
         // STA thread — COM_ATTACH is lazy/per-request, so this is a fresh attach attempt) plus the active
@@ -157,6 +190,7 @@ namespace SolidworksExecution.Controllers
                 case "add_sketch_constraint":  return _service.AddSketchConstraint(request);
                 case "add_edge_feature":       return _service.AddEdgeFeature(request);
                 case "create_rib":             return _service.CreateRib(request);
+                case "create_shell":           return _service.CreateShell(request);
                 case "create_drawing":         return _service.CreateDrawing(request);
                 case "add_drawing_view":       return _service.AddDrawingView(request);
                 case "add_flat_pattern_view":  return _service.AddFlatPatternView(request);

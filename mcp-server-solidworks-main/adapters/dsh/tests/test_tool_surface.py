@@ -253,32 +253,37 @@ def test_every_reference_page_fits_the_elision_budget(topic):
 
 
 def test_reference_pages_stay_under_the_line_rule_with_margin():
-    # The line half of the rule: every page is well under the conservative >20-line
-    # threshold, so a line-counting elision cannot bite even where one page is large.
+    # Pages may now carry up to REFERENCE_PAGE_LINES lines (~120) and ~6000 characters, because
+    # results are single-line compact JSON: a LINE-counting rule can never bite, and the
+    # character rule is enforced separately by the serialized cap below. What must still hold is
+    # the hard bound the pager itself promises, and the serialized size.
     import references
 
-    for topic in sorted(set(TOPICS) | {"feature_graph_schema"}):
+    for topic in sorted(set(TOPICS) | set(references.GENERATED_TOPICS)):
         page = references.page_reference(topic, 0, None)
         rendered_lines = (
             json.dumps(page, ensure_ascii=False, separators=(",", ":")).count("\n") + 1
         )
         assert rendered_lines == 1
         assert page["page"]["returned_lines"] <= references.REFERENCE_PAGE_LINES
-        assert page["page"]["returned_lines"] <= ASSUMED_ELISION_LINES * 2
+        assert references._serialized_size(page) <= references.REFERENCE_PAGE_MAX_SERIALIZED
 
 
 def test_single_line_longer_than_the_page_budget_is_returned_whole():
-    # The schema's `_meta.status` line is ~3.4 KB and cannot be split without destroying the
-    # JSON. It is returned whole (flagged line_truncated) rather than cut — correctness of the
-    # reconstruction wins, and one such line still fits the host character cap.
+    # A single over-budget line cannot be split without destroying the JSON, so it is returned
+    # whole (flagged line_truncated) rather than cut. The changelog used to be such a line; it
+    # now has its own topic, so this drives the rule directly with a synthetic oversized line
+    # instead of depending on the schema's prose length.
     import references
 
-    text = references.render_reference("feature_graph_schema")
-    page = references.page_reference("feature_graph_schema", 4, None)
+    huge = "x" * (references.REFERENCE_PAGE_CHARS + 500)
+    text = "first\n" + huge + "\nlast"
+    page = references._page(text, 1, None, references.REFERENCE_PAGE_CHARS)
     assert page["page"]["returned_lines"] == 1
     assert page["page"]["line_truncated"] is True
-    assert page["content"] == text.split("\n")[4]  # NOT truncated mid-line
-    assert len(page["content"]) < HOST_ELISION_CHARS
+    assert page["content"] == huge  # NOT truncated mid-line
+    assert page["page"]["has_more"] is True
+    assert page["page"]["next_offset"] == 2
 
 
 def test_smaller_reference_limit_is_honoured_and_larger_is_clamped():
@@ -348,9 +353,13 @@ def test_reference_topic_literal_still_resolves_to_every_topic():
     import typing
 
     server = _load_dsh_server()
+    import references as _references
+
     literal = typing.get_args(typing.get_type_hints(server.inspect_state)["reference_topic"])
     assert literal, "reference_topic Literal failed to resolve"
-    assert set(literal) == set(TOPICS) | {"feature_graph_schema"}
+    # Every topic references.py serves must be addressable, including the GENERATED ones
+    # (quickref / changelog), so the model can never be told about a topic it cannot read.
+    assert set(literal) == set(_references.ALL_TOPICS)
     for topic in literal:
         assert read_reference(topic) is not None
 
@@ -464,3 +473,177 @@ def test_request_confirmation_token_is_within_the_first_1024_chars(cad_env):
         confirmation["action_summary"],
     ):
         assert serialized.find(value) < 1024
+
+
+# ---------------------------------------------------------------------------------------------
+# Pre-build reading cost: the generated quickref, the changelog split out of the paged body,
+# and the enlarged page budget. These are the guards for the "read the references before the
+# first build" round trips, which used to cost ~24 tool calls.
+# ---------------------------------------------------------------------------------------------
+def _walk_pages(topic):
+    """Every page of `topic`, in order."""
+    import references
+
+    pages = []
+    offset = 0
+    while True:
+        page = references.page_reference(topic, offset, None)
+        pages.append(page)
+        if not page["page"]["has_more"]:
+            return pages
+        offset = page["page"]["next_offset"]
+        assert len(pages) < 500
+
+
+def test_quickref_is_generated_and_covers_every_schema_node_type():
+    # Generated from the schema, so it CANNOT drift: a node type added to feature_types shows up
+    # here without a second place to edit. This is the guard for that claim.
+    import references
+
+    schema = references._load_schema()
+    declared = [
+        name for name in (schema.get("feature_types") or {})
+        if not name.startswith("_")
+    ]
+    assembly = [
+        name for name in (schema.get("assembly_types_v06") or {})
+        if not name.startswith("_")
+    ]
+    assert declared, "schema declares no feature types"
+    quickref = references.render_reference("feature_graph_quickref")
+    for name in declared + assembly:
+        assert ("\n%s — " % name) in quickref, name
+    # and it lists fields, with the required/optional marker
+    assert "  R " in quickref and "  O " in quickref
+    # every required field of every node type appears under that node type
+    for name in declared:
+        spec = schema["feature_types"][name]
+        section = quickref.split("\n%s — " % name, 1)[1]
+        for field, field_spec in spec.items():
+            if field in ("description", "_note"):
+                continue
+            assert field in section.split("\n\n")[0] or field in section[:2000], (name, field)
+
+
+def test_quickref_fits_in_two_pages_and_every_page_is_under_the_cap():
+    import references
+
+    pages = _walk_pages("feature_graph_quickref")
+    assert 1 <= len(pages) <= 2, len(pages)
+    for page in pages:
+        assert references._serialized_size(page) <= references.REFERENCE_PAGE_MAX_SERIALIZED
+
+
+def test_every_page_of_every_topic_is_under_the_serialized_cap():
+    # The cap is the real contract: the host pruner only trims results ABOVE 8192 characters,
+    # so a page must stay below the smaller 7000 cap to be safe with margin.
+    import references
+
+    for topic in references.ALL_TOPICS:
+        for page in _walk_pages(topic):
+            size = references._serialized_size(page)
+            assert size <= references.REFERENCE_PAGE_MAX_SERIALIZED, (topic, size)
+            assert size < HOST_ELISION_CHARS, (topic, size)
+
+
+def test_schema_body_no_longer_carries_the_changelog_prose():
+    import references
+
+    body = references.render_reference("feature_graph_schema")
+    changelog = references.render_reference("feature_graph_changelog")
+    # the long revision history lives in its own topic...
+    assert "v0.7.1 (audit-A1)" in changelog
+    assert len(changelog) > 3000
+    # ...and the paged body only points at it
+    assert "v0.7.1 (audit-A1)" not in body
+    assert "feature_graph_changelog" in body  # the pointer the model follows
+    # nothing is lost: the full status prose is recoverable from the changelog topic. Compare
+    # on collapsed whitespace, since the changelog topic re-wraps it for normal paging.
+    def _flat(value):
+        return " ".join(str(value).split())
+
+    assert _flat(references._load_schema()["_meta"]["status"]) in _flat(changelog)
+    # the schema still parses and keeps every other _meta key
+    import json
+
+    parsed = json.loads(body)
+    assert parsed["_meta"]["name"] == "feature-graph"
+    assert "version" in parsed["_meta"]
+
+
+def test_changelog_topic_is_reachable_and_paged_normally():
+    import references
+
+    pages = _walk_pages("feature_graph_changelog")
+    assert pages
+    # wrapped, so no page has to flag an unbreakable over-budget line
+    assert not any(page["page"]["line_truncated"] for page in pages)
+
+
+def test_default_pre_build_reading_is_a_small_number_of_calls():
+    # The measured contract for the Skill's default reading: quickref + one mapping topic +
+    # verification (+ the schema sections the plan actually needs). Pin an upper bound so a
+    # regression that re-inflates the reading (e.g. by making the quickref huge again) fails.
+    import references
+
+    topics = ("feature_graph_quickref", "mapping_part", "verification")
+    calls = sum(len(_walk_pages(topic)) for topic in topics)
+    assert calls <= 6, calls
+
+
+_SHELL_SHAPED_NODE = {
+    # Deliberately the DENSEST field shape in the schema (shell's), not a tiny probe: four
+    # more nodes of this size must still fit the two-page budget.
+    "description": (
+        "Synthetic node type {i}. Hollow-like capability with the same field shape as shell. "
+        "COVERED since v9.9.9 — grown for the headroom proof."
+    ),
+    "body": (
+        "string — id of the earlier body-producing node whose solid is hollowed "
+        "(body_producers: box/extrude/revolve/sweep)"
+    ),
+    "thickness": "number — meters (> 0), smaller than the thinnest section of the body",
+    "faces_to_remove": (
+        "array of face anchors (optional, >= 0): [{ near: [x,y,z], hint? }] — one per face "
+        "left open, `near` a point ON its plane"
+    ),
+    "outward": (
+        "boolean (optional, default false) — false grows the wall INWARD, true adds material "
+        "OUTSIDE"
+    ),
+}
+
+
+@pytest.mark.parametrize("count", [4])
+def test_quickref_leaves_headroom_for_four_more_node_types(count):
+    # The growth contract: FOUR more node types of the schema's densest shape must still fit
+    # the two-page budget, so the quickref does not have to be re-tuned at every capability
+    # batch. The schema is extended in memory (never written back) with `count` synthetic
+    # node types and the pager is walked over the result.
+    import copy
+
+    import references
+
+    schema = copy.deepcopy(references._load_schema())
+    for i in range(count):
+        node = copy.deepcopy(_SHELL_SHAPED_NODE)
+        node["description"] = node["description"].format(i=i)
+        schema["feature_types"]["synthetic_node_%d" % i] = node
+
+    original_loader = references._load_schema
+    references._load_schema = lambda: schema
+    try:
+        pages = _walk_pages("feature_graph_quickref")
+    finally:
+        references._load_schema = original_loader
+
+    assert len(pages) <= 2, (
+        f"{count} synthetic node types pushed the quickref to {len(pages)} pages"
+    )
+    for page in pages:
+        size = references._serialized_size(page)
+        assert size <= references.REFERENCE_PAGE_MAX_SERIALIZED, size
+    # and the synthetic types really are on the card (the headroom is not an empty walk)
+    rendered = "\n".join(page["content"] for page in pages)
+    for i in range(count):
+        assert f"\nsynthetic_node_{i} — " in rendered

@@ -483,6 +483,7 @@ def extrude_feature(
     axis_y1: float = 0.0,
     axis_x2: float = 0.0,
     axis_y2: float = 0.001,
+    is_cut: bool = False,
     path_sketch: str = "",
     profiles: str = "[]",
     reverse: bool = False,
@@ -493,7 +494,8 @@ def extrude_feature(
     """Extrude/feature the active sketch profile.
     feature_type='boss' (default): solid extrusion, requires depth.
     feature_type='cut': material removal, requires depth and existing solid body.
-    feature_type='revolve': solid of revolution — angle in DEGREES (default 360 = full revolve); axis defined by axis_x1/y1 to axis_x2/y2 (midpoint of that segment selects the centerline).
+    feature_type='revolve': solid of revolution — angle in DEGREES (default 360 = full revolve); axis defined by axis_x1/y1 to axis_x2/y2 (the sketch's construction centerline on that line is the axis of revolution; a dedicated one is added if the sketch has none).
+    is_cut (revolve): True revolves a CUT — the swept profile removes material instead of adding a boss (default False = boss).
     feature_type='sweep': sweeps profile along a path — requires path_sketch (name of the path sketch).
     feature_type='loft': lofts through multiple profiles — requires profiles (JSON array of sketch names, e.g. '[\"Sketch1\",\"Sketch2\"]').
     reverse (boss/cut): flip the feature direction. Needed e.g. for a cut/boss sketched on a part FACE, where the material is on the opposite side from the default.
@@ -521,6 +523,7 @@ def extrude_feature(
             "angle": angle,
             "axis_x1": axis_x1, "axis_y1": axis_y1,
             "axis_x2": axis_x2, "axis_y2": axis_y2,
+            "is_cut": is_cut,
             "path_sketch": path_sketch,
             "profiles": profiles,
             "reverse": reverse,
@@ -564,6 +567,38 @@ def create_rib(
             "reverse_thickness_dir": reverse_thickness_dir,
             "reverse_material_dir": reverse_material_dir,
             "is_norm_to_sketch": is_norm_to_sketch,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: create_shell
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def create_shell(
+    thickness: Annotated[float, Field(gt=0, description="Shell wall thickness in METERS (e.g. 0.002 = 2mm); must be smaller than the thinnest section of the body)")],
+    face_indices: str = "",
+    outward: bool = False,
+) -> str:
+    """Hollow the existing solid body to a uniform wall thickness (the thin-wall-part / casting
+    shape). Requires a part document with a solid body; run it AFTER the body exists.
+    thickness: wall thickness in METERS.
+    face_indices: JSON array STRING of face indices from analyze_model(faces) — the faces to
+        leave OPEN, e.g. "[3]". Empty/omitted = a CLOSED (fully hollow) shell. Indices come from
+        the live face enumeration, so re-read analyze_model(faces) after any change.
+    outward: False (default) grows the wall INWARD, so the outside keeps its dimensions; True
+        adds material OUTSIDE and the envelope grows by the thickness.
+    Verification is strict: InsertFeatureShell returns nothing, so the tool confirms the feature
+    in the tree AND that the body volume changed — a shell SolidWorks refuses (e.g. a wall thicker
+    than the part) fails SHELL_FAILED instead of reporting success. On COMPLETED the result
+    includes result_geometry {volume, faces, edges} — check the volume against your own analytic
+    expectation (outer minus inner cavity)."""
+    return _call(
+        "create_shell",
+        {
+            "thickness": thickness,
+            "face_indices": face_indices,
+            "outward": outward,
         },
     )
 

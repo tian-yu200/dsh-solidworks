@@ -125,7 +125,12 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "SKETCH_CREATION_FAILED", "Sketch was not created or is not active after InsertSketch. The face may be non-planar, or the selection was lost — try analyze_model(faces) and a different face_index.");
 
-                string activeSketchName = (activeSketch as IFeature)?.Name ?? "Sketch";
+                // The NEW sketch's REAL runtime name ("Sketch1", "Çizim3", ...). The compiler
+                // records cadState.activeSketch as this sketch's runtime name and later features
+                // (sweep path, loft profiles) reference sketches by exactly that string, so the
+                // placeholder this line used to fall back to made name-referenced features
+                // unbuildable. See ActiveSketchName for how the real name is resolved.
+                string activeSketchName = ActiveSketchName(modelDoc);
 
                 // Echo the NEW sketch's MEASURED plane + frame (same reader analyze uses). The
                 // caller (IR compiler) compares this against the original sketch's recorded frame
@@ -431,7 +436,7 @@ namespace SolidworksExecution.Services
                 if (activeSketch == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "SKETCH_NOT_ACTIVE", "No active sketch. Call create_sketch first.");
-                string sketchName = (activeSketch as IFeature)?.Name ?? "Sketch";
+                string sketchName = ActiveSketchName(modelDoc);
 
                 int done = 0;
                 var counts = new Dictionary<string, int>();
@@ -559,12 +564,16 @@ namespace SolidworksExecution.Services
                 ISketchSegment createdSeg;
                 object[] createdSegs;
                 string coreErr;
+                // Resolved ONCE, before the create: the core needs the sketch's runtime name to
+                // re-enter it after a sketch fillet/chamfer (RegenerateSketchInPlace) and the
+                // response echoes it as this sketch's name (see ActiveSketchName).
+                string activeSketchName = ActiveSketchName(modelDoc);
                 bool prevAddToDbAll = modelDoc.SketchManager.AddToDB;
                 modelDoc.SketchManager.AddToDB = true;
                 try
                 {
                     coreErr = CreateSketchEntityCore(modelDoc, p, entityType,
-                        (activeSketch as IFeature)?.Name, out createdSeg, out createdSegs);
+                        activeSketchName, out createdSeg, out createdSegs);
                 }
                 finally
                 {
@@ -576,8 +585,6 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         coreParts[0], coreParts.Length > 1 ? coreParts[1] : coreErr);
                 }
-
-                string activeSketchName = (activeSketch as IFeature)?.Name ?? "Sketch";
 
                 // In-band echo of the REAL created geometry (Task 2). Read back from SW (never the
                 // input), so AddToDB snapping / inference drift is visible to the caller without a
@@ -678,7 +685,7 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "SKETCH_NOT_ACTIVE", "No active sketch. Call create_sketch first.");
 
-                string activeSketchName = (activeSketch as IFeature)?.Name ?? "Sketch";
+                string activeSketchName = ActiveSketchName(modelDoc);
 
                 // Force SolidWorks to commit and refresh sketch geometry before attempting selection.
                 // Without this, segments created by add_rectangle may not yet be queryable via SelectByID2.
@@ -833,7 +840,7 @@ namespace SolidworksExecution.Services
 
                 modelDoc.SketchAddConstraints(swConstraintId);
 
-                string activeSketchName = (modelDoc.SketchManager.ActiveSketch as IFeature)?.Name ?? "Sketch";
+                string activeSketchName = ActiveSketchName(modelDoc);
 
                 var response = new ExecutionResponse
                 {
@@ -968,6 +975,34 @@ namespace SolidworksExecution.Services
                 modelDoc.ClearSelection2(true);
             }
             modelDoc.GraphicsRedraw2();
+        }
+
+        // -----------------------------------------------------------------------
+        // The active sketch's feature NAME.
+        //
+        // SketchManager.ActiveSketch is typed Sketch and ISketch carries neither a name nor a
+        // back-pointer to its feature (reflection over SolidWorks.Interop.sldworks v33), so the name
+        // has to come from the sketch's FEATURE. The cast that looks wrong on paper is the one that
+        // works: SolidWorks' live sketch object answers IFeature through COM QueryInterface, so
+        // `ActiveSketch as IFeature` returns the owning feature — the same mechanism verify_state has
+        // always used for its activeSketch field, and the one proven against a live session by this
+        // batch. An IUnknown-identity scan matching each Sketch feature's GetSpecificFeature2() was
+        // tried first and did NOT resolve, so it is deliberately not kept as a fallback.
+        //
+        // The NAME is what every by-name consumer needs: create_sketch's activeSketch echo (the
+        // compiler reads exactly that field as a sketch node's runtime name, so while the echo was a
+        // "Sketch" placeholder a sweep or loft could never name its own sketches), the sweep profile
+        // selection and its PROFILE_NOT_FOUND guard, and the by-name re-selects that boss, cut and
+        // revolve do after leaving a sketch.
+        private static string ActiveSketchName(IModelDoc2 modelDoc)
+        {
+            object active;
+            try { active = modelDoc.SketchManager.ActiveSketch; }
+            catch (COMException) { return null; }
+            var feat = active as IFeature;
+            if (feat == null) return null;
+            try { return feat.Name; }
+            catch (COMException) { return null; }
         }
     }
 }

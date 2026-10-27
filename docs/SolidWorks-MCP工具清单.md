@@ -19,7 +19,7 @@
 | `submit_feature_graph` | 写/批量 | 用现有确定性编译器执行完整 Feature Graph。 |
 | `apply_document_edits` | 写/破坏性/批量 | 对目标文档执行白名单参数化编辑。 |
 | `drawing_workflow` | 写/批量 | 新建工程图并编排视图、标注、表格和标准检查。 |
-| `save_or_export` | 写/覆盖/关闭 | 保存、导出、批量导出或关闭。 |
+| `save_or_export` | 写/覆盖/另存为/关闭 | 保存、导出、批量导出或关闭。 |
 | `request_confirmation` | 只读确认 | 验证待办动作并轮换一次性确认 token。 |
 | `confirm_action` | 对应原动作 | 用户明确批准精确摘要后执行一个待办动作。 |
 | `finish_job` | 验证 | 运行最终客观验证并结束任务。 |
@@ -80,8 +80,10 @@
 - `reverse`
 - `coverage`
 - `feature_graph_schema`
+- `feature_graph_quickref`（由 schema 自动生成的速查卡：每个节点类型的含义、必填/可选字段与单位，1-2 页）
+- `feature_graph_changelog`（schema 的修订历史）
 
-参考内容按页返回：每次调用在 `verification` 内给出 `topic`、`content` 与 `page`（`offset`、`limit`、`returned_lines`、`total_lines`、`total_chars`、`has_more`、`next_offset`、`line_truncated`）。`reference_offset`/`reference_limit` 默认 `0`（使用默认值），可请求更小的页，更大的值被钳制；每页至多 40 行、约 4000 字符。`page.has_more` 为 true 时用 `page.next_offset` 继续读取，或用 `reference_offset` 跳到 `page.index.sections[].line`。`feature_graph_schema` 的 `page.index` 还包含 `sections`（`section`、`line`、`entries`）与 `feature_types`（节点类型列表）。
+参考内容按页返回：每次调用在 `verification` 内给出 `topic`、`content` 与 `page`（`offset`、`limit`、`returned_lines`、`total_lines`、`total_chars`、`has_more`、`next_offset`、`line_truncated`）。`reference_offset`/`reference_limit` 默认 `0`（使用默认值），可请求更小的页，更大的值被钳制；每页内容上限约 6820 字符，序列化后的整页（含封套）不超过 7000 字符，至多 150 行。`page.has_more` 为 true 时用 `page.next_offset` 继续读取，或用 `reference_offset` 跳到 `page.index.sections[].line`。`feature_graph_schema` 的 `page.index` 还包含 `sections`（`section`、`line`、`entries`）与 `feature_types`（节点类型列表）。构建前的默认预读是 `feature_graph_quickref` + 一个 mapping 节 + `verification`，约 5 次调用。
 
 ## 4. `submit_feature_graph`
 
@@ -94,7 +96,16 @@
 - 常规新建任务使用 `fresh_document=true`。
 - 大图会返回 `pending_confirmation`。
 
-返回结果包含编译节点日志、CAD 状态和写后验证。节点执行成功但客观验证失败时，事务会尝试回滚。
+自上一发布版本以来新增的节点与参数（以 `feature-graph.schema.json` 0.8.0-draft 为准）：
+
+- `hole.depth` 接受以米为单位的正数（盲孔），或 `through_all`（`through` 为别名）。
+- `revolve.operation` 支持 `boss`（默认）与 `cut`；轴取草图中心线的精确 2D 端点，由编译器确定性解析。
+- `sweep.sketch` 明确引用轮廓草图节点（须为紧邻的前一节点）。
+- 新节点类型 `shell`（抽壳）：`body` 引用更早的成体节点，`thickness` 为壁厚（米），可选 `faces_to_remove` 面锚点（开放面）与 `outward`。`InsertFeatureShell` 无返回值，成功与否按特征树新增加未舍入的体积差共同确认（体积不变的报错特征会被判为 `SHELL_FAILED`）。
+- 轮廓图元 `slot` 增加 `angle`（弧度，逆时针，绕 `(cx, cy)`），`rectangle`、`slot`、`rounded_rect`、`circle` 均接受可选 `cx`/`cy` 中心。
+- 草图为闭合轮廓时，同一草图内互相重叠的闭合轮廓在计划阶段即被拒绝（`VALIDATION_FAILED`），不再等到 SolidWorks 构建中报 `EXTRUSION_FAILED`。
+
+返回结果包含编译节点日志、CAD 状态和写后验证。节点执行成功但客观验证失败时，事务会尝试回滚。`fresh_document=true` 构建失败且恢复丢弃了新建文档时，失败结果以该文档为写入目标，并带 `created_document_discarded` 与 `restored_active_document` 字段。
 
 ## 5. `apply_document_edits`
 
@@ -151,6 +162,8 @@
 - DXF
 
 PDF、DWG 和 DXF 需要活动文档为工程图。覆盖现有文件、批量导出、关闭全部文档和丢弃未保存修改需要确认。
+
+保存时指定路径同样需要确认（`risk = save_as`）：给未命名文档的首次保存——包括任务刚创建的文档——以及把已保存文档保存到不同路径，都是 SolidWorks 的另存为，会在内存中重命名打开的文档；`action_summary` 会同时点名文档和目标路径。不带 `file_path` 的原地保存仍按覆盖现有文件的规则确认。
 
 输出验证至少检查目标文件存在且非空。
 

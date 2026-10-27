@@ -14,7 +14,14 @@ namespace SolidworksExecution.Services
     public partial class SolidWorksService
     {
         private readonly IOperationGuard _guard;
-        private ISldWorks _solidWorks;
+        // Shared across requests on purpose. ToolController constructs a new SolidWorksService per
+        // request, so an instance field meant every tool call paid a Marshal.GetActiveObject ROT
+        // lookup (~375 ms measured). All COM access is serialized on the single StaExecutor thread,
+        // so this static needs no locking.
+        private static ISldWorks _solidWorks;
+        // Visible/UserControl is a lifecycle setting applied on first attach (EnsureReady's intent),
+        // not something each request should re-write.
+        private static bool _sessionVisibilityApplied;
         private static readonly object UndoScopeSync = new object();
         private static bool _undoScopeActive;
         private static string _undoScopeDocumentTitle;
@@ -33,16 +40,32 @@ namespace SolidworksExecution.Services
         {
             try
             {
-                _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+                if (_solidWorks == null || !IsAlive(_solidWorks))
+                {
+                    _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+                    _sessionVisibilityApplied = false;
+                }
                 IsConnected = true;
                 EnsureVisible(); // the user must ALWAYS see what the automation does
                 return true;
             }
             catch (COMException)
             {
+                // Dead or absent — drop the cached reference so a later call re-attaches fresh.
+                _solidWorks = null;
+                _sessionVisibilityApplied = false;
                 IsConnected = false;
                 return false;
             }
+        }
+
+        // One cheap round trip proves the cached RCW still points at a live server. A SolidWorks that
+        // closed underneath us leaves a dead object whose every member call throws COMException, so
+        // without this the cached attach could never recover.
+        private static bool IsAlive(ISldWorks app)
+        {
+            try { app.RevisionNumber(); return true; }
+            catch (COMException) { return false; }
         }
 
         // Force the attached SolidWorks instance to be on-screen and user-controllable.
@@ -51,20 +74,23 @@ namespace SolidworksExecution.Services
         // that one, the user would watch a different window and see nothing happen (observed live: two
         // SLDWORKS processes, the older one window-less). Policy (for now): every instance we touch is
         // made visible. Best-effort — a visibility failure must never break the attach or a tool call.
+        // Runs once per attach (not per request): if it fails we leave the flag unset and retry later.
         private void EnsureVisible()
         {
+            if (_sessionVisibilityApplied) return;
             try
             {
                 if (_solidWorks == null) return;
                 if (!_solidWorks.Visible) _solidWorks.Visible = true;
                 _solidWorks.UserControl = true;
+                _sessionVisibilityApplied = true;
             }
             catch { /* visibility is best-effort; never fail over it */ }
         }
 
         private bool EnsureConnected()
         {
-            if (_solidWorks != null) return true;
+            if (_solidWorks != null && IsAlive(_solidWorks)) return true;
             return Connect();
         }
 
@@ -395,6 +421,38 @@ namespace SolidworksExecution.Services
                 result["solidworksWindowless"] = procs.Count(p => p.MainWindowHandle == IntPtr.Zero);
             }
             catch { /* diagnostic only — never fail /health over it */ }
+            return result;
+        }
+
+        // Cheap identity probe (GET /api/tool/identity). Returns the SAME document-identity fields
+        // VerifyState reports, read the SAME way and under the SAME key names (stateVersion,
+        // activeDocument, activeDocumentPath, documentType, isDirty) — and NOTHING else: no feature
+        // tree, no sketches, no dimensions. That omission is the whole point: VerifyState's cost is
+        // dominated by FeatureManager.GetFeatures(true) plus one Name read per feature (thousands of
+        // COM round trips on a production part), while this is four. Callers that only need to know
+        // WHICH document is open (and whether it is dirty) get it in a fraction of the time.
+        // Uses the CACHED attach (EnsureConnected) like every tool call, not Connect()'s fresh ROT
+        // bind. Read-only: no state_version check, no increment, no idempotency registration — the
+        // same discipline as verify_state. Must run on the STA thread (it touches COM).
+        public Dictionary<string, object> GetIdentityInfo()
+        {
+            var result = new Dictionary<string, object>();
+            result["stateVersion"] = _guard.GetCurrentStateVersion();
+            if (!EnsureConnected())
+            {
+                result["error"] = "COM_ATTACH_FAILED: SolidWorks process not found or COM not registered.";
+                return result;
+            }
+            var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
+            if (modelDoc == null)
+            {
+                result["error"] = "NO_ACTIVE_DOCUMENT: No active document found in SolidWorks.";
+                return result;
+            }
+            result["activeDocument"] = modelDoc.GetTitle();
+            result["activeDocumentPath"] = modelDoc.GetPathName();
+            result["documentType"] = DocumentTypeName(modelDoc);
+            result["isDirty"] = modelDoc.GetSaveFlag();
             return result;
         }
 

@@ -59,17 +59,18 @@ DeepSeek Harness
 - 活动文档身份锁，用户切换文档后阻止继续写入。
 - 现有文件首次写入前备份。
 - SolidWorks Undo transaction、失败回滚和回滚后验证。
-- Feature Graph 使用现有确定性编译器，长度为米，角度为弧度。
+- Feature Graph 使用现有确定性编译器，长度为米，角度为弧度。节点类型含 box、sketch（矩形/圆/线/弧/椭圆/样条/键槽/圆角矩形等轮廓）、extrude、revolve（`boss`/`cut`，轴取草图中心线的精确 2D 端点）、sweep、rib、hole（`depth` 支持以米为单位的数值盲孔或 `through_all`）、linear/circular_pattern、fillet、chamfer、shell（`body`、`thickness`、`faces_to_remove` 面锚点、`outward`）、loft、钣金与镜像等；草图为闭合轮廓时，重叠的闭合轮廓在计划阶段即被拒绝（`VALIDATION_FAILED`），不再等到构建中报 `EXTRUSION_FAILED`。
 - 现有文档编辑严格白名单。
 - 工程图支持标准视图、展开图、剖视图、局部视图、模型标注、自动尺寸、中心标记、BOM、气泡、孔表和标准检查。
-- 覆盖、批量、删除、关闭全部或丢弃未保存修改等风险动作需要精确确认。
+- 覆盖、批量、删除、关闭全部或丢弃未保存修改等风险动作需要精确确认；为未命名文档指定路径的保存、把已保存文档存到不同路径的保存同样需要确认（`risk = save_as`）。新建文档构建失败并丢弃时，失败结果会标注 `created_document_discarded` 并单独报告恢复的活动文档。
 - 每次写入后检查文档身份、重建状态和适用的几何/工程图结果。
 - 输出返回 `execution_status`、`verification_status`、`recovery_status` 与 `trust_level`。
+- 速度：SolidWorks COM 附加与 HTTP 连接复用（每次调用不再重复 ROT 查找和建连），同一次 Feature Graph 内同一 `state_version` 的分析读取有缓存，身份类检查走快速 `GET /api/tool/identity`，`finish_job` 在状态未变时复用上一次写后验证。实测示例：2 节点零件的后端耗时约 97 秒降至 8 节点零件约 15 秒。
 
 ## 工作流
 
 1. 使用 `inspect_state(scope="state")` 检查 SolidWorks 与活动文档。
-2. 使用 `inspect_state(scope="reference")` 读取本任务需要的 recipe 或 Feature Graph schema。大参考按页返回（每页至多 40 行、约 4000 字符；`reference_limit` 传更小值有效，更大值被钳制，`0` 表示默认），用 `reference_offset`/`reference_limit` 翻页并跟随 `page.has_more`/`page.next_offset`；`feature_graph_schema` 的 `page.index.feature_types` 列出节点类型，`page.index.sections[].line` 可直接跳转到某节。
+2. 使用 `inspect_state(scope="reference")` 读取本任务需要的 recipe 或 Feature Graph schema。大参考按页返回（每页内容上限约 6820 字符、序列化整页含封套不超过 7000 字符，至多 150 行；`reference_limit` 传更小值有效，更大值被钳制，`0` 表示默认），用 `reference_offset`/`reference_limit` 翻页并跟随 `page.has_more`/`page.next_offset`；`feature_graph_schema` 的 `page.index.feature_types` 列出节点类型，`page.index.sections[].line` 可直接跳转到某节。构建前先读生成的 `feature_graph_quickref`（由 schema 自动生成，覆盖每个节点类型的必填/可选字段与单位，1-2 页），再按需读取其余节；默认预读（quickref + mapping_part + verification）约 5 次调用。
 3. 使用 `start_job` 获取 `job_id` 和私密 `job_token`。
 4. 根据任务调用 `submit_feature_graph`、`apply_document_edits` 或 `drawing_workflow`。
 5. 收到 `pending_confirmation` 时调用 `request_confirmation`，向用户展示精确 `action_summary`（其中会点名目标文档的路径或标题），等待新消息明确批准后再调用 `confirm_action`。

@@ -132,3 +132,116 @@ def test_nine_tool_surface_is_registered_and_allowlisted():
         f"model surface drifted from the documented nine tools "
         f"(diff={sorted(registered ^ EXPECTED_NINE_TOOLS)}); {SURFACE_DRIFT_HINT}"
     )
+
+
+def test_skill_names_every_generated_reference_topic():
+    """The Skill must advertise the topics references.py actually serves.
+
+    The pre-build reading got cheaper by adding generated topics (quickref, changelog). If the
+    Skill keeps telling the model to page the whole schema, the saving is invisible to it — so
+    the topic list and the reading advice are asserted against the live adapter, not against a
+    hand-copied list.
+    """
+    import sys
+
+    adapter = os.path.join(REPO_ROOT, "mcp-server-solidworks-main", "adapters", "dsh")
+    if adapter not in sys.path:
+        sys.path.insert(0, adapter)
+    import references as _references
+
+    for root in (MIRROR, PRESET):
+        skill = _read(os.path.join(root, "SKILL.md")).decode("utf-8")
+        for topic in _references.GENERATED_TOPICS:
+            assert f"`{topic}`" in skill, f"{root}/SKILL.md never names reference topic {topic}"
+        # the stale page-size / page-count wording must be gone
+        assert "about 15" not in skill, f"{root}/SKILL.md still says the schema is ~15 pages"
+        assert "40\nlines" not in skill and "at most 40 lines" not in skill
+        # and it must point at the quickref as the default reading
+        assert "feature_graph_quickref` (1-2" in skill or "feature_graph_quickref`" in skill
+
+
+def test_quickref_covers_every_node_type_in_the_schema():
+    """Generated from the schema, so the quickref cannot silently miss a node type."""
+    import sys
+
+    adapter = os.path.join(REPO_ROOT, "mcp-server-solidworks-main", "adapters", "dsh")
+    if adapter not in sys.path:
+        sys.path.insert(0, adapter)
+    import references as _references
+
+    schema = _references._load_schema()
+    quickref = _references.render_reference("feature_graph_quickref")
+    expected = [
+        name
+        for name in (schema.get("feature_types") or {})
+        if isinstance(name, str) and not name.startswith("_")
+    ]
+    expected += [
+        name
+        for name in (schema.get("assembly_types_v06") or {})
+        if isinstance(name, str) and not name.startswith("_")
+    ]
+    assert expected
+    missing = [name for name in expected if f"\n{name} — " not in quickref]
+    assert not missing, f"quickref is missing node types {missing}"
+    for token in ("meters", "radians"):
+        assert token in quickref
+
+
+def test_quickref_field_lines_are_whole_and_balanced():
+    """The quickref's own compactness contract: no clipped sentence, no broken markup.
+
+    A field line shortened by cutting instead of by the shared legend silently changes the
+    instruction (the shell faces_to_remove line used to be clipped mid-sentence), and a
+    dangling ")" from an abbreviation that consumed only its opener mangles the line. Guard
+    both: every field line's parentheses balance, no rationale sentence survived the drop,
+    and every line ends on punctuation, a legend token, or a whole word from the schema.
+    """
+    import re
+    import sys
+
+    adapter = os.path.join(REPO_ROOT, "mcp-server-solidworks-main", "adapters", "dsh")
+    if adapter not in sys.path:
+        sys.path.insert(0, adapter)
+    import references as _references
+
+    quickref = _references.render_reference("feature_graph_quickref")
+    schema = _references._load_schema()
+    sources = {}
+    for group in ("feature_types", "assembly_types_v06"):
+        for name, node in (schema.get(group) or {}).items():
+            if not isinstance(node, dict):
+                continue
+            for field, field_spec in node.items():
+                if field not in ("description", "_note") and isinstance(field_spec, str):
+                    sources[(name, field)] = field_spec
+    # Legend tokens a line may legitimately end on after abbreviation: units/verbs the
+    # legend defines, the type words the legend abbreviates, and marker words like the
+    # mode letters in edge_flange's MODE A / MODE B.
+    legend_tokens = {
+        "m", "rad", "deg", "IP", "AM", "AA", "C4", "SI", "true", "false",
+        "bool", "str", "num", "int", "obj", "A", "B", "ON", "FROM", "opt", "dflt",
+    }
+    current = None
+    for raw in quickref.split("\n"):
+        if raw and not raw.startswith(" "):
+            current = raw.split(" — ", 1)[0]
+            continue
+        line = raw.strip()
+        if not line or ": " not in line:
+            continue
+        marker, _, rest = line.partition(" ")
+        field, spec = rest.split(": ", 1)
+        opens, closes = spec.count("("), spec.count(")")
+        assert opens == closes, f"unbalanced parens in {current}.{field!r}: {spec!r}"
+        # no rationale sentence survived the drop
+        match = _references._PROVENANCE_RE.search(spec)
+        assert match is None, f"provenance survived in {current}.{field!r}: {spec!r}"
+        # no mid-WORD cut: the line ends on punctuation, a legend token, or a word that the
+        # original schema spec contains whole (a clip like "...ON its pla" passes none).
+        last = spec.split()[-1].strip(".,;:)]}'\"`")
+        source = sources.get((current, field), "")
+        ok = spec[-1] in ".,;:)]}'\"`|>" or last in legend_tokens or (
+            source and re.search(r"\b%s\b" % re.escape(last), source)
+        )
+        assert ok, f"mid-sentence cut in {current}.{field!r}: {spec!r}"

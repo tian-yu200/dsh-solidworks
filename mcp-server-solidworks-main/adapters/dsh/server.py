@@ -121,6 +121,8 @@ def inspect_state(
         "reverse",
         "coverage",
         "feature_graph_schema",
+        "feature_graph_quickref",
+        "feature_graph_changelog",
     ] = "contract",
     reference_offset: int = 0,
     reference_limit: int = 0,
@@ -132,6 +134,12 @@ def inspect_state(
     0-based first line of the page and `reference_limit` an optional smaller page size (0 =
     defaults; a larger value is clamped). The page reports total_lines/total_chars, has_more
     and next_offset, and for feature_graph_schema an index of its sections and node kinds.
+
+    PRE-BUILD READING: start with `feature_graph_quickref` (generated from the schema — every
+    node type with its required/optional fields, units and a one-line meaning, 1-2 pages), then
+    read only the schema sections you need by jumping with `page.index.sections[].line`. The
+    full `feature_graph_schema` is 9 pages and no longer carries the changelog prose, which is
+    its own topic (`feature_graph_changelog`) and is NOT needed to build.
     Deep document scopes require job credentials.
     Assembly faces/edges additionally require component.
     """
@@ -221,8 +229,11 @@ def save_or_export(
     """Save, export, batch-export, or close through the CAD safety policy.
 
     Existing-file overwrite, batch export, close-all, and discarding dirty changes return
-    pending_confirmation. file_path is the full target for save/export and the extensionless
-    base path for batch_export.
+    pending_confirmation. A save that names a path for an untitled document — including one
+    this job just created — or a different path for a saved document is a Save As that renames
+    the open document in memory and also returns pending_confirmation (risk save_as; the
+    action_summary names the document and the target path). file_path is the full target for
+    save/export and the extensionless base path for batch_export.
     """
     return _json_result(
         lambda: orchestrator.save_or_export(
