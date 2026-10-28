@@ -121,6 +121,69 @@ $PresetSynchronized = (
 )
 Add-Check "Installed preset synchronized" $PresetSynchronized $PresetTemplate
 
+# --- single source of truth: the skill content is LINKED, never copied -------------------------
+# Measured 2026-10-28: the installed SKILL.md was a two-month-old copy (20385 B against the repo's
+# 26552 B), so sessions outside the repo silently read stale instructions. The link helpers are the
+# SAME functions Install and Restore use (SolidWorksDshLinks.ps1), so a diagnosis cannot disagree
+# with what the installer believes about a path.
+. (Join-Path $PSScriptRoot "SolidWorksDshLinks.ps1")
+
+$RepoPresetSkillRoot = Join-Path $ProjectRoot "dsh-integration\presets\solidworks-cad\skills"
+$RepoSkillDir = Join-Path $RepoPresetSkillRoot "solidworks-cad"
+$PresetSkillsPath = Join-Path $DshHome ".agent-presets\solidworks-cad\skills"
+$UserSkillPath = Join-Path $DshHome "skills\solidworks-cad"
+$ProjectSkillPath = Join-Path $ProjectRoot ".dsh\skills\solidworks-cad"
+
+$PresetLinkTarget = Get-DshLinkTarget $PresetSkillsPath
+Add-Check "Preset skills link -> repo" (
+    $PresetLinkTarget -and
+    ($PresetLinkTarget -eq [System.IO.Path]::GetFullPath($RepoPresetSkillRoot).TrimEnd('\', '/'))
+) ("{0} -> {1}" -f $PresetSkillsPath, $PresetLinkTarget)
+
+$UserLinkTarget = Get-DshLinkTarget $UserSkillPath
+Add-Check "User skill link -> repo (standard preset)" (
+    $UserLinkTarget -and
+    ($UserLinkTarget -eq [System.IO.Path]::GetFullPath($RepoSkillDir).TrimEnd('\', '/'))
+) ("{0} -> {1}" -f $UserSkillPath, $UserLinkTarget)
+
+# A REAL directory at either link path means a copy is back, which is exactly how the drift started.
+Add-Check "No stale skill copy in the preset" (
+    (Get-DshLinkTarget $PresetSkillsPath) -ne $null
+) "$PresetSkillsPath must be a junction to the repo, not a copied directory"
+Add-Check "No stale skill copy in ~/.dsh/skills" (
+    (Get-DshLinkTarget $UserSkillPath) -ne $null
+) "$UserSkillPath must be a junction to the repo, not a copied directory"
+
+# Readable THROUGH the links, and byte-equal to the repo source (a broken target reads as absent).
+$InstalledSkill = Join-Path $PresetSkillsPath "solidworks-cad\SKILL.md"
+$UserCopySkill = Join-Path $UserSkillPath "SKILL.md"
+$RepoSkill = Join-Path $RepoSkillDir "SKILL.md"
+$SkillHash = if (Test-Path -LiteralPath $RepoSkill) {
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $RepoSkill).Hash
+} else {
+    ""
+}
+Add-Check "Preset SKILL.md == repo" (
+    ($SkillHash -ne "") -and (Test-Path -LiteralPath $InstalledSkill) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath $InstalledSkill).Hash -eq $SkillHash)
+) $InstalledSkill
+Add-Check "User-root SKILL.md == repo" (
+    ($SkillHash -ne "") -and (Test-Path -LiteralPath $UserCopySkill) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath $UserCopySkill).Hash -eq $SkillHash)
+) $UserCopySkill
+Add-Check "Project SKILL.md == repo" (
+    ($SkillHash -ne "") -and (Test-Path -LiteralPath (Join-Path $ProjectSkillPath "SKILL.md")) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ProjectSkillPath "SKILL.md")).Hash -eq $SkillHash)
+) "the repo mirror (.dsh/skills) is byte-identical"
+
+# The skill-filesystem row silently drops an unknown key: `roots:` there means the preset's own
+# skills are not being scanned at all (the bug that hid the skill from every session).
+$PresetUsesCustomSkillDirs = (
+    $PresetSource.Contains("customSkillDirs:") -and
+    -not ($PresetSource -match "(?m)^\s{4}roots:\s*$")
+)
+Add-Check "Preset skill row uses customSkillDirs" $PresetUsesCustomSkillDirs "roots: is not a schema key and is dropped silently"
+
 $PolicyVersion = Read-PackageVersion $PolicyPackage
 $PolicyDetail = if ($PolicyVersion) { "version $PolicyVersion" } else { $Policy }
 Add-Check "Policy plugin" ((Test-Path -LiteralPath $Policy) -and $null -ne $PolicyVersion) $PolicyDetail
@@ -152,8 +215,8 @@ if (Test-Path -LiteralPath $Python) {
 
     Push-Location $AdapterDir
     try {
-        & $Python -c "import asyncio,server; assert len(asyncio.run(server.mcp.list_tools())) == 9" *> $null
-        Add-Check "MCP import / 9 tools" ($LASTEXITCODE -eq 0) $Server
+        & $Python -c "import asyncio,server; assert len(asyncio.run(server.mcp.list_tools())) == 10" *> $null
+        Add-Check "MCP import / 10 tools" ($LASTEXITCODE -eq 0) $Server
     } finally {
         Pop-Location
     }

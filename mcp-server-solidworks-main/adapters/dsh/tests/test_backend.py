@@ -6,6 +6,9 @@ The orchestrator's identity-only guards depend on two promises:
      activeDocument, activeDocumentPath, documentType, isDirty);
   2. ANY endpoint failure (missing route on an older service build, transport error,
      non-200, missing fields) degrades to the FULL verify_state — safety never weakens.
+
+The GET goes through execution_client.pooled_get (SPEED #1: one shared httpx client, not a
+new one per probe), which is the seam patched here.
 """
 
 import backend as backend_module
@@ -35,11 +38,11 @@ def test_identity_returns_the_identity_subset_in_the_verify_state_shape(monkeypa
     b = SolidWorksBackend()
     requested = []
 
-    def fake_get(url, timeout=None, trust_env=None):
+    def fake_get(url, timeout=None):
         requested.append(url)
         return _Response(200, dict(_IDENTITY_BODY))
 
-    monkeypatch.setattr(backend_module.httpx, "get", fake_get)
+    monkeypatch.setattr(backend_module, "pooled_get", fake_get)
 
     response = b.identity()
 
@@ -69,7 +72,7 @@ def test_identity_falls_back_to_full_verify_state_when_the_endpoint_is_missing(
     def missing(*_args, **_kwargs):
         raise RuntimeError("HTTP 404 Not Found")
 
-    monkeypatch.setattr(backend_module.httpx, "get", missing)
+    monkeypatch.setattr(backend_module, "pooled_get", missing)
     fallback = {
         "status": "COMPLETED",
         "stateVersion": 3,
@@ -93,16 +96,16 @@ def test_identity_falls_back_on_server_error_or_missing_fields(monkeypatch):
     # 503 (COM attach failed / no active document) falls through to verify_state, which
     # reports the same condition authoritatively.
     monkeypatch.setattr(
-        backend_module.httpx,
-        "get",
+        backend_module,
+        "pooled_get",
         lambda *_a, **_k: _Response(503, {"error": "NO_ACTIVE_DOCUMENT: ..."}),
     )
     assert b.identity() is fallback
 
     # a 200 without the identity contract is treated as a failure, not trusted
     monkeypatch.setattr(
-        backend_module.httpx,
-        "get",
+        backend_module,
+        "pooled_get",
         lambda *_a, **_k: _Response(200, {"activeDocument": "part.SLDPRT"}),
     )
     assert b.identity() is fallback

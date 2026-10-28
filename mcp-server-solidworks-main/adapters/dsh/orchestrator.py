@@ -35,6 +35,17 @@ from references import page_reference, read_reference
 from settings import BACKUP_ROOT
 
 
+# Who brought the job's document into SolidWorks. finish_job may only auto-close a document
+# the JOB itself produced, so the origin has to be recorded when it happens: it is the one
+# fact that cannot be recovered later (SolidWorks offers no "documents open before the job"
+# query, and the layer has no document-enumeration endpoint).
+ORIGIN_CREATED = "created"          # the job created it (fresh_document graph / new drawing)
+ORIGIN_OPENED = "opened"            # begin_job opened it while nothing else was active
+ORIGIN_PRE_EXISTING = "pre_existing"  # it was already SolidWorks' active document on entry
+ORIGIN_UNBOUND = "unbound"          # the job has no document of its own yet
+CLOSEABLE_ORIGINS = (ORIGIN_CREATED, ORIGIN_OPENED)
+
+
 class CadOrchestrator:
     def __init__(self):
         self._write_lock = threading.RLock()
@@ -74,6 +85,110 @@ class CadOrchestrator:
                 expected_type=expected_identity.get("type") or "",
             )
         return backend.call("close_document", params)
+
+    def _active_identity(self):
+        """Cheap identity of whatever is active right now; {} when nothing is / probe failed.
+
+        Uses the identity probe (no feature-tree walk). An empty dict means "this probe saw no
+        active document", never an error — the caller only uses it to decide whether a document
+        was already on screen before the job touched it.
+        """
+        try:
+            response = backend.identity()
+        except Exception:  # noqa: BLE001 - best-effort probe, never fatal
+            return {}
+        if response.get("status") != "COMPLETED":
+            return {}
+        return self._identity(cad_state(response))
+
+    def _document_origin(self, target_document, active_before, state=None):
+        """Classify the document begin_job ended up on, from what was active BEFORE it ran.
+
+        Only two answers are claimed as the job's own: nothing was active at all (so this
+        job's open_document brought the file in) and, later, a document the job created. When
+        any document was already active the target may still have been open in the background
+        — there is no way to enumerate open documents from here — so the job does not claim it.
+        """
+        if not target_document:
+            # Nothing was opened: whatever is active now was already on screen (or there is
+            # no document at all), so this is never a document the job produced.
+            settled = state or {}
+            return (
+                ORIGIN_PRE_EXISTING
+                if (settled.get("activeDocument") or settled.get("activeDocumentPath"))
+                else ORIGIN_UNBOUND
+            )
+        seen = active_before.get("title") or active_before.get("path")
+        if not seen:
+            return ORIGIN_OPENED
+        target = normalize_path(str(Path(target_document).resolve()))
+        if normalize_path(active_before.get("path") or "") == target:
+            return ORIGIN_PRE_EXISTING  # already open (and active) under that very path
+        return ORIGIN_PRE_EXISTING      # cannot prove it was not open in the background
+
+    def _autoclose_job_document(self, job, state, keep_open):
+        """finish_job's memory hygiene: close the job's own saved, clean document.
+
+        Closes only when ALL of: the job produced the document (created/opened), it is saved
+        to a path, it is not dirty, and the caller did not pass keep_open. Anything else — and
+        any close failure — leaves the document open and says why; the job's verdict is never
+        changed by this, because the CAD work is already verified complete.
+        """
+        identity = self._identity(state)
+        if keep_open:
+            return {"document_left_open": {"reason": "keep_open",
+                                           "document": identity}}
+        origin = job.get("document_origin")
+        if origin not in CLOSEABLE_ORIGINS:
+            return {"document_left_open": {"reason": origin or ORIGIN_PRE_EXISTING,
+                                           "document": identity}}
+        if not identity.get("path"):
+            return {"document_left_open": {"reason": "unsaved",
+                                           "document": identity}}
+        if state.get("isDirty"):
+            return {"document_left_open": {"reason": "dirty",
+                                           "document": identity}}
+
+        try:
+            response = self._close_document(identity, save=False)
+        except Exception as exc:  # noqa: BLE001 - verified work must not be failed by a close
+            return {"document_left_open": {"reason": "close_failed",
+                                           "document": identity},
+                    "close_error": {"code": "CLOSE_FAILED", "message": str(exc)}}
+        if response.get("status") != "COMPLETED":
+            return {"document_left_open": {"reason": "close_failed",
+                                           "document": identity},
+                    "close_error": self._response_error(response)}
+
+        # Confirm from the layer itself that the document is really gone: either nothing is
+        # active now, or whatever is active is a DIFFERENT document than the one we closed.
+        try:
+            after = backend.identity()
+        except Exception:  # noqa: BLE001 - the close reported success; keep the verdict
+            after = {}
+        after_state = (
+            cad_state(after) if after.get("status") == "COMPLETED" else {}
+        )
+        still_open = (
+            after.get("status") == "COMPLETED"
+            and bool(self._target(after_state))
+            and same_document(identity, after_state)
+        )
+        if still_open:
+            return {"document_left_open": {"reason": "close_not_confirmed",
+                                           "document": identity},
+                    "close_error": {
+                        "code": "CLOSE_NOT_CONFIRMED",
+                        "message": (
+                            "close_document reported success but the document is "
+                            "still the active SolidWorks document."
+                        ),
+                    }}
+        job["closed_document"] = identity
+        job["target_closed"] = True
+        job["expected_document"] = {}
+        job["last_state"] = {}
+        return {"closed_document": identity, "document_left_open": None}
 
     def _close_created_document(
         self,
@@ -130,9 +245,15 @@ class CadOrchestrator:
         if recovered:
             job["expected_document"] = previous_identity or {}
             job["last_state"] = state if previous_identity else {}
+            # The document the job made is gone and the pre-existing one is back on screen:
+            # the job no longer owns whatever is active, so it must not auto-close it later.
+            job["document_origin"] = (
+                ORIGIN_PRE_EXISTING if previous_identity else ORIGIN_UNBOUND
+            )
         else:
             job["expected_document"] = created_identity or {}
             job["last_state"] = state
+            job["document_origin"] = ORIGIN_CREATED
         return recovery_status, state, event
 
     @staticmethod
@@ -612,6 +733,11 @@ class CadOrchestrator:
                 )
 
             completed = ["ensure_ready"]
+            # Recorded BEFORE the open: the pre-open active identity is the only evidence
+            # available later about whether this file was already on screen (see origin gate).
+            active_before = (
+                self._active_identity() if target_document else {}
+            )
             if target_document:
                 opened = backend.call(
                     "open_document",
@@ -630,7 +756,13 @@ class CadOrchestrator:
                     )
                 completed.append("open_document")
 
-            verified = backend.verify_state()
+            # SPEED (#2): begin_job consumes nothing but identity — the fields it binds the job
+            # to (activeDocument/activeDocumentPath/documentType) and the state_version it hands
+            # back. GET /api/tool/identity reports exactly those, read the same way as
+            # verify_state does, without the FeatureManager.GetFeatures(true) tree walk
+            # (measured 381.7 ms of a 663.4 ms begin_job). backend.identity() degrades to the
+            # full verify_state if the endpoint is unusable, so the check cannot get weaker.
+            verified = backend.identity()
             state = (
                 cad_state(verified)
                 if verified.get("status") == "COMPLETED"
@@ -649,6 +781,9 @@ class CadOrchestrator:
                 job_id, intent, self._identity(state)
             )
             job["last_state"] = state
+            job["document_origin"] = self._document_origin(
+                target_document, active_before, state
+            )
             job_store.save(job)
             # The result must stay SMALL: the host elides a long tool result down to its
             # head + a marker + its tail, which used to bury `job_token` in the removed
@@ -971,6 +1106,12 @@ class CadOrchestrator:
         return normalized, state, risk, summary
 
     def _reassess_risk(self, kind, payload, job):
+        """Re-derive (payload, risk, summary, verified_state) for a pending action.
+
+        The 4th value is the identity state this call just read for `save_or_export`, handed to
+        the executor so the approved write is not preceded by a SECOND identical probe (SPEED
+        #3). Empty for the other kinds, which read the document themselves.
+        """
         if kind == "feature_graph":
             graph = payload.get("graph")
             if not isinstance(graph, dict):
@@ -983,23 +1124,23 @@ class CadOrchestrator:
             summary = self._feature_graph_summary(
                 job, graph, normalized["fresh_document"]
             )
-            return normalized, risk, summary
+            return normalized, risk, summary, {}
         if kind == "document_edits":
             edits = validate_edits(payload.get("operations"))
             risk = edits_risk(edits)
             summary = self._edits_summary(job, edits)
-            return {"operations": edits}, risk, summary
+            return {"operations": edits}, risk, summary, {}
         if kind == "drawing_workflow":
             normalized = validate_drawing_workflow(payload)
             count = self._drawing_step_count(normalized)
             risk = "batch" if count > 7 else "write"
             summary = self._drawing_summary(job, count)
-            return normalized, risk, summary
+            return normalized, risk, summary, {}
         if kind == "save_or_export":
-            normalized, _, risk, summary = self._assess_save_or_export(
+            normalized, state, risk, summary = self._assess_save_or_export(
                 job, payload
             )
-            return normalized, risk, summary
+            return normalized, risk, summary, state
         raise ValueError(f"Unsupported pending action kind: {kind}")
 
     def request_confirmation(self, job_id, job_token, action_id):
@@ -1094,8 +1235,8 @@ class CadOrchestrator:
                 )
 
             kind = action["kind"]
-            payload, current_risk, current_summary = self._reassess_risk(
-                kind, action["payload"], job
+            payload, current_risk, current_summary, assessed_state = (
+                self._reassess_risk(kind, action["payload"], job)
             )
             if (
                 current_risk != action["risk"]
@@ -1130,7 +1271,11 @@ class CadOrchestrator:
             if kind == "drawing_workflow":
                 return self._execute_drawing_workflow(job, payload, current_risk)
             if kind == "save_or_export":
-                return self._execute_save_or_export(job, payload, current_risk)
+                # The reassessment above just read the document identity; hand it over so the
+                # approved write is guarded once, not twice (SPEED #3).
+                return self._execute_save_or_export(
+                    job, payload, current_risk, verified_state=assessed_state
+                )
             raise ValueError(f"Unsupported pending action kind: {kind}")
 
     def feature_graph(self, job_id, job_token, graph_json, fresh_document=True):
@@ -1188,7 +1333,11 @@ class CadOrchestrator:
                     **self._job_metadata(job),
                 )
             before = cad_state(opened)
-            verified = backend.verify_state()
+            # SPEED (#2): what follows compares the document the layer just created against
+            # what is actually active — `same_document`, i.e. title/path/type only. The identity
+            # probe answers that; the feature walk answered nothing extra (measured 442.7 ms of
+            # a 3026.5 ms single-node graph submit).
+            verified = backend.identity()
             current = (
                 cad_state(verified)
                 if verified.get("status") == "COMPLETED"
@@ -1255,6 +1404,7 @@ class CadOrchestrator:
                 )
             before = current
             job["expected_document"] = self._identity(current)
+            job["document_origin"] = ORIGIN_CREATED
             job["last_state"] = current
             job_store.save(job)
         else:
@@ -1447,6 +1597,12 @@ class CadOrchestrator:
             }
         )
         self._record_success(job, "feature_graph", "built_unverified")
+        # A non-fatal compiler finding (today: MATERIAL_NOT_FOUND) — the geometry is committed and
+        # the document just lacks the requested property. Emitted only when there IS one, and
+        # never as `error`: a warning that reads as a failure invites a rollback of good work.
+        extras = {}
+        if compiler.get("warnings"):
+            extras["warnings"] = compiler["warnings"]
         return envelope(
             status="completed",
             risk=risk,
@@ -1456,6 +1612,7 @@ class CadOrchestrator:
             completed_steps=completed,
             partial_state={"cad": state, "compiler": compiler},
             verification=verification,
+            **extras,
             **self._job_metadata(job),
         )
 
@@ -1508,6 +1665,7 @@ class CadOrchestrator:
 
         response = None
         failed_operation = None
+        last_step_identity = None
         for edit in payload["operations"]:
             response = backend.call(edit["tool"], edit["params"])
             if response.get("status") != "COMPLETED":
@@ -1539,6 +1697,8 @@ class CadOrchestrator:
             job_store.save(job)
             step_states.append(verified_state)
             completed.append(edit["tool"])
+            # The post-verify below would otherwise re-read exactly what this step just read.
+            last_step_identity = verify_response
 
         if failed_operation is not None:
             recovery_status, state, recovery = self._recover_transaction(
@@ -1574,7 +1734,9 @@ class CadOrchestrator:
             )
 
         try:
-            state, verification = self._post_verify(job)
+            state, verification = self._post_verify(
+                job, verified=last_step_identity
+            )
         except Exception as exc:  # noqa: BLE001
             return self._post_verify_failure_response(
                 job,
@@ -1757,6 +1919,7 @@ class CadOrchestrator:
                 ),
             }
             job["expected_document"] = created_identity
+            job["document_origin"] = ORIGIN_CREATED
             job["last_state"] = state
             self._record_failure(
                 job,
@@ -1844,6 +2007,7 @@ class CadOrchestrator:
         completed.append("create_drawing")
         step_states.append(state)
         job["expected_document"] = self._identity(state)
+        job["document_origin"] = ORIGIN_CREATED
         job["last_state"] = state
         job_store.save(job)
         # The identity of the drawing this workflow created: a failure later on discards it,
@@ -1901,6 +2065,10 @@ class CadOrchestrator:
                 "error": {"code": code, "message": message},
             }
 
+        # The identity the LAST successful step read, handed to _post_verify so the drawing
+        # workflow does not read the same document twice in a row (SPEED #3).
+        step_identity = []
+
         def run(tool, params):
             # Per-step guards compare ONLY the document identity, so each one is the cheap
             # GET /api/tool/identity probe instead of a full verify_state feature-tree walk.
@@ -1945,6 +2113,7 @@ class CadOrchestrator:
             job["last_state"] = state_after
             job_store.save(job)
             step_states.append(state_after)
+            step_identity[:] = [identity_after]
             return tool_response
 
         for view in payload.get("views") or []:
@@ -2166,7 +2335,9 @@ class CadOrchestrator:
             )
 
         try:
-            state, verification = self._post_verify(job)
+            state, verification = self._post_verify(
+                job, verified=(step_identity[-1] if step_identity else None)
+            )
         except Exception as exc:  # noqa: BLE001
             return self._post_verify_failure_response(
                 job,
@@ -2280,25 +2451,33 @@ class CadOrchestrator:
             # allowed on an unbound job; every other operation needs a bound document.
             if not (operation == "close" and close_all):
                 self._require_bound_job(job, f"save_or_export({operation})")
-            payload, _, risk, summary = self._assess_save_or_export(
-                job, payload
+            payload, assessed_state, risk, summary = (
+                self._assess_save_or_export(job, payload)
             )
 
             if risk in ("destructive", "overwrite", "save_as", "batch"):
                 return self._queue_confirmation(
                     job, "save_or_export", payload, risk, summary
                 )
-            return self._execute_save_or_export(job, payload, risk)
+            # No write happened between the assessment and the execution, and both run under
+            # this same lock: pass the identity state through instead of probing twice (#3).
+            return self._execute_save_or_export(
+                job, payload, risk, verified_state=assessed_state
+            )
 
-    def _execute_save_or_export(self, job, payload, risk):
-        # Like the assessment, execution consumes only identity fields off `state` (the
-        # backup source path, the document type, the close-guard identity); the POST-write
-        # verification below still runs the full verify_state.
-        state, _ = self._verify_job_document(
-            job,
-            allow_no_document=payload.get("close_all", False),
-            identity_only=True,
-        )
+    def _execute_save_or_export(self, job, payload, risk, verified_state=None):
+        # Like the assessment, execution consumes only identity fields off `state` (the backup
+        # source path, the document type, the close-guard identity). `verified_state` is the
+        # identity the caller just read under the same lock with the same ACTIVE_DOCUMENT_CHANGED
+        # guard, so an approved write is verified once; without it the guard runs here.
+        if verified_state:
+            state = verified_state
+        else:
+            state, _ = self._verify_job_document(
+                job,
+                allow_no_document=payload.get("close_all", False),
+                identity_only=True,
+            )
         operation = payload["operation"]
         backup_path = None
         if operation == "save" or (
@@ -2560,8 +2739,19 @@ class CadOrchestrator:
         # never be papered over by a matching counter.
         return same_document(stamp.get("identity") or {}, state)
 
-    def _post_verify(self, job, update_identity=False, reuse_deep_checks=False):
-        response = backend.verify_state()
+    def _post_verify(
+        self, job, update_identity=False, reuse_deep_checks=False, verified=None
+    ):
+        # SPEED (#6): this read is used for exactly three things — the identity gate
+        # (same_document against the job's expected document), the document type that selects
+        # which deep checks to run, and the state_version the reuse stamp is keyed on. The
+        # identity probe answers all three; the geometry verdicts come from the analyze calls
+        # below, never from this response. verify_state's FeatureManager.GetFeatures(true) walk
+        # (95-145 ms here, ~2.5 s on a production part) was a duplicated read.
+        # `verified` is an identity response the caller read moments ago under the same lock
+        # with no CAD write in between (SPEED #3): reusing it removes the duplicate read while
+        # running the identical predicate on the same data.
+        response = verified if verified is not None else backend.identity()
         if response.get("status") != "COMPLETED":
             return {}, {
                 "state": response,
@@ -2651,7 +2841,7 @@ class CadOrchestrator:
         job_store.save(job)
         return state, result
 
-    def finish_job(self, job_id, job_token):
+    def finish_job(self, job_id, job_token, keep_open=False):
         with self._write_lock:
             job = self._load_job(
                 job_id, job_token, allow_closed_target=True
@@ -2666,25 +2856,22 @@ class CadOrchestrator:
                     "target_closed": True,
                     "closed_document": job.get("closed_document") or {},
                 }
+                # Its document was already closed by an explicit close step: nothing left to
+                # close, and the job's own record says which document that was.
+                close_report = {
+                    "closed_document": job.get("closed_document") or {},
+                    "document_left_open": None,
+                }
             else:
-                # SPEED task C: finish_job used to re-run verify_state + the two deep analyze
-                # calls even when the preceding write had JUST verified the same document at
-                # the same state_version. Ask the CHEAP counter first (~2 ms, GET
-                # /api/tool/state — no COM, no feature walk): if it still equals the stamp's
-                # state_version, nothing has been written since that pass, so the deep checks
-                # can be reused. Any difference (a write, a rebuild, a manual edit) falls back
-                # to the full verification below.
-                reuse = False
-                if job.get("verification_stamp"):
-                    try:
-                        reuse = (
-                            backend.current_state_version()
-                            == job["verification_stamp"].get("state_version")
-                        )
-                    except ExecutionLayerError:
-                        reuse = False  # cannot prove freshness -> verify for real
+                close_report = None
+                # SPEED task C / (#6): finish_job used to pay for the cheap counter GET and then
+                # _post_verify read the state again. _post_verify's own read now carries the
+                # authoritative state_version AND the identity, and _stamp_matches() compares
+                # both — strictly stronger than the counter alone (a document switch does not
+                # bump the counter). So the separate probe is a duplicated read: ask for reuse
+                # whenever a stamp exists and let that comparison decide.
                 state, verification = self._post_verify(
-                    job, reuse_deep_checks=reuse
+                    job, reuse_deep_checks=bool(job.get("verification_stamp"))
                 )
             if not verification.get("all_completed"):
                 error = {
@@ -2726,6 +2913,20 @@ class CadOrchestrator:
             job["recovery_status"] = "not_needed"
             job["trust_level"] = "verified"
             job["error"] = None
+            if close_report is None:
+                # Memory hygiene, AFTER the verdict exists: SolidWorks holds every open
+                # document in this one process, so a finished job's own saved document gets
+                # closed. Nothing here can change the completed status — a refused or failed
+                # close is reported, not raised (STANDING RULE from the user).
+                close_report = self._autoclose_job_document(
+                    job, state, bool(keep_open)
+                )
+            close_fields = {
+                "closed_document": close_report.get("closed_document"),
+                "document_left_open": close_report.get("document_left_open"),
+            }
+            if close_report.get("close_error"):
+                close_fields["close_error"] = close_report["close_error"]
             job_store.save(job)
             return envelope(
                 status="completed",
@@ -2734,6 +2935,7 @@ class CadOrchestrator:
                 completed_steps=job.get("completed_steps") or [],
                 partial_state=state,
                 verification=verification,
+                **close_fields,
                 **self._job_metadata(job),
             )
 

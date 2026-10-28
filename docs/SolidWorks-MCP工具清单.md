@@ -2,13 +2,13 @@
 
 本文说明 `dsh-solidwork` 的两层工具边界：
 
-1. 模型可见的 9 个高层工具。
+1. 模型可见的 10 个高层工具。
 2. 仅由编排器使用的低层 SolidPilot 与 C# 执行命令。
 
 模型能力的事实源是：
 `mcp-server-solidworks-main/adapters/dsh/server.py`。
 
-## 1. 模型可见的 9 个工具
+## 1. 模型可见的 10 个工具
 
 调用前缀为 `mcp__solidworks__`。
 
@@ -23,9 +23,17 @@
 | `request_confirmation` | 只读确认 | 验证待办动作并轮换一次性确认 token。 |
 | `confirm_action` | 对应原动作 | 用户明确批准精确摘要后执行一个待办动作。 |
 | `finish_job` | 验证 | 运行最终客观验证并结束任务。 |
+| `read_drawing_region` | 只读 | 放大工程图局部，读取小尺寸文字；不需要任务，不接触 CAD。 |
 
-专用 profile 的策略插件只允许这 9 个 SolidWorks 工具，外加下方 4 个支撑工具。
+专用 profile 的策略插件只允许这 10 个 SolidWorks 工具，外加下方 4 个支撑工具。
 任何其他 `mcp__solidworks__*` 工具都不属于模型可调用接口。
+
+`read_drawing_region(image_path, region="", zoom=2)`：`image_path` 只接受本地图片文件路径
+（`http://`、`https://`、`ftp://`、`file://` 一律拒绝）；`region` 为空返回带字母数字网格的
+全图（列 A–H 从左到右，行 1–6 从上到下），也可传网格标签如 `B2`，或源图像素框 `x0,y0,x1,y1`；
+`zoom` 为 1–4 的整数。输出 PNG 写入 `artifacts\intake\<图片哈希>\`，并同时返回图片与一行 JSON
+（输出路径、像素、字节、源像素框、网格定义）。超出图片范围的框会被拒绝而不是裁剪，因为被裁掉的
+部分正是模型看不到的证据。
 
 支撑工具没有 `mcp__solidworks__` 前缀，由同一个策略插件放行：
 
@@ -247,7 +255,7 @@ action_summary
 | 输出 | `save_document`、`export_document`、`batch_export`、`close_document` |
 | 事务 | `begin_undo_scope`、`commit_undo_scope`、`rollback_undo_scope` |
 
-这些名字不是 DSH 模型接口。模型需要的能力必须通过 9 个高层工具表达。
+这些名字不是 DSH 模型接口。模型需要的能力必须通过 10 个高层工具表达。
 
 ## 12. 事实来源
 

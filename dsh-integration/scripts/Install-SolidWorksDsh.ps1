@@ -2,8 +2,15 @@
 param(
     [string]$DshHome = "$HOME\.dsh",
     [string]$DshRoot = "D:\deepseek-harness",
-    [string]$Python = ""
+    [string]$Python = "",
+    # A preset directory holding files this integration does not know about is the user's work.
+    # Install backs it all up first, then REFUSES; pass this only when replacing it is intended.
+    [switch]$MigrateCustomPreset,
+    # Same for a skill link that points somewhere else than the two targets this installer owns.
+    [switch]$TakeOverSkillLinks
 )
+
+. (Join-Path $PSScriptRoot "SolidWorksDshLinks.ps1")
 
 $ErrorActionPreference = "Stop"
 $IntegrationRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -28,6 +35,15 @@ $WebPatch = Join-Path $ProfilesRoot "web\cordis.patch.yml"
 $SolidworksProfile = Join-Path $ProfilesRoot "solidworks"
 $SolidworksPreset = Join-Path $PresetRoot "solidworks-cad"
 $SolidworksPolicy = Join-Path $PluginsRoot "solidworks-policy"
+# Single source of truth: the skill content lives in the repo and is LINKED, never copied, so a
+# session can never read a stale SKILL.md (measured 2026-10-28: the installed copy was two months
+# behind the repo, 20385 B against 26552 B).
+$RepoPresetSource = Join-Path $IntegrationRoot "presets\solidworks-cad"
+$RepoPresetSkills = Join-Path $RepoPresetSource "skills"
+$RepoSkillDir = Join-Path $RepoPresetSkills "solidworks-cad"
+$PresetSkillsLink = Join-Path $SolidworksPreset "skills"
+$UserSkillRoot = Join-Path $DshHome "skills"
+$UserSkillLink = Join-Path $UserSkillRoot "solidworks-cad"
 
 function Assert-UnderDshHome([string]$Candidate) {
     $Root = $DshHome.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
@@ -38,10 +54,63 @@ function Assert-UnderDshHome([string]$Candidate) {
     return $Resolved
 }
 
+# The only trees this installer may delete recursively, and the root no component of that path may
+# leave. A junction placed on $DshHome\profiles or on a managed target itself would otherwise turn
+# "Remove-Item -Recurse" into a delete that walks into somebody else's directory.
+$ManagedRoots = @($SolidworksProfile, $SolidworksPreset, $SolidworksPolicy, $PresetSkillsLink,
+                  $UserSkillLink)
+
+function Get-PreviouslyOwnedLinkTargets {
+    # Targets this installer recorded last time, so a link it created is recognised as ours even
+    # when the repository moved between installs.
+    if (-not (Test-Path -LiteralPath $InstallManifest)) {
+        return @()
+    }
+    try {
+        $Previous = Get-Content -Raw -LiteralPath $InstallManifest | ConvertFrom-Json
+    } catch {
+        return @()
+    }
+    $Found = @()
+    if ($Previous.links) {
+        foreach ($Property in $Previous.links.PSObject.Properties) {
+            if ($Property.Value.target) { $Found += [string]$Property.Value.target }
+        }
+    }
+    return $Found
+}
+
 $WebPatch = Assert-UnderDshHome $WebPatch
 $SolidworksProfile = Assert-UnderDshHome $SolidworksProfile
 $SolidworksPreset = Assert-UnderDshHome $SolidworksPreset
 $SolidworksPolicy = Assert-UnderDshHome $SolidworksPolicy
+
+# Every managed path is derived from $DshHome, so if IT is a junction the whole tree of "safe"
+# deletes below is pointed at somebody else's directory. Refuse before reading or writing anything.
+Assert-DshHomeNotReparse $DshHome | Out-Null
+
+# Links this installer is allowed to replace: its two canonical targets, plus anything a previous
+# install of this script recorded as its own.
+$OwnedLinkTargets = @($RepoPresetSkills, $RepoSkillDir) + (Get-PreviouslyOwnedLinkTargets)
+
+# Ownership BEFORE teardown: the preset's own `skills` child lives inside the directory this script
+# is about to delete, and Remove-DshManagedTree would unlink it on the way through — so a foreign
+# junction there would silently become a repository link and the -TakeOverSkillLinks consent gate
+# would never be asked. Check it (and the user-root link) while both are still untouched.
+$Preflight = @(
+    @{ Path = $PresetSkillsLink; Target = $RepoPresetSkills; Label = "preset skills" },
+    @{ Path = $UserSkillLink;    Target = $RepoSkillDir;     Label = "user skill" }
+)
+foreach ($Entry in $Preflight) {
+    $Ownership = Get-DshLinkOwnership -LinkPath $Entry.Path -TargetPath $Entry.Target `
+        -OwnedTargets $OwnedLinkTargets
+    if ($Ownership -eq "foreign") {
+        $ForeignTarget = Get-DshLinkTarget $Entry.Path
+        throw ("'$($Entry.Path)' ($($Entry.Label)) is a link to '$ForeignTarget', which this " +
+               "installer does not own. Nothing has been changed. Re-run with -TakeOverSkillLinks " +
+               "to replace that routing, or point the link at its own home.")
+    }
+}
 
 function Find-Pnpm {
     $Candidates = @(
@@ -76,16 +145,45 @@ function Convert-ToYamlPath([string]$Path) {
     return ($Path -replace '\\', '/')
 }
 
-function Render-ProfileTemplate([string]$TemplatePath, [string]$DestinationPath) {
+function Render-ProfileText([string]$TemplatePath) {
     $Source = Get-Content -Raw -LiteralPath $TemplatePath
     $Rendered = $Source.Replace('__PYTHON__', (Convert-ToYamlPath $Python))
     $Rendered = $Rendered.Replace('__DSH_SERVER__', (Convert-ToYamlPath $Server))
-    $Rendered = $Rendered.Replace('__DSH_ADAPTER_DIR__', (Convert-ToYamlPath $AdapterDir))
+    return $Rendered.Replace('__DSH_ADAPTER_DIR__', (Convert-ToYamlPath $AdapterDir))
+}
+
+function Render-ProfileTemplate([string]$TemplatePath, [string]$DestinationPath) {
     [System.IO.File]::WriteAllText(
         $DestinationPath,
-        $Rendered,
+        (Render-ProfileText $TemplatePath),
         [System.Text.UTF8Encoding]::new($false)
     )
+}
+
+function Install-SolidWorksWebPatch([string]$TemplatePath, [string]$DestinationPath) {
+    # The web profile patch belongs to the USER as much as to this integration: it also carries
+    # every other MCP server they mounted (10.8 KB today against this 625 B template). Overwriting
+    # it wholesale used to delete them. So: insert the SolidWorks row when it is missing, leave the
+    # file alone when it is present, and never rewrite anything else.
+    $Block = Render-ProfileText $TemplatePath
+    if (-not (Test-Path -LiteralPath $DestinationPath)) {
+        [System.IO.File]::WriteAllText(
+            $DestinationPath, $Block, [System.Text.UTF8Encoding]::new($false))
+        return "written"
+    }
+    $Existing = Get-Content -Raw -LiteralPath $DestinationPath
+    if ($Existing.Contains("id: mcp-solidworks-orchestrator")) {
+        return "present"
+    }
+    $FirstRow = ($Existing -split "`r?`n" | Where-Object { $_ -notmatch '^\s*(#|$)' } | Select-Object -First 1)
+    if ($FirstRow -notmatch '^- ') {
+        throw "web patch $DestinationPath is not a top-level YAML sequence; refusing to append the " +
+              "SolidWorks MCP row. Merge the rendered template in by hand (backup taken)."
+    }
+    [System.IO.File]::AppendAllText(
+        $DestinationPath, "`r`n" + $Block.TrimStart([char[]]@("`r", "`n")),
+        [System.Text.UTF8Encoding]::new($false))
+    return "appended"
 }
 
 $Manifest = [ordered]@{
@@ -96,6 +194,13 @@ $Manifest = [ordered]@{
     solidworksProfileExisted = Test-Path -LiteralPath $SolidworksProfile
     solidworksPresetExisted = Test-Path -LiteralPath $SolidworksPreset
     solidworksPolicyExisted = Test-Path -LiteralPath $SolidworksPolicy
+    # The TARGET each managed link pointed at before this run — a Boolean was not enough, because a
+    # restore has to put back the link the user had, not the one the repository wants.
+    presetSkillsLink = Get-DshLinkTarget $PresetSkillsLink
+    userSkillLink = Get-DshLinkTarget $UserSkillLink
+    # 'linked' when the existing preset already kept its skills in a junction, 'copy' when it held a
+    # real skills tree. Restore reproduces whichever it was.
+    presetLayout = $(if (Get-DshLinkTarget $PresetSkillsLink) { "linked" } else { "copy" })
     installManifestExisted = Test-Path -LiteralPath $InstallManifest
 }
 
@@ -103,34 +208,87 @@ if ($Manifest.webPatchExisted) {
     Copy-Item -LiteralPath $WebPatch -Destination (Join-Path $BackupRoot "web.cordis.patch.yml")
 }
 if ($Manifest.solidworksProfileExisted) {
-    Copy-Item -LiteralPath $SolidworksProfile -Destination (Join-Path $BackupRoot "solidworks-profile") -Recurse
+    # No copy follows a link: the profile directory holds node_modules, and a junction inside it
+    # would otherwise pull an unrelated tree into the backup (or be written through).
+    $ProfileLinks = Copy-DshTreeNoReparse -Source $SolidworksProfile `
+        -Destination (Join-Path $BackupRoot "solidworks-profile")
+    $Manifest.profileBackupLinks = @($ProfileLinks)
 }
 if ($Manifest.solidworksPresetExisted) {
-    Copy-Item -LiteralPath $SolidworksPreset -Destination (Join-Path $BackupRoot "solidworks-cad-preset") -Recurse
+    # EVERYTHING real in the preset directory is backed up first — composition files, any user-added
+    # file, and a real skills tree. Only the skills JUNCTION is skipped, because its content is the
+    # repository and its target is recorded in the manifest above. Any OTHER nested reparse point is
+    # skipped too, which makes the backup incomplete, so it is reported as unexpected content.
+    $PresetBackup = Copy-DshPresetBackup -PresetDir $SolidworksPreset `
+        -BackupDir (Join-Path $BackupRoot "solidworks-cad-preset") `
+        -SkillsLinkPath $PresetSkillsLink
+    $Manifest.presetBackupCopied = @($PresetBackup.Copied)
+    $Manifest.presetBackupSkippedLinks = @($PresetBackup.Links)
+    $SkillsIsRealDirectory = (Test-Path -LiteralPath $PresetSkillsLink) -and
+        -not (Get-DshLinkTarget $PresetSkillsLink)
+    $Unexpected = @($PresetBackup.Extra)
+    if ($SkillsIsRealDirectory) { $Unexpected += "skills (a real directory, not the managed link)" }
+    if (@($PresetBackup.Links).Count -gt 0) {
+        $Unexpected += "nested reparse point(s): $(@($PresetBackup.Links) -join ', ')"
+    }
+    if ($Unexpected.Count -gt 0 -and -not $MigrateCustomPreset) {
+        throw ("The existing preset '$SolidworksPreset' holds content this integration does not " +
+               "own: $($Unexpected -join ', '). It is backed up under '$BackupRoot', and nothing " +
+               "was removed. Re-run with -MigrateCustomPreset to replace it anyway.")
+    }
 }
 if ($Manifest.solidworksPolicyExisted) {
-    Copy-Item -LiteralPath $SolidworksPolicy -Destination (Join-Path $BackupRoot "solidworks-policy") -Recurse
+    $PolicyLinks = Copy-DshTreeNoReparse -Source $SolidworksPolicy `
+        -Destination (Join-Path $BackupRoot "solidworks-policy")
+    $Manifest.policyBackupLinks = @($PolicyLinks)
 }
 if ($Manifest.installManifestExisted) {
     Copy-Item -LiteralPath $InstallManifest -Destination (Join-Path $BackupRoot "solidworks-dsh-install.json")
 }
 $Manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $BackupRoot "manifest.json") -Encoding utf8
 
+# Teardown through the guarded helper: the path must be one of the managed roots, no component of it
+# may be a reparse point, a reparse point AT the path is unlinked instead of deleted, and a nested
+# one is refused — except the links named here, which are this installer's own and are unlinked
+# (their targets untouched) before the tree goes. Foreign targets were refused in the pre-flight
+# above, so reaching New-DshOwnedLink only after teardown can no longer erase a user's junction.
 foreach ($Target in @($SolidworksProfile, $SolidworksPreset, $SolidworksPolicy)) {
-    $ResolvedTarget = Assert-UnderDshHome $Target
-    if (Test-Path -LiteralPath $ResolvedTarget) {
-        Remove-Item -LiteralPath $ResolvedTarget -Recurse -Force
-    }
+    Assert-UnderDshHome $Target | Out-Null
+    Remove-DshManagedTree -Path $Target -AllowedRoots $ManagedRoots -GuardRoot $DshHome `
+        -Purpose "reinstall" -ManagedLinks @($PresetSkillsLink, $UserSkillLink) | Out-Null
 }
 New-Item -ItemType Directory -Force -Path `
     (Split-Path $WebPatch), `
     $SolidworksProfile, `
     $SolidworksPreset, `
     $SolidworksPolicy | Out-Null
-Render-ProfileTemplate (Join-Path $IntegrationRoot "profiles\web\cordis.patch.yml") $WebPatch
-Copy-Item -Path (Join-Path $IntegrationRoot "profiles\solidworks\*") -Destination $SolidworksProfile -Recurse -Force
-Copy-Item -Path (Join-Path $IntegrationRoot "presets\solidworks-cad\*") -Destination $SolidworksPreset -Recurse -Force
-Copy-Item -Path (Join-Path $IntegrationRoot "plugins\solidworks-policy\*") -Destination $SolidworksPolicy -Recurse -Force
+$WebPatchState = Install-SolidWorksWebPatch (Join-Path $IntegrationRoot "profiles\web\cordis.patch.yml") $WebPatch
+# Neither install copy follows a link either: the source is the repository, and a junction placed in
+# it (by an editor, a sync tool, a previous experiment) must not be resolved into the DSH tree.
+Copy-DshTreeNoReparse -Source (Join-Path $IntegrationRoot "profiles\solidworks") `
+    -Destination $SolidworksProfile | Out-Null
+# The preset is a real directory (DSH lists a root's children with readdir(withFileTypes) and skips
+# anything whose dirent is not a directory, so the PRESET itself cannot be a link) holding only the
+# composition files; the skill content is linked, so no SKILL.md copy can go stale.
+Copy-Item -Path (Join-Path $RepoPresetSource "agent.cordis.yml") -Destination $SolidworksPreset -Force
+Copy-Item -Path (Join-Path $RepoPresetSource "preset.yml") -Destination $SolidworksPreset -Force
+$PresetLinkResult = New-DshOwnedLink -LinkPath $PresetSkillsLink -TargetPath $RepoPresetSkills `
+    -OwnedTargets $OwnedLinkTargets -BackupRoot $BackupRoot -BackupName "preset-skills" `
+    -TakeOver:$TakeOverSkillLinks
+if ($PresetLinkResult.State -eq "foreign") {
+    throw ("'$PresetSkillsLink' is a link to '$($PresetLinkResult.OldTarget)', which this installer " +
+           "does not own. Refusing to replace it; pass -TakeOverSkillLinks if that routing is " +
+           "meant to become the repository's.")
+}
+$UserSkillResult = New-DshOwnedLink -LinkPath $UserSkillLink -TargetPath $RepoSkillDir `
+    -OwnedTargets $OwnedLinkTargets -BackupRoot $BackupRoot -BackupName "user-skill" `
+    -TakeOver:$TakeOverSkillLinks
+if ($UserSkillResult.State -eq "foreign") {
+    throw ("'$UserSkillLink' is a link to '$($UserSkillResult.OldTarget)', which this installer does " +
+           "not own. Refusing to replace it; pass -TakeOverSkillLinks to take it over.")
+}
+Copy-DshTreeNoReparse -Source (Join-Path $IntegrationRoot "plugins\solidworks-policy") `
+    -Destination $SolidworksPolicy | Out-Null
 Render-ProfileTemplate (Join-Path $IntegrationRoot "profiles\solidworks\cordis.patch.yml") (Join-Path $SolidworksProfile "cordis.patch.yml")
 
 & $Pnpm install --prod --dir $SolidworksProfile
@@ -159,11 +317,30 @@ $Installed = [ordered]@{
         preset = $SolidworksPreset
         policy = $SolidworksPolicy
     }
+    links = [ordered]@{
+        presetSkills = [ordered]@{
+            path = $PresetSkillsLink
+            target = (Get-DshLinkTarget $PresetSkillsLink)
+            state = $PresetLinkResult.State
+            previousTarget = $PresetLinkResult.OldTarget
+        }
+        userSkill = [ordered]@{
+            path = $UserSkillLink
+            target = (Get-DshLinkTarget $UserSkillLink)
+            state = $UserSkillResult.State
+            previousTarget = $UserSkillResult.OldTarget
+        }
+    }
+    webPatchState = $WebPatchState
 }
 $Installed | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $InstallManifest -Encoding utf8
 
 Write-Host "Installed SolidWorks DSH profile and preset."
 Write-Host "Backup: $BackupRoot"
 Write-Host "Manifest: $InstallManifest"
+Write-Host "Skill links: preset=$($PresetLinkResult.State) user=$($UserSkillResult.State) (both point at the repo, no copies)"
+Write-Host "Web patch: $WebPatchState ($WebPatch)"
 Write-Host "Start web: $DshRoot\node_modules\.bin\dsh.CMD web"
 Write-Host "Start dedicated profile: $DshRoot\node_modules\.bin\dsh.CMD --profile solidworks"
+Write-Host "In the web UI: pick the 'SolidWorks CAD' preset chip on the new-session screen; a config"
+Write-Host "change here only takes effect when the DSH process is next started."

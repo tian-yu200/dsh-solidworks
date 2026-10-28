@@ -100,7 +100,8 @@
    "top"
   ],
   "positions": [
-   "center"
+   "center",
+   "point"
   ],
   "hole_depth": [
    "through_all"
@@ -357,7 +358,7 @@
   },
   "hole": {
    "description": "Parametric hole. Encapsulates sketch+cut; the compiler expands it (resolve top face -> create_sketch(on_face, face_index) -> circle at centre -> cut). depth selects the cut's end condition: a through-all cut or a BLIND cut of the given depth.",
-   "ref": "node_face + position (e.g. top face of n1, center)",
+   "ref": "node_face + position. 'point' puts the hole ANYWHERE on that face: ref.at = [x,y,z] MODEL m, on the face (10 um) and clear of its edges; mapped into the measured sketch frame, so a non-model-X face axis needs no arithmetic.",
    "diameter": "number — meters",
    "depth": "number — meters (BLIND hole: finite, > 0, cut to that depth from the referenced face) | 'through_all' ('through' accepted as an alias) for a through cut"
   },
@@ -426,7 +427,7 @@
   },
   "cosmetic_thread": {
    "description": "Cosmetic (annotation-only) ISO metric internal thread on the CIRCULAR edge at a bore MOUTH (v0.9.0 — the valve body's M42x2/M40x2 bores are revolve cuts, so no `hole` node). Lowers to ONE add_cosmetic_thread; adds ZERO faces/edges. Picks the MOUTH, not a blind hole's bottom circle.",
-   "ref": "obj — { node: <earlier id in threadable_producers>, edge_anchor | bore_face }, exactly one. edge_anchor {near, radius?, hint?}: `near` is the mouth circle's CENTRE (NOT a rim point); radius separates it from a concentric rim. bore_face {near, radius?, hint?}: a point ON the cylinder.",
+   "ref": "obj — { node: <earlier id in threadable_producers>, edge_anchor | bore_face }, exactly one. edge_anchor {near, radius?, hint?}: `near` is the mouth circle's CENTRE (NOT a rim point); radius separates it from a concentric rim. bore_face {near, radius?}: a point ON the cylinder.",
    "designation": "ISO metric size 'M6' | 'M42x2' (bare size takes the coarse pitch)",
    "depth": "m (> 0, THREAD length) | 'through_all'; blind: <= pilot bottom",
    "standard": "opt, dflt 'ISO' — ISO|GB|DIN|JIS -> swCosmeticStandardType_e 8/13/4/9",

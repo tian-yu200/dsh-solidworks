@@ -36,11 +36,17 @@ ALL_TOPICS = tuple(sorted([*TOPICS, *GENERATED_TOPICS]))
 # characters of content while the SERIALIZED page (envelope + section index + content) is
 # kept under REFERENCE_PAGE_MAX_SERIALIZED = 7000 — a hard cap that leaves ~1200 characters
 # of margin against the pruner and is asserted per page, not assumed. The budgets are sized
-# so the generated feature_graph_quickref fits in TWO pages WITH room for four more node
-# types (asserted by test_quickref_leaves_headroom_for_four_more_node_types).
+# so the generated feature_graph_quickref fits in AT MOST THREE pages, with room for four more
+# node types (asserted by test_quickref_leaves_headroom_for_four_more_node_types).
+# WHY THREE AND NOT TWO: the per-page caps are what protect against host elision — the page
+# COUNT is just how many round trips a reader spends. When the vocabulary grew past what two
+# pages hold, hand-trimming field prose to keep a 2-page count was silently dropping normative
+# detail, which is a worse trade than one extra read. Page size is unchanged.
 REFERENCE_PAGE_LINES = 150
 REFERENCE_PAGE_CHARS = 6820
 REFERENCE_PAGE_MAX_SERIALIZED = 7000
+# The paged feature_graph_quickref budget, in pages (headroom asserted with 4 extra node types).
+QUICKREF_MAX_PAGES = 3
 # Room reserved for the page envelope itself (keys, counters) once the section index is
 # subtracted, so the serialized page stays under the host budget.
 REFERENCE_PAGE_HEADROOM = 400
@@ -221,6 +227,10 @@ _FIELD_ABBREVIATIONS = (
      "aligned | anti_aligned | closest; record the reader's RESOLVED alignment verbatim"),
     # The C4 note is the LEGEND's job (the legend line states the SI->tool-boundary rule), so the
     # per-field restatement of it is duplication on every angle/distance value field.
+    # The `reversed` field's datum-frame pointer: keep the reference (a test pins it) but drop
+    # the redundant "Per-datum 2-D axes and growth side" wording.
+    (r"Per-datum 2-D axes and growth side: reference_model\.datum_frame\.",
+     "2-D axes/growth: reference_model.datum_frame."),
     (r"; (?:the )?compiler converts to the tool boundary\)", ")"),
     # `sketch.profile`'s parenthetical restates the `profile_primitives` line printed right below
     # it on the card (which kinds exist). Keep the requirement, drop the duplicated kind list.
@@ -238,7 +248,7 @@ _FIELD_ABBREVIATIONS = (
     # legend carries the meaning once; each field keeps its own side/support rule.
     (r", on the SIDE that must stay put, in the PRE-bend geometry \(the state the rebuild is in when the bend executes\)", ", on the side that stays put, PRE-bend"),
     (r", on the SIDE that stays put, in the PRE-flange geometry", ", on the side that stays put, PRE-flange"),
-    (r"Passed straight through as the tool's fixed_x/y/z coordinate pick \(no index resolution \u2014 the point IS the side selector\)", "Passed through as fixed_x/y/z (the point IS the side selector)"),
+    (r"Passed straight through as the tool's fixed_x/y/z coordinate pick \(no index resolution \u2014 the point IS the side selector\)", "Passed as fixed_x/y/z (the point IS the side selector)"),
     (r"swCosmeticStandardType_e", "swStandardType_e"),
     (r"swCosmeticEndConditions_e", "swCosmeticEnd_e"),
     # Legend-backed token compression (v0.9.0): the legend ALREADY defines AM/AA/IP, so every

@@ -323,6 +323,53 @@ def test_timeouts_are_per_request_not_per_client(counting_client):
     assert seen[execution_client.ENSURE_ENDPOINT] == execution_client.ENSURE_TIMEOUT
 
 
+def test_pooled_get_reuses_one_client_for_every_identity_probe(counting_client):
+    """SPEED #1: the DSH identity probe went through httpx.get, i.e. a new client per call.
+
+    ~150 ms of pool/transport construction per probe against ~15 ms for the request itself, and
+    a save round trip makes three of them. pooled_get puts that GET back on the shared client.
+    """
+    url = "http://localhost:5000/api/tool/identity"
+    for _ in range(10):
+        execution_client.pooled_get(url, 2.0)
+
+    assert len(counting_client.instances) == 1, "a client was rebuilt per identity probe"
+    client = counting_client.instances[0]
+    assert len(client.requests) == 10
+    assert all(method == "GET" and u == url for method, u, _k in client.requests)
+    # the per-request timeout still travels with the request, and the probe still ignores env
+    assert all(k.get("timeout") == 2.0 for _m, _u, k in client.requests)
+    assert client.trust_env is False
+
+
+def test_pooled_get_discards_a_broken_pool_and_does_not_autostart(
+    counting_client, monkeypatch
+):
+    """A transport failure must not leave a dead pool behind — and must not spawn a server.
+
+    The DSH caller's fallback (verify_state) is what auto-starts, so a probe that auto-started
+    on its own could launch a process from a read-only identity check.
+    """
+    def boom(_method, _url, **_kwargs):
+        raise httpx.ConnectError("no listener")
+
+    started = []
+    monkeypatch.setattr(
+        execution_client, "_ensure_server_up", lambda: started.append("spawned")
+    )
+    counting_client.handler = boom
+    with pytest.raises(httpx.TransportError):
+        execution_client.pooled_get("http://localhost:5000/api/tool/identity", 2.0)
+
+    assert started == [], "a read-only probe auto-started the execution server"
+    assert execution_client._client_count() == 0, "the broken pool was kept for reuse"
+    assert counting_client.instances[0].closed is True
+
+    counting_client.handler = None
+    execution_client.pooled_get("http://localhost:5000/api/tool/identity", 2.0)
+    assert len(counting_client.instances) == 2, "no fresh pool was built after the failure"
+
+
 def test_client_is_closed_on_reset_and_rebuilt_lazily(counting_client):
     client = execution_client._get_client()
     assert execution_client._client_count() == 1

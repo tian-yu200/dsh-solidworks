@@ -388,9 +388,17 @@ def lower_linear_pattern(node):
                   " (flipped)" if node.get("flip") is True else "", node["feature"]))]
 
 
+DEFAULT_MATERIAL_LIBRARY = "SolidWorks Materials"   # the tool's own default (tool-schemas.json)
+
+
 def lower_material(material):
     """graph-level material -> ONE set_part_material AFTER the last node (material is document
-    state, not a tree feature; part graphs only — validation enforces it)."""
+    state, not a tree feature; part graphs only — validation enforces it).
+
+    `library` is OMITTED, not defaulted, when the graph names none: the tool applies its own
+    default, so the request stays byte-identical to the historical path. Use
+    DEFAULT_MATERIAL_LIBRARY only to describe what the call resolves to (a warning), never to send
+    a library the author did not ask for."""
     params = {"material_name": material["name"]}
     if material.get("library"):
         params["library"] = material["library"]

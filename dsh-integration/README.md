@@ -7,7 +7,7 @@ browser profiles and supplies a dedicated CAD preset and policy.
 
 ```text
 DSH web or solidworks profile
-  -> host-owned MCP client and nine high-level tools
+  -> host-owned MCP client and ten high-level tools
   -> solidworks-cad preset for CAD instructions and skills
   -> Python orchestration and job policy
   -> SolidPilot compiler and C# execution service
@@ -17,7 +17,7 @@ DSH web or solidworks profile
 The model never receives direct access to COM, Shell, macros, REST execution
 endpoints, or the legacy low-level CAD MCP tool surface.
 
-Both browser profiles own an MCP client so every resumed session sees the nine
+Both browser profiles own an MCP client so every resumed session sees the ten
 tools from the host layer, including sessions composed from an older preset
 generation. The `solidworks-cad` preset owns only CAD instructions and skills.
 The dedicated profile also selects that preset by default and adds the policy
@@ -32,7 +32,37 @@ plugin.
 - Job state: `<repository>\state\jobs`
 - Backups: `<repository>\backups`
 
-## Nine-Tool Surface
+## Single Source of Truth
+
+The installed preset is a real directory that holds only `agent.cordis.yml` and `preset.yml`;
+its `skills` entry and `%USERPROFILE%\.dsh\skills\solidworks-cad` are directory JUNCTIONS into
+this repository, so no session can read a stale SKILL.md (the copied preset was two months behind
+on 2026-10-28: 20385 B against the repo's 26552 B).
+
+- DSH enumerates a preset root with `readdir(..., {withFileTypes: true})` and skips any child whose
+  dirent is not a directory, and a Windows junction reports `isDirectory() === false`. So the
+  PRESET directory itself cannot be a link; only its `skills` subdirectory can (that path is read
+  by name, which follows links). Skill roots do follow links.
+- The preset's own skills are published through the `customSkillDirs` key of its `skill-filesystem`
+  row. An earlier revision used `roots:`, which is not in that plugin's schema and is dropped
+  silently — the preset's skills were then never scanned, and the skill only appeared as a project
+  skill when the working directory was inside this repository.
+- `~/.dsh/skills/solidworks-cad` makes the same skill reachable to the `standard` preset, so a
+  session that forgot to pick the SolidWorks preset still finds the route.
+
+`Doctor-SolidWorksDsh.ps1` checks both links resolve into the repo, that neither path has become a
+copied directory again, and that all three SKILL.md paths hash equal. Junctions need no
+administrator rights.
+
+## Picking The Preset
+
+DSH has no per-directory default preset: the choice is per new session (the preset chip on the
+web UI's new-session screen, `AgentPresetSeat`) or global (`Set as default`, which writes
+`agent-presets.default` in `~/.dsh/settings.yaml`). For drawing work in another folder, pick
+`SolidWorks CAD` in that chip before sending the first message, or launch the dedicated profile
+(`--profile solidworks`), which selects it and adds the policy plugin.
+
+## Ten-Tool Surface
 
 The dedicated MCP exposes exactly:
 
@@ -45,6 +75,11 @@ The dedicated MCP exposes exactly:
 7. `request_confirmation`
 8. `confirm_action`
 9. `finish_job`
+10. `read_drawing_region`
+
+`read_drawing_region` is the drawing-intake zoom: a local image path plus a grid cell or a
+source-pixel box, returning a crop that stays inside the model's image budget. It is read-only,
+needs no job, and touches no CAD, so it runs before `start_job`.
 
 The policy plugin denies other `mcp__solidworks__*` calls.
 

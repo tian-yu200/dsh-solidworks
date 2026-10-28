@@ -61,7 +61,7 @@ PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spl
 # Optional boolean flags any profile primitive may carry (mirrors analyze_model's per-segment flag).
 PROFILE_FLAGS = frozenset(("construction",))
 FACE_SELECTORS = frozenset(("top",))          # v0.5: only 'top'
-POSITIONS = frozenset(("center",))            # v0.5: only 'center'
+POSITIONS = frozenset(("center", "point"))       # 'point' + ref.at: batch 10a off-centre holes
 THROUGH_DEPTHS = frozenset(("through_all", "through"))
 EXTRUDE_ENDS = frozenset(("blind", "through_all", "up_to_surface", "mid_plane"))
 # Canonical model axes for linear_pattern's direction (the tool selects the default plane whose
@@ -476,9 +476,25 @@ def validate(graph):
             if nf.get("selector") not in FACE_SELECTORS:
                 errors.append("%s: ref.node_face.selector %r unsupported (only %s)."
                               % (label, nf.get("selector"), sorted(FACE_SELECTORS)))
-            if ref.get("position") not in POSITIONS:
+            # --- placement (batch 10a) — off-centre holes ---------------------------------
+            # `position: 'point'` + `at: [x,y,z]` (MODEL space, metres) puts the hole anywhere on
+            # the referenced face instead of its centre. The 3-D point is mapped into the FACE
+            # SKETCH's own 2-D frame at compile time (after create_sketch echoes the measured
+            # frame), so a face whose sketch x-axis is not model X needs no author guesswork.
+            # Plan-time checks here are structural only; the on-face/inside-face tests run
+            # against the resolved face in the compiler (they need the live plane).
+            position = ref.get("position")
+            if position not in POSITIONS:
                 errors.append("%s: ref.position %r unsupported (only %s)."
-                              % (label, ref.get("position"), sorted(POSITIONS)))
+                              % (label, position, sorted(POSITIONS)))
+            at = ref.get("at")
+            if position == "point":
+                if not _is_point3(at):
+                    errors.append("%s: ref.at must be a 3-D point [x, y, z] in METERS when "
+                                  "ref.position is 'point' (got %r)." % (label, at))
+            elif at is not None:
+                errors.append("%s: ref.at is only read when ref.position is 'point' "
+                              "(got position %r)." % (label, position))
             if not _is_pos_number(node.get("diameter")):
                 errors.append("%s: 'diameter' must be a positive number (meters)." % label)
             # depth is either the through-all token or a BLIND hole depth in metres

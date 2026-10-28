@@ -4,10 +4,15 @@ state_version through the run.
 Failure model (CAD ops are NOT transactional): nodes run in declaration order; on the first
 failure the run STOPS, no rollback is attempted, and the result reports how far it got plus a
 feature-level error. The caller (the adapter tool) resyncs state_version afterwards either way.
+One exception: a graph-level material the library positively does not contain (MATERIAL_NOT_FOUND)
+is a warning, not a failure — the finished geometry is kept and the part keeps whatever material it
+already had (possibly none). A present-but-not-applied material is MATERIAL_NOT_APPLIED and fails.
 
 Public API (consumed by pycompiler/__init__.py and the adapter):
     compile_and_run(port, graph) -> CompileResult
 """
+import math
+
 from . import lowering
 from . import resolver
 from .errors import FeatureError
@@ -15,6 +20,9 @@ from .ir_schema import validate
 from .resolver import (resolve_center_on_face, resolve_component_entity_by_anchor,
                        resolve_edges_by_anchor, resolve_face_by_anchor, resolve_face_on_plane,
                        resolve_thread_edge, resolve_top_face)
+
+# The one execution-layer failure that does NOT invalidate the geometry a graph just built.
+MATERIAL_NOT_FOUND = "MATERIAL_NOT_FOUND"
 
 
 class CompileResult(object):
@@ -28,6 +36,7 @@ class CompileResult(object):
         self.node_log = []                 # [{id, type, status, ops:[{tool, note, state_version}]}]
         self.final_state_version = None
         self.error = None                  # {code, message, [node_id, node_type, step]}
+        self.warnings = []                 # non-fatal findings: the run still COMPLETED
 
     def to_dict(self):
         return {
@@ -37,14 +46,23 @@ class CompileResult(object):
             "exec_calls": self.exec_calls,
             "final_state_version": self.final_state_version,
             "error": self.error,
+            "warnings": self.warnings,
             "node_log": self.node_log,
         }
 
     def summary(self):
         """One-line human-readable summary for the MCP result string."""
         if self.status == "COMPLETED":
-            return ("COMPLETED | IR built %d/%d nodes | exec_calls=%d"
+            line = ("COMPLETED | IR built %d/%d nodes | exec_calls=%d"
                     % (self.nodes_completed, self.nodes_total, self.exec_calls))
+            if self.warnings:
+                # submit_feature_graph in the claude adapter returns ONLY this string, so a
+                # warning missing here is a warning the model never sees.
+                line += " | WARNINGS(%d): %s" % (
+                    len(self.warnings),
+                    "; ".join("%s at %s: %s" % (w.get("code"), w.get("step"), w.get("message"))
+                              for w in self.warnings))
+            return line
         err = self.error or {}
         if err.get("code") == "VALIDATION_FAILED":
             return "FAILED | VALIDATION_FAILED | %s | no execution performed" % err.get("message")
@@ -94,7 +112,10 @@ def _compile_and_run(port, graph):
     # 3) Run nodes in order. node_features records each node's CREATED feature name (the last
     # non-empty cadState.features[0] among its ops) so later nodes can reference it by node id
     # (lowering.node_feature — e.g. a circular_pattern's seed), localization-proof.
+    # BATCH 10a: off-centre holes are also collected so two holes on the SAME face whose circles
+    # overlap fail BEFORE any execution call (check_holes_do_not_overlap).
     node_features = {}
+    hole_placements = []
     for node in nodes:
         nid = node.get("id")
         ntype = node.get("type")
@@ -102,13 +123,35 @@ def _compile_and_run(port, graph):
         try:
             ops = _plan_node(port, node, sv, node_features,
                              graph.get("thread_defaults"))  # may do a live (read-only) resolve
+            if node.get("type") == "hole":
+                # The overlap test is per FACE, so record which face this hole resolved to.
+                # _plan_node already resolved it; re-read the cheap value it cached. EVERY
+                # hole is recorded, not only the off-centre ones: a centred hole has a
+                # real circle too, and two holes can collide when only one names ref.at.
+                # The key is (BODY node, face index), not the bare index: face indices are
+                # per-body, so two holes on DIFFERENT boxes can share index 0 and must not
+                # be compared.
+                body_node = ((node.get("ref") or {}).get("node_face") or {}).get("node")
+                placement_face = (body_node, node.get("_resolved_face_index"))
             last_resp = None
             frame_fn = None  # 2D coord transform for this node's entities (sketch frame fix)
             frame_mirror = False
+            # BATCH 10a: an off-centre hole carries its MODEL point here until create_sketch
+            # echoes the measured frame; placement_uv is the resulting sketch-2D centre. Both
+            # are per-NODE (one hole), reset on each node so a later node never inherits them.
+            placement_at = _hole_placement_at(node)
+            placement_uv = None
             for op in ops:
                 params = _fill_placeholders(op, last_resp, node_features, nid, ntype)
                 if frame_fn is not None and op.tool == "add_sketch_entity":
                     params = _transform_entity_params(params, frame_fn, frame_mirror)
+                if op.tool == "add_sketch_entity" and placement_uv is not None:
+                    # BATCH 10a: the mapped sketch-2D centre replaces the placeholder the
+                    # lowering wrote (0,0) — applied HERE, before the op is sent, so the
+                    # circle is drawn at the requested model point. A counterbored hole's
+                    # two sketches share the same face, hence the same centre.
+                    params = dict(params)
+                    params["cx"], params["cy"] = placement_uv
                 if params.get("edge_index") == lowering.THREAD_EDGE_PENDING:
                     # The mouth circle did not exist when this node was planned (the cut that
                     # makes it had not run yet). Resolve it NOW, against the post-cut geometry,
@@ -160,8 +203,48 @@ def _compile_and_run(port, graph):
                             code="FRAME_UNAVAILABLE", node_id=nid, node_type=ntype,
                             step=op.tool)
                     frame_fn, frame_mirror = _sketch_frame_transform(node["frame"], measured)
+                if op.tool == "create_sketch" and placement_at is not None \
+                        and placement_uv is None:
+                    # BATCH 10a — off-centre hole: the 3-D model point becomes 2-D HERE, once
+                    # the sketch's own frame is known. A face sketch's x-axis is NOT model X
+                    # (a 'front' face runs +X/+Y, a 'right' face -Z/+Y), so mapping through the
+                    # MEASURED frame is what makes one `ref.at` work on any face without the
+                    # author reasoning about sketch axes. `placement_frame` records the frame
+                    # used, so a wrong placement is diagnosable from the node log.
+                    # A counterbored hole emits TWO sketches on the SAME face (counterbore, then
+                    # pilot); the map is computed from the first and reused for the second, so
+                    # both circles stay coaxial.
+                    measured = ((resp.get("result_geometry") or {}).get("frame"))
+                    if not measured:
+                        raise FeatureError(
+                            "ref.at needs the sketch's measured frame, but create_sketch "
+                            "echoed none (execution layer too old?)",
+                            code="FRAME_UNAVAILABLE", node_id=nid, node_type=ntype,
+                            step=op.tool)
+                    u, v, off = resolver.project_point_into_frame(measured, placement_at)
+                    if abs(off) > resolver._PLANE_TOL:
+                        raise FeatureError(
+                            "ref.at %s is %.6f m off the sketch plane — the point must lie ON "
+                            "the referenced face." % (list(placement_at), off),
+                            code="PLACEMENT_OFF_FACE", node_id=nid, node_type=ntype,
+                            step=op.tool)
+                    placement_uv = (u, v)
+                    rec.setdefault("resolved", []).append(
+                        {"step": "hole_placement", "at": list(placement_at),
+                         "sketch_uv": [round(u, 9), round(v, 9)],
+                         "frame": measured})
                 rec["ops"].append({"tool": op.tool, "note": op.note, "state_version": sv})
             rec["status"] = "COMPLETED"
+            if node.get("type") == "hole":
+                # D2: EVERY hole joins the cross-hole overlap test, centred ones included
+                # (a centred hole still cuts a real circle, and it can collide with an
+                # off-centre one). The centre used is the FACE-UV one: for ref.at that is
+                # the mapped (u, v); for a centred hole it is the sketch origin (0, 0), so
+                # both land in the same coordinate system on this face.
+                centre_uv = placement_uv if placement_uv is not None else (0.0, 0.0)
+                hole_placements.append((nid, placement_face, centre_uv,
+                                        float(node["diameter"])))
+                resolver.check_holes_do_not_overlap(hole_placements, node_id=nid)
             result.node_log.append(rec)
             result.nodes_completed += 1
         except FeatureError as fe:
@@ -185,25 +268,48 @@ def _compile_and_run(port, graph):
 
     # 4) Graph-level material (v0.7.0) — document state, applied AFTER the geometry so a
     # material failure never aborts the build mid-tree. Part graphs only (validation enforced).
+    #
+    # MATERIAL_NOT_FOUND is the one material failure that says nothing about the geometry, and the
+    # execution layer now reports it ONLY for a name it positively read out of the material database
+    # as absent (a present-but-refused name, or a database it could not read, is MATERIAL_NOT_APPLIED
+    # and stays fatal). Rolling back minutes of finished features because one NAME is not in the
+    # library is the wrong trade, so that code is reported as a warning on an otherwise COMPLETED
+    # run. EVERY other failure (MATERIAL_NOT_APPLIED, COM_ERROR, WRONG_DOCUMENT_TYPE, a rejected
+    # state_version, an unexpected exception) keeps the previous fatal behaviour.
     material = graph.get("material")
     if material is not None:
         rec = {"id": "_material", "type": "material", "status": "PENDING", "ops": []}
+        attempted = None
+        resp = None
         try:
             for op in lowering.lower_material(material):
+                attempted = op
                 resp = port.execute(op.tool, op.params, sv)
+                sv = _advance(resp, sv, "_material", "material", op)  # raises on FAILED
+                # Only a call that landed counts: exec_calls is the number of state-bumping ops
+                # performed, and a refused material op bumped nothing (review note).
                 result.exec_calls += 1
-                sv = _advance(resp, sv, "_material", "material", op)
                 rec["ops"].append({"tool": op.tool, "note": op.note, "state_version": sv})
             rec["status"] = "COMPLETED"
             result.node_log.append(rec)
         except FeatureError as fe:
-            rec["status"] = "FAILED"
-            result.node_log.append(rec)
-            result.status = "FAILED"
-            result.error = {"code": fe.code, "message": fe.message,
-                            "node_id": "_material", "node_type": "material", "step": fe.step}
-            result.final_state_version = sv
-            return result
+            if fe.code == MATERIAL_NOT_FOUND:
+                on_part, on_part_db = _material_on_part(resp)
+                warning = _material_not_found_warning(material, fe, on_part, on_part_db)
+                rec["ops"].append({"tool": attempted.tool, "note": attempted.note,
+                                   "state_version": sv, "outcome": MATERIAL_NOT_FOUND})
+                rec["status"] = "WARNING"
+                rec["warning"] = warning
+                result.warnings.append(warning)
+                result.node_log.append(rec)
+            else:
+                rec["status"] = "FAILED"
+                result.node_log.append(rec)
+                result.status = "FAILED"
+                result.error = {"code": fe.code, "message": fe.message,
+                                "node_id": "_material", "node_type": "material", "step": fe.step}
+                result.final_state_version = sv
+                return result
         except Exception as ex:  # never let a bug crash the host
             rec["status"] = "FAILED"
             result.node_log.append(rec)
@@ -215,6 +321,61 @@ def _compile_and_run(port, graph):
 
     result.final_state_version = sv
     return result
+
+
+def _material_on_part(resp):
+    """(material, library) the layer reports as ACTUALLY on the part after the attempt.
+
+    The execution layer puts them in cadState.features as `material=` / `library=` on BOTH the
+    completed and the failed response, because a refused apply leaves whatever was already there.
+    `<none>` is the layer's explicit "nothing is set" — reported as None, never as the string."""
+    features = ((resp or {}).get("cadState") or {}).get("features") or []
+    found = {}
+    for item in features:
+        text = item if isinstance(item, str) else str(item)
+        for key in ("material", "library"):
+            if text.startswith(key + "=") and key not in found:
+                value = text.split("=", 1)[1].strip()
+                found[key] = None if value in ("", "<none>") else value
+    return found.get("material"), found.get("library")
+
+
+def _material_not_found_warning(material, fe, on_part=None, on_part_library=None):
+    """Non-fatal report for a material the library positively does not contain.
+
+    Says what was asked, what is ACTUALLY on the part now (which may be a material that was already
+    there — the warning must never claim the part has none), and how to finish. Deliberately NO
+    suggested replacement: mapping e.g. HT200 onto 'Gray Cast Iron' would invent properties the
+    drawing never stated, which is worse than an unset material."""
+    name = material["name"]
+    library = material.get("library") or lowering.DEFAULT_MATERIAL_LIBRARY
+    if on_part:
+        state = ("The part still carries the material it already had — '%s' (library '%s') — which "
+                 "is NOT the requested one, so mass properties and any weight check reflect THAT "
+                 "material, not '%s'."
+                 % (on_part, on_part_library or "unknown", name))
+    else:
+        state = ("The part is left with no material, so mass properties read the document default "
+                 "until one is set.")
+    return {
+        "code": MATERIAL_NOT_FOUND,
+        "step": "set_part_material",
+        "material": name,
+        "library": library,
+        "material_on_part": on_part,
+        "library_on_part": on_part_library,
+        "message": ("Material '%s' is not present in library '%s', so it was NOT applied. The part "
+                    "keeps every feature built by this graph. %s Layer response: %s"
+                    % (name, library, state, fe.message)),
+        "hint": ("Apply an EXACT name from that library (SolidWorks: right-click the document's "
+                 "Material row -> Edit Material to see what it actually contains; the names are "
+                 "localised per language, so use the one the dialog shows). If the specified "
+                 "material is missing, add it to the library as a custom entry with the properties "
+                 "the drawing states, then apply it with apply_document_edits "
+                 '[{"tool":"set_part_material","params":{"material_name":"<exact name>",'
+                 '"library":"%s"}}]. Do NOT substitute a similar-looking material: that would '
+                 "invent properties the drawing never gave." % library),
+    }
 
 
 def _thread_anchor(node, face_info):
@@ -232,22 +393,61 @@ def _thread_anchor(node, face_info):
       entry face would name a circle that is no longer the pilot's mouth (and, on a blind hole,
       the resolver could then pick the pilot's BOTTOM).
 
-    `resolve_top_face` reports no normal, so the entry normal is +Y — the same _UP the top-face
-    resolver matched on (its selector only ever returns a +Y-facing face).
+    `face_info['face']['normal']` is the ENTRY NORMAL: the counterbore offset is applied along
+    it, so a front/right-face hole (normal +Z / +X) would otherwise be pushed the wrong way. The
+    normal is read from the resolved face rather than assumed +Y (the old assumption held only
+    because the top-face selector always returns a +Y-facing face — a future front/right selector
+    would have silently broken every counterbored thread anchor).
     """
-    point = (face_info or {}).get("point")
+    # BATCH 10a: an off-centre hole's mouth circle is centred on `ref.at`, NOT on the entry
+    # face's representative point. Using the face centre here would name a circle that does not
+    # exist (or, worse, a concentric rim) and the thread would fail to resolve — the failure is
+    # loud (REFERENCE_UNRESOLVED), which is how this was caught.
+    at = (node.get("ref") or {}).get("at")
+    if ((node.get("ref") or {}).get("position") == "point"
+            and isinstance(at, list) and len(at) >= 3):
+        point = at
+    else:
+        # `resolve_top_face` returns the representative point at the TOP level; the face object
+        # itself (info['face']) also carries one. Accept either shape so a caller that passes the
+        # resolved FACE (as the front/right path will) gets the same anchor.
+        point = (face_info or {}).get("point") or ((face_info or {}).get("face") or {}).get("point")
     if not (isinstance(point, list) and len(point) >= 3):
         return {}
     near = [float(c) for c in point[:3]]
     counterbore = node.get("counterbore")
     if counterbore and _is_pos(counterbore.get("depth")):
-        near[1] -= float(counterbore["depth"])       # +Y is the entry normal (see docstring)
+        # Push the anchor INTO the material along the face's own inward normal. `_entry_normal`
+        # returns the face normal oriented AWAY from the body, so -n is into the material.
+        n = _entry_normal(face_info)
+        for axis in range(3):
+            near[axis] -= n[axis] * float(counterbore["depth"])
     anchor = {"near": near}
     # Radius is a DISAMBIGUATOR, not a filter on the axis: a revolve end face can carry the
     # bore mouth AND an outer rim as concentric coplanar circles, and only the radius tells
     # them apart.
     anchor["radius"] = float(node["diameter"]) / 2.0
     return {"edge_anchor": anchor}
+
+
+def _entry_normal(face_info):
+    """The resolved entry face's UNIT normal, or the +Y fallback the top-face selector implies.
+
+    A planar face's reported normal points AWAY from the material, so it is also the direction
+    the bore is cut INTO. Reading it from the face keeps a counterbore offset correct on any
+    face; the +Y default only applies when the face payload carries no usable normal (older
+    execution layer), which is exactly the case the top-face selector produces today.
+    """
+    normal = ((face_info or {}).get("face") or {}).get("normal")
+    if isinstance(normal, list) and len(normal) >= 3:
+        try:
+            v = [float(normal[0]), float(normal[1]), float(normal[2])]
+        except (TypeError, ValueError):
+            return (0.0, 1.0, 0.0)
+        length = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if length > 1e-12:
+            return (v[0] / length, v[1] / length, v[2] / length)
+    return (0.0, 1.0, 0.0)
 
 
 def _is_pos(value):
@@ -300,13 +500,38 @@ def _plan_node(port, node, state_version, node_features, graph_thread_defaults=N
         return lowering.lower_circular_pattern(node)
     if ntype == "hole":
         face_index, info = resolve_top_face(port, state_version, node_id=node.get("id"))
-        center2d = resolve_center_on_face(info)
+        ref = node.get("ref") or {}
+        if ref.get("position") == "point":
+            # BATCH 10a — off-centre placement. Plan-time checks, all read-only:
+            #   1. the point must lie ON the face's plane (check_hole_on_face);
+            #   2. the CIRCLE must stay inside the part's real extent, measured on the face
+            #      plane from the body bbox (check_hole_inside_extent). This replaced an
+            #      equal-area-square test that ignored `at` entirely and so passed a hole
+            #      hanging off the edge of a large face.
+            # A rejection here fails the node with ZERO ops executed FOR IT. Note this is a
+            # node-level guard, not a graph rollback: the compiler is not transactional, so
+            # earlier nodes of the same graph have already run (see the graph-level note).
+            resolver.check_hole_on_face(ref["at"], info.get("face") or {},
+                                        float(node["diameter"]), node_id=node.get("id"))
+            resolver.check_hole_inside_extent(
+                ref["at"], info.get("face") or {}, float(node["diameter"]),
+                resolver.body_bbox(port, state_version, node_id=node.get("id")),
+                node_id=node.get("id"))
+            node["_resolved_face_index"] = face_index
+            center2d = (0.0, 0.0)  # placeholder: the executor overwrites cx/cy from ref.at
+        else:
+            center2d = resolve_center_on_face(info)
+            # A CENTRED hole resolves to the same face; record it too so the D2 overlap test
+            # can compare it with an off-centre hole on that face (the index is per-body, so
+            # the caller keys on (body node, index)).
+            node["_resolved_face_index"] = face_index
         # A threaded hole needs its mouth CIRCLE, and that circle only exists AFTER the cuts —
         # but every analyze read is read-only and a node's ops are planned before any of them
         # execute, so the edge cannot be resolved here. The lowering emits a PLACEHOLDER op and
         # the executor resolves the edge between the last cut and the thread (the loop in
-        # _compile_and_run, on THREAD_EDGE_PENDING). The anchor it resolves against is the entry
-        # face's centre, which IS the mouth circle's centre for a coaxial bore.
+        # _compile_and_run, on THREAD_EDGE_PENDING). The anchor is the hole's own mouth centre
+        # (ref.at when placed, else the entry face's point) pushed in by any counterbore depth
+        # along the face NORMAL, which _thread_anchor derives from the resolved face.
         return lowering.lower_hole(node, face_index, center2d,
                                    thread_edge=lowering.THREAD_EDGE_PENDING
                                    if node.get("thread") else None,
@@ -447,6 +672,17 @@ def _echoes_frame(op):
         return True
     return (op.tool == "sheet_metal_feature"
             and (op.params or {}).get("feature_type") == "edge_flange_sketch")
+
+
+def _hole_placement_at(node):
+    """The MODEL point of an off-centre hole, or None for the default centred placement.
+    Read once per node so the executor can map it into whatever sketch frame create_sketch
+    reports; validation has already guaranteed the shape (ir_schema._is_point3)."""
+    ref = node.get("ref") or {}
+    if node.get("type") != "hole" or ref.get("position") != "point":
+        return None
+    at = ref.get("at")
+    return tuple(float(c) for c in at[:3])
 
 
 def _sketch_frame_transform(declared, measured):

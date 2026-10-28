@@ -5,6 +5,7 @@ from typing import Literal
 
 from mcp.server import MCPServer
 
+import intake
 from backend import ExecutionLayerError
 from orchestrator import orchestrator
 
@@ -21,6 +22,56 @@ def _error_code_from(exc):
     return match.group(1) if match else None
 
 
+def _error_payload(exc):
+    """One failure envelope for any tool: same codes, same shape, as `_json_result` always sent.
+
+    Check order is load-bearing: json.JSONDecodeError IS a ValueError, and a bad JSON argument must
+    stay INVALID_JSON rather than falling through to INVALID_REQUEST."""
+    if isinstance(exc, json.JSONDecodeError):
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": "INVALID_JSON", "message": str(exc)},
+        }
+    if isinstance(exc, PermissionError):
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": "PERMISSION_DENIED", "message": str(exc)},
+        }
+    if isinstance(exc, ExecutionLayerError):
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": "EXECUTION_LAYER_ERROR", "message": str(exc)},
+        }
+    if isinstance(exc, ValueError):
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": "INVALID_REQUEST", "message": str(exc)},
+        }
+    if isinstance(exc, RuntimeError):
+        code = _error_code_from(exc) or "UNEXPECTED_ERROR"
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": code, "message": str(exc)},
+        }
+    return {
+        "status": "failed",
+        "risk": "read",
+        "error": {
+            "code": "UNEXPECTED_ERROR",
+            "message": f"{type(exc).__name__}: {exc}",
+        },
+    }
+
+
+def _compact(payload):
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _json_result(func):
     """Serialize a tool result as COMPACT SINGLE-LINE JSON.
 
@@ -31,48 +82,20 @@ def _json_result(func):
     readable instead of escaping it into a much longer string.
     """
     try:
-        result = func()
-    except json.JSONDecodeError as exc:
-        result = {
-            "status": "failed",
-            "risk": "read",
-            "error": {"code": "INVALID_JSON", "message": str(exc)},
-        }
-    except PermissionError as exc:
-        result = {
-            "status": "failed",
-            "risk": "read",
-            "error": {"code": "PERMISSION_DENIED", "message": str(exc)},
-        }
-    except ExecutionLayerError as exc:
-        result = {
-            "status": "failed",
-            "risk": "read",
-            "error": {"code": "EXECUTION_LAYER_ERROR", "message": str(exc)},
-        }
-    except ValueError as exc:
-        result = {
-            "status": "failed",
-            "risk": "read",
-            "error": {"code": "INVALID_REQUEST", "message": str(exc)},
-        }
-    except RuntimeError as exc:
-        code = _error_code_from(exc) or "UNEXPECTED_ERROR"
-        result = {
-            "status": "failed",
-            "risk": "read",
-            "error": {"code": code, "message": str(exc)},
-        }
+        return _compact(func())
     except Exception as exc:  # noqa: BLE001
-        result = {
-            "status": "failed",
-            "risk": "read",
-            "error": {
-                "code": "UNEXPECTED_ERROR",
-                "message": f"{type(exc).__name__}: {exc}",
-            },
-        }
-    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        return _compact(_error_payload(exc))
+
+
+def _image_result(func):
+    """`(image, one-line JSON)` on success; the one-line JSON alone on failure.
+
+    The JSON half is what makes a crop citable — the image block is what the model actually reads,
+    and DSH only forwards it when the active model route declares image input."""
+    try:
+        return func()
+    except Exception as exc:  # noqa: BLE001
+        return _compact(_error_payload(exc))
 
 
 @mcp.tool(structured_output=False)
@@ -167,6 +190,10 @@ def submit_feature_graph(
 
     IR distances are meters and angles are radians. Large graphs return
     pending_confirmation instead of executing immediately.
+
+    A completed result may carry `warnings`: a non-fatal finding (today MATERIAL_NOT_FOUND)
+    on work that is committed and verified — do NOT resubmit the graph or roll it back;
+    fix the property afterwards with apply_document_edits.
     """
     return _json_result(
         lambda: orchestrator.feature_graph(
@@ -293,9 +320,42 @@ def confirm_action(
 
 
 @mcp.tool(structured_output=False)
-def finish_job(job_id: str, job_token: str) -> str:
-    """Run final objective verification and mark the authenticated CAD job completed."""
-    return _json_result(lambda: orchestrator.finish_job(job_id, job_token))
+def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
+    """Run final objective verification and mark the authenticated CAD job completed.
+
+    After a verified finish the job's own document is closed, freeing SolidWorks memory,
+    when the job created or opened it, it is saved to a path and it is not dirty. Pass
+    keep_open=true to leave it open. Anything left open is reported with the reason.
+    """
+    return _json_result(
+        lambda: orchestrator.finish_job(job_id, job_token, keep_open)
+    )
+
+
+@mcp.tool(structured_output=False)
+def read_drawing_region(image_path: str, region: str = "", zoom: int = 2):
+    """Crop and enlarge part of an engineering drawing so small dimension text can be READ.
+
+    Read-only: it touches no CAD document, needs no job, and never starts SolidWorks. It exists
+    because a whole sheet inside the model's image budget renders 3 mm dimension digits as a few
+    pixels, and no other approved tool can zoom.
+
+    image_path: LOCAL image file path only (URLs including file:// are rejected).
+    region: '' for the OVERVIEW — the full sheet with a labelled grid (columns A left → H right,
+        rows 1 top → 6 bottom) drawn on it, so a feature can be named by cell instead of by
+        guessed pixels; or a cell label like 'B2'; or a source-pixel box 'x0,y0,x1,y1'.
+    zoom: integer 1–4, applied to a crop (the overview is fitted to the image budget). Use 3–4 for
+        dimension text, and re-ask with a bigger zoom before calling anything illegible.
+
+    Returns the cropped image and one line of JSON: output path, output pixels/bytes, the exact
+    source-pixel box, and the grid map. Crops accumulate under artifacts/intake/<image-hash>/ for
+    the session to cite. A region outside the image is rejected, never clipped: a silently clipped
+    crop hides what it left out. Whatever stays illegible after zooming is UNKNOWN and goes to the
+    user — do not invent a dimension, tolerance, material or standard-part value.
+    """
+    return _image_result(
+        lambda: intake.result_payload(image_path, region, zoom)
+    )
 
 
 def _normalize_tool_surface():

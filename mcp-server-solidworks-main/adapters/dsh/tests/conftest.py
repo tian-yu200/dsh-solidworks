@@ -13,6 +13,13 @@ if str(ADAPTER_DIR) not in sys.path:
 import orchestrator as orchestrator_module  # noqa: E402
 from job_store import JobStore  # noqa: E402
 
+DEFAULT_MATERIAL_LIBRARY = "SolidWorks Materials"   # the execution layer's own default
+KNOWN_MATERIALS = frozenset(
+    {"1060 Alloy", "AISI 1020", "ABS", "Nylon 6/10", "Gray Cast Iron", "Refused Material"}
+)
+# Present in the library but refused by the setter: MATERIAL_NOT_APPLIED, which stays fatal.
+UNAPPLICABLE_MATERIALS = frozenset({"Refused Material"})
+
 
 class FakeBackend:
     def __init__(self, state):
@@ -22,11 +29,60 @@ class FakeBackend:
         self.call_handler = None
         self.feature_graph_handler = None
         self.cheap_probes = []
+        # The materials the fake library contains, what the setter refuses even though it is
+        # present, and what the part already carries. Mirrors the live SetPartMaterial: a name that
+        # is positively absent fails MATERIAL_NOT_FOUND, a present-but-refused one fails
+        # MATERIAL_NOT_APPLIED, and every response reports the material actually on the part.
+        self.materials = set(KNOWN_MATERIALS)
+        self.unapplicable = set(UNAPPLICABLE_MATERIALS)
+        self.material_on_part = None
+        self.material_library_on_part = None
         # When True, the /api/tool/identity endpoint is treated as missing/failed and
         # identity() exercises the same verify_state fallback the real backend uses.
         self.identity_endpoint_down = False
         self._document_stack = []
         self._undo_state = None
+
+    def _material_failure_code(self, name, library):
+        """None when the fake applies it, else the code the live layer would answer with."""
+        if not name or name not in self.materials:
+            return "MATERIAL_NOT_FOUND"
+        if name in self.unapplicable:
+            return "MATERIAL_NOT_APPLIED"
+        self.material_on_part = name
+        self.material_library_on_part = library or DEFAULT_MATERIAL_LIBRARY
+        return None
+
+    def _material_features(self):
+        if not self.material_on_part:
+            return ["material=<none>", "library=<none>"]
+        return ["material=%s" % self.material_on_part,
+                "library=%s" % self.material_library_on_part]
+
+    def _material_rejection(self, params):
+        """The FAILED response for a material the fake cannot apply, else None.
+
+        The state_version does NOT move on this failure and nothing is applied — exactly like
+        SetPartMaterial — and cadState.features carries the material still on the part."""
+        name = params.get("material_name")
+        library = params.get("library") or DEFAULT_MATERIAL_LIBRARY
+        code = self._material_failure_code(name, library)
+        if code is None:
+            return None
+        reason = ("not present in the material database"
+                  if code == "MATERIAL_NOT_FOUND"
+                  else "present in the database but not applied by the setter")
+        return {
+            "status": "FAILED",
+            "stateVersion": (self.state or {}).get("stateVersion", 1),
+            "cadState": copy.deepcopy(self.state),
+            "error": {
+                "code": code,
+                "message": "Material '%s' was not applied: %s ('%s', library '%s'). The part now "
+                           "carries '%s'." % (name, reason, name, library,
+                                              self.material_on_part or "<none>"),
+            },
+        }
 
     def health(self):
         return {"comAttached": True}
@@ -114,6 +170,11 @@ class FakeBackend:
             response = self.call_handler(tool, params)
             if response is not None:
                 return response
+
+        if tool == "set_part_material":
+            rejected = self._material_rejection(params)
+            if rejected is not None:
+                return rejected
 
         if tool in {"open_new_part", "open_new_assembly", "create_drawing"}:
             self._document_stack.append(copy.deepcopy(self.state))
@@ -220,16 +281,64 @@ class FakeBackend:
         )
         if self.feature_graph_handler:
             return self.feature_graph_handler(graph, fresh_document)
+        nodes = graph.get("nodes") or []
+        material = graph.get("material")
+        warning = None
+        fatal = None
+        node_log = [{"id": node.get("id"), "status": "COMPLETED"} for node in nodes]
+        if material:
+            name = material.get("name")
+            library = material.get("library") or DEFAULT_MATERIAL_LIBRARY
+            rejected = self._material_rejection({"material_name": name, "library": library})
+            code = rejected["error"]["code"] if rejected is not None else None
+            if code is None:
+                node_log.append({"id": "_material", "type": "material", "status": "COMPLETED"})
+            elif code == "MATERIAL_NOT_FOUND":
+                # The one non-fatal case: geometry ran, the material did not, and the warning says
+                # what is ACTUALLY on the part (which may be a pre-existing material).
+                warning = {
+                    "code": "MATERIAL_NOT_FOUND",
+                    "step": "set_part_material",
+                    "material": name,
+                    "library": library,
+                    "material_on_part": self.material_on_part,
+                    "library_on_part": self.material_library_on_part,
+                    "message": rejected["error"]["message"],
+                    "hint": "apply an exact library name or add the material to the library",
+                }
+                node_log.append({"id": "_material", "type": "material", "status": "WARNING",
+                                 "warning": warning})
+            else:
+                # MATERIAL_NOT_APPLIED is fatal: the whole run reports FAILED, so the caller rolls
+                # back exactly as it does for any other node failure.
+                fatal = {
+                    "code": code,
+                    "message": rejected["error"]["message"],
+                    "node_id": "_material",
+                    "node_type": "material",
+                    "step": "set_part_material",
+                }
+                node_log.append({"id": "_material", "type": "material", "status": "FAILED"})
+        if fatal is not None:
+            return {
+                "status": "FAILED",
+                "stateVersion": self.state.get("stateVersion", 1),
+                "cadState": copy.deepcopy(self.state),
+                "compiler": {
+                    "nodes_completed": len(nodes),
+                    "node_log": node_log,
+                    "warnings": [],
+                },
+                "error": fatal,
+            }
         return {
             "status": "COMPLETED",
             "stateVersion": self.state.get("stateVersion", 1),
             "cadState": copy.deepcopy(self.state),
             "compiler": {
-                "nodes_completed": len(graph.get("nodes") or []),
-                "node_log": [
-                    {"id": node.get("id"), "status": "COMPLETED"}
-                    for node in graph.get("nodes") or []
-                ],
+                "nodes_completed": len(nodes),
+                "node_log": node_log,
+                "warnings": [warning] if warning else [],
             },
             "error": None,
         }

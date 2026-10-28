@@ -11,6 +11,9 @@ STATE_ROOT = Path(os.getenv("DSH_SOLIDWORKS_STATE_ROOT", WORKSPACE_ROOT / "state
 JOB_ROOT = STATE_ROOT / "jobs"
 BACKUP_ROOT = Path(os.getenv("DSH_SOLIDWORKS_BACKUP_ROOT", WORKSPACE_ROOT / "backups"))
 
+# read_drawing_region output: one folder per source drawing (gitignored, under artifacts/).
+INTAKE_ROOT = Path(os.getenv("DSH_SOLIDWORKS_INTAKE_ROOT", WORKSPACE_ROOT / "artifacts" / "intake"))
+
 RECIPE_PATH = SOLIDPILOT_ROOT / "cad-planner" / "recipe-usage.md"
 FEATURE_GRAPH_SCHEMA_PATH = (
     SOLIDPILOT_ROOT / "cad-planner" / "contracts" / "feature-graph.schema.json"

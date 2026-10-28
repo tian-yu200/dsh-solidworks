@@ -180,6 +180,26 @@ def _request_with_autostart(do_request, label: str):
             )
 
 
+def pooled_get(url: str, timeout: float):
+    """One GET on the SHARED client, for read-only probes outside the tool protocol.
+
+    SPEED (#1): constructing an httpx.Client costs ~150 ms against ~1-15 ms for the request
+    itself, so a probe that built a client per call spent most of its time on pool setup and
+    teardown. Every GET in this module now goes through `_get_client()`.
+
+    A transport failure drops the pool (a broken pool must never be reused) and re-raises:
+    callers keep their own fallback. Deliberately NO auto-start here — the DSH identity probe
+    falls back to verify_state, which auto-starts, so a probe must not spawn a process on its
+    own.
+    """
+    client = _get_client()
+    try:
+        return client.get(url, timeout=timeout)
+    except httpx.TransportError:
+        _reset_client()
+        raise
+
+
 def get_health() -> dict:
     """GET /health — server status + COM attach state (does not touch state_version)."""
     def _do():

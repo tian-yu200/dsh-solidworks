@@ -50,10 +50,23 @@ class FakePort(ExecutionPort):
     """Records calls, bumps state_version on writes, returns canned payloads for analyze_model
     (per analysis_type: faces / edges). add_reference_geometry returns a LOCALIZED created-plane
     name ('Düzlem1') so the FROM_PREV_FEATURE substitution is proven
-    localization-independent. fail_on=(tool, nth) injects a FAILED response on the nth call."""
+    localization-independent. fail_on=(tool, nth) injects a FAILED response on the nth call.
+
+    set_part_material mirrors the live layer exactly: MATERIALS is what the database contains,
+    `material=` is what the part carries BEFORE the call, and UNAPPLICABLE names a material that IS
+    in the database but whose setter is refused. A positively-absent name fails MATERIAL_NOT_FOUND,
+    a present-but-refused one fails MATERIAL_NOT_APPLIED, and EVERY response — success and failure —
+    reports the material actually on the part in cadState.features ("<none>" when nothing is set),
+    with the state_version unchanged on a failure."""
+
+    MATERIALS = frozenset({"1060 Alloy", "AISI 1020", "ABS", "Nylon 6/10", "Gray Cast Iron",
+                           "Refused Material"})
+    # In the database, but the fake's setter refuses it (models an apply failure, not a miss).
+    UNAPPLICABLE = frozenset({"Refused Material"})
+    DEFAULT_LIBRARY = "SolidWorks Materials"
 
     def __init__(self, faces=_BOX_FACES, edges=None, fail_on=None, sketch_frame=None,
-                 asm_faces=None, asm_edges=None):
+                 asm_faces=None, asm_edges=None, material=None, material_library=None):
         self._sv = 0
         self._faces = faces
         self._edges = edges
@@ -64,6 +77,26 @@ class FakePort(ExecutionPort):
         self._insert_counts = {}           # part basename -> instance counter (Name2 numbering)
         self._counts = {}
         self.calls = []  # list of (tool, params)
+        # What the document already carries — a pre-existing material must survive a refused apply.
+        self._material = material
+        self._material_library = material_library or self.DEFAULT_LIBRARY
+
+    def _material_state_features(self):
+        # An unset property reads back empty for BOTH name and database, exactly as
+        # GetMaterialPropertyName2 does on a part with no material.
+        if not self._material:
+            return ["material=<none>", "library=<none>"]
+        return ["material=%s" % self._material,
+                "library=%s" % (self._material_library or self.DEFAULT_LIBRARY)]
+
+    def _material_failure(self, code, requested, library, reason):
+        return {"status": "FAILED", "stateVersion": self._sv,
+                "cadState": {"features": self._material_state_features()},
+                "error": {"code": code,
+                          "message": "Material '%s' was not applied: %s ('%s', library '%s'). "
+                                     "The part now carries '%s'."
+                                     % (requested, reason, requested, library,
+                                        self._material or "<none>")}}
 
     def get_state(self):
         return self._sv
@@ -74,6 +107,24 @@ class FakePort(ExecutionPort):
         if self._fail_on and self._fail_on[0] == tool and self._counts[tool] == self._fail_on[1]:
             return {"status": "FAILED", "stateVersion": self._sv,
                     "error": {"code": "EXTRUSION_FAILED", "message": "injected failure"}}
+        if tool == "set_part_material":
+            name = (params.get("material_name") or "").strip()
+            library = params.get("library") or self.DEFAULT_LIBRARY
+            if name not in self.MATERIALS:
+                # Positively absent from the database: the only case the live layer calls
+                # MATERIAL_NOT_FOUND, and the part keeps whatever it already had.
+                return self._material_failure(
+                    "MATERIAL_NOT_FOUND", name, library,
+                    "not present in the material database")
+            if name in self.UNAPPLICABLE:
+                # Present, but the setter refused — a real failure, and a fatal code.
+                return self._material_failure(
+                    "MATERIAL_NOT_APPLIED", name, library,
+                    "present in the database but not applied by the setter")
+            self._material, self._material_library = name, library
+            self._sv += 1
+            return {"status": "COMPLETED", "stateVersion": self._sv,
+                    "cadState": {"features": self._material_state_features()}}
         if tool == "analyze_model":
             payload = self._edges if params.get("analysis_type") == "edges" else self._faces
             return {"status": "COMPLETED", "stateVersion": self._sv,
@@ -1723,14 +1774,18 @@ def test_material_applied_after_last_node():
 def test_material_failure_and_validation():
     # A failing set_part_material is a loud, clean FAILED on the synthetic node (the geometry
     # itself completed); assembly graphs and empty names are rejected at plan time.
+    # The injected failure carries EXTRUSION_FAILED and the material NAME is a valid one, which
+    # proves the non-fatal rule keys on the error CODE (MATERIAL_NOT_FOUND), never on the name.
     g = {
         "schema_version": "0.7.0-draft", "units": "meters",
-        "material": {"name": "Unobtainium"},
+        "material": {"name": "1060 Alloy"},
         "nodes": [{"id": "b1", "type": "box", "width": 0.05, "depth": 0.05, "height": 0.01}],
     }
     port = FakePort(fail_on=("set_part_material", 1))
     r = compile_and_run(port, g)
     assert r.status == "FAILED" and r.error["node_id"] == "_material"
+    assert r.error["code"] == "EXTRUSION_FAILED"
+    assert r.warnings == []
     assert r.nodes_completed == 1
     bads = [
         {"schema_version": "0.7.0-draft", "units": "meters", "material": {"name": "1060 Alloy"},
@@ -1744,6 +1799,160 @@ def test_material_failure_and_validation():
         r = compile_and_run(port, bad)
         assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", r.to_dict()
         assert port.calls == []
+
+
+def _material_graph(name, library=None):
+    """Two geometry nodes plus a graph-level material: enough to show the build finished."""
+    material = {"name": name} if library is None else {"name": name, "library": library}
+    return {
+        "schema_version": "0.7.0-draft", "units": "meters", "material": material,
+        "nodes": [
+            {"id": "b1", "type": "box", "ref": {"datum": "top"},
+             "width": 0.05, "depth": 0.05, "height": 0.02},
+            {"id": "h1", "type": "hole",
+             "ref": {"node_face": {"node": "b1", "selector": "top"}, "position": "center"},
+             "diameter": 0.008, "depth": "through_all"},
+        ],
+    }
+
+
+def test_material_not_found_keeps_geometry_and_warns():
+    # The drawing specifies HT200 and the library has no such name. Throwing away a finished part
+    # over a document property is the wrong trade: the run COMPLETES, the material stays unset,
+    # and the finding rides along as a warning instead of an error.
+    port = FakePort()
+    r = compile_and_run(port, _material_graph("HT200"))
+    assert r.status == "COMPLETED" and r.error is None, r.to_dict()
+    assert r.nodes_completed == r.nodes_total == 2
+    tools = [tool for (tool, _p) in port.calls]
+    assert tools[-1] == "set_part_material"              # the attempt was really made
+    assert tools.count("extrude_feature") == 2           # the boss AND the cut both built
+    assert r.warnings and set(r.warnings[0]) == {"code", "step", "material", "library",
+                                                 "material_on_part", "library_on_part",
+                                                 "message", "hint"}
+    warning = r.warnings[0]
+    assert warning["code"] == "MATERIAL_NOT_FOUND"
+    assert warning["material"] == "HT200"
+    assert warning["step"] == "set_part_material"
+    # the library the call resolved to, even though the graph never named one
+    assert warning["library"] == "SolidWorks Materials"
+    # nothing was on the part before and nothing is on it after
+    assert warning["material_on_part"] is None
+    assert warning["library_on_part"] is None
+    assert "is not present in library" in warning["message"]
+    assert "was NOT applied" in warning["message"]
+    assert "no material" in warning["message"]
+    assert "apply_document_edits" in warning["hint"]
+    assert r.node_log[-1]["id"] == "_material"
+    assert r.node_log[-1]["status"] == "WARNING"
+    assert r.node_log[-1]["warning"] == warning
+    # A failed material op does not move the document: no state drift to hide.
+    assert r.final_state_version == port.get_state()
+    # …and it is not counted as an executed operation either (3 ops per node, material op refused).
+    assert r.exec_calls == 6, r.to_dict()
+    # The claude adapter's submit_feature_graph returns ONLY this line — a warning missing from
+    # it is a warning nobody ever sees.
+    assert "MATERIAL_NOT_FOUND" in r.summary()
+
+
+def test_material_not_found_on_a_part_that_already_has_one_reports_the_real_material():
+    # Review P1: the old live layer read back a NON-EMPTY property and called that success. A part
+    # that already carries Gray Cast Iron keeps it, and the warning must name the material that is
+    # actually on the part instead of claiming there is none.
+    port = FakePort(material="Gray Cast Iron")
+    r = compile_and_run(port, _material_graph("HT200"))
+    assert r.status == "COMPLETED", r.to_dict()
+    warning = r.warnings[0]
+    assert warning["code"] == "MATERIAL_NOT_FOUND"
+    assert warning["material"] == "HT200"
+    assert warning["material_on_part"] == "Gray Cast Iron"
+    assert warning["library_on_part"] == "SolidWorks Materials"
+    assert "still carries" in warning["message"]
+    assert "left with no material" not in warning["message"]
+    # the pre-existing material survived untouched, and no state version moved
+    assert port._material == "Gray Cast Iron"
+    assert r.exec_calls == 6
+
+
+def test_material_present_but_refused_is_fatal():
+    # MATERIAL_NOT_APPLIED is NOT exempted: a name the library has, which the setter would not
+    # apply, is a real configuration failure and the caller must roll back and hear about it.
+    assert "Refused Material" in FakePort.MATERIALS      # present in the database…
+    assert "Refused Material" in FakePort.UNAPPLICABLE   # …but the apply is refused
+    port = FakePort()
+    r = compile_and_run(port, _material_graph("Refused Material"))
+    assert r.status == "FAILED", r.to_dict()
+    assert r.error["code"] == "MATERIAL_NOT_APPLIED"
+    assert r.error["node_id"] == "_material"
+    assert r.warnings == []
+    assert r.node_log[-1]["status"] == "FAILED"
+    assert r.exec_calls == 6                             # the refused op is not counted
+
+
+def test_material_apply_success_reports_the_applied_material():
+    port = FakePort(material="Gray Cast Iron")           # a pre-existing material is replaced
+    r = compile_and_run(port, _material_graph("1060 Alloy"))
+    assert r.status == "COMPLETED" and r.warnings == [], r.to_dict()
+    assert port._material == "1060 Alloy"
+    assert r.exec_calls == 7                             # 6 geometry + the applied material op
+    assert r.node_log[-1]["status"] == "COMPLETED"
+
+
+def test_material_not_found_warning_names_the_library_the_graph_asked_for():
+    port = FakePort()
+    r = compile_and_run(port, _material_graph("HT200", library="Foundry Materials"))
+    assert r.status == "COMPLETED" and r.warnings[0]["library"] == "Foundry Materials"
+    # the library the author named is the library the tool is asked for — never rewritten
+    assert port.calls[-1][1] == {"material_name": "HT200", "library": "Foundry Materials"}
+
+
+def test_material_not_found_never_substitutes_another_material():
+    # The fake library DOES contain Gray Cast Iron, the obvious "close enough" pick for HT200.
+    # Substituting it would invent density and strength the drawing never stated, so the only
+    # permitted outcome is: nothing applied, warning reported.
+    assert "Gray Cast Iron" in FakePort.MATERIALS
+    port = FakePort()
+    compile_and_run(port, _material_graph("HT200"))
+    assert [params.get("material_name") for (tool, params) in port.calls
+            if tool == "set_part_material"] == ["HT200"]
+
+
+def test_valid_material_applies_and_reports_no_warning():
+    port = FakePort()
+    r = compile_and_run(port, _material_graph("1060 Alloy"))
+    assert r.status == "COMPLETED" and r.warnings == [], r.to_dict()
+    assert port.calls[-1][0] == "set_part_material"
+    assert r.node_log[-1]["id"] == "_material"
+    assert r.node_log[-1]["status"] == "COMPLETED"
+    assert "WARNINGS" not in r.summary()
+
+
+def test_other_material_step_failure_still_fails_the_graph():
+    # Anything but MATERIAL_NOT_FOUND keeps the old fatal path, so the caller still rolls back.
+    port = FakePort(fail_on=("set_part_material", 1))
+    r = compile_and_run(port, _material_graph("1060 Alloy"))
+    assert r.status == "FAILED"
+    assert r.error["code"] == "EXTRUSION_FAILED"
+    assert r.error["node_id"] == "_material"
+    assert r.warnings == []
+    assert r.node_log[-1]["status"] == "FAILED"
+
+
+def test_material_step_crash_is_still_fatal():
+    # The non-fatal branch keys on one error CODE — a crash in the material step stays the loud
+    # NODE_UNEXPECTED failure it was, never a warning that hides a bug.
+    class ExplodingPort(FakePort):
+        def execute(self, tool, params, state_version):
+            if tool == "set_part_material":
+                raise RuntimeError("bug in the port")
+            return FakePort.execute(self, tool, params, state_version)
+
+    r = compile_and_run(ExplodingPort(), _material_graph("1060 Alloy"))
+    assert r.status == "FAILED"
+    assert r.error["code"] == "NODE_UNEXPECTED"
+    assert r.error["node_id"] == "_material"
+    assert r.warnings == []
+    assert r.node_log[-1]["status"] == "FAILED"
 
 
 def test_edge_flange_length_mode_single_call():
@@ -1971,16 +2180,25 @@ _TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and c
 # repeated a read at the SAME state_version — 2 573 s, 32% of all backend time). The memo is
 # scoped to ONE compile_and_run and keyed by state_version, so a write must force a re-read.
 # ---------------------------------------------------------------------------------------------
+# The box's top-face sketch frame (what create_sketch MEASURES live): the top face is at +Y,
+# its sketch x is model +X and its y is model -Z (reference_model.datum_frame).
+_TOP_FACE_FRAME = {"origin": [0.0, 0.05, 0.0], "xdir": [1.0, 0.0, 0.0], "ydir": [0.0, 0.0, -1.0]}
+
+
 def _two_hole_graph():
-    """Two `hole` nodes: each resolves the top face, so the same faces dump is wanted twice."""
+    """Two `hole` nodes: each resolves the top face, so the same faces dump is wanted twice.
+    They are placed APART (D2 checks every pair on a face, so two centred holes at the same
+    point would — correctly — be rejected as overlapping)."""
     return {"schema_version": "0.7.4-draft", "units": "meters", "nodes": [
         {"id": "n1", "type": "box", "ref": {"datum": "top"},
          "width": 0.05, "depth": 0.05, "height": 0.05},
         {"id": "n2", "type": "hole",
-         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "point",
+                  "at": [0.010, 0.05, 0.0]},
          "diameter": 0.01, "depth": "through_all"},
         {"id": "n3", "type": "hole",
-         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "point",
+                  "at": [-0.010, 0.05, 0.0]},
          "diameter": 0.008, "depth": "through_all"},
     ]}
 
@@ -2058,7 +2276,7 @@ def test_resolver_memo_never_leaks_across_runs():
     # re-read, because a payload from a previous graph may describe a document that has since
     # been replaced on disk without the counter moving.
     graph = _two_hole_graph()
-    port = FakePort()
+    port = FakePort(sketch_frame=_TOP_FACE_FRAME)
     first = compile_and_run(port, graph)
     assert first.status == "COMPLETED", first.to_dict()
     before = _count(port, "analyze_model", "faces")

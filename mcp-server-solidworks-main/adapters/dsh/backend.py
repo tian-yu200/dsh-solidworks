@@ -2,8 +2,6 @@ import sys
 import threading
 import uuid
 
-import httpx
-
 from settings import CLAUDE_ADAPTER_DIR, IDENTITY_ENDPOINT, IDENTITY_TIMEOUT_SECONDS
 
 
@@ -18,6 +16,7 @@ from execution_client import (  # noqa: E402
     ensure_ready,
     get_health,
     get_state,
+    pooled_get,
 )
 from ir_execution_port import run_feature_graph  # noqa: E402
 
@@ -104,11 +103,7 @@ class SolidWorksBackend:
         through to verify_state, which reports the same condition authoritatively.
         """
         try:
-            response = httpx.get(
-                IDENTITY_ENDPOINT,
-                timeout=IDENTITY_TIMEOUT_SECONDS,
-                trust_env=False,
-            )
+            response = pooled_get(IDENTITY_ENDPOINT, IDENTITY_TIMEOUT_SECONDS)
             if response.status_code != 200:
                 raise ExecutionLayerError(
                     f"Unexpected HTTP {response.status_code} from /api/tool/identity: "

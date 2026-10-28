@@ -496,6 +496,12 @@ def extrude_feature(
     feature_type='cut': material removal, requires depth and existing solid body.
     feature_type='revolve': solid of revolution — angle in DEGREES (default 360 = full revolve); axis defined by axis_x1/y1 to axis_x2/y2 (the sketch's construction centerline on that line is the axis of revolution; a dedicated one is added if the sketch has none).
     is_cut (revolve): True revolves a CUT — the swept profile removes material instead of adding a boss (default False = boss).
+    is_cut (sweep): True makes the sweep a CUT — InsertCutSwept5 instead of InsertProtrusionSwept4, on the SAME
+        profile (mark 1) / path (mark 4) selection, so nothing else about how you call a sweep changes. Verified by
+        the body volume actually DECREASING (measured on the unrounded volume — a d4 circle swept along 30 mm
+        removes 3.77e-7 m3 = 377 mm3, which the rounded 'volume' echo (R6 of a m3 value = 1e-6 m3 granularity)
+        shows as NO change at all) plus the feature being in the tree, so a profile
+        swept through air fails SWEEP_CUT_VOLUME_NOT_REDUCED rather than reporting a cut you do not have.
     feature_type='sweep': sweeps profile along a path — requires path_sketch (name of the path sketch).
     feature_type='loft': lofts through multiple profiles — requires profiles (JSON array of sketch names, e.g. '[\"Sketch1\",\"Sketch2\"]').
     reverse (boss/cut): flip the feature direction. Needed e.g. for a cut/boss sketched on a part FACE, where the material is on the opposite side from the default.
@@ -712,6 +718,61 @@ def add_cosmetic_thread(
             "end_type": end_type,
             "depth": depth,
             "note": note,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: add_draft
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def add_draft(
+    face_indices: str,
+    neutral_face_index: Annotated[int, Field(ge=0, description="Planar face the drafted walls stay attached to (the neutral plane), from analyze_model(analysis_type='faces')")],
+    angle: Annotated[float, Field(gt=0, le=1.570796, description="Draft angle in RADIANS — 3 deg = 0.052360, 5 deg = 0.087266, 8 deg = 0.139626. NOT degrees (unlike extrude_feature's angle)")],
+    propagate: Annotated[int, Field(ge=0, le=4, description="swDraftFacePropagationType_e: 0=none (only the listed faces, default), 1=next tangent faces on the base neutral plane, 2=all neighbours of the neutral plane, 3=neighbours on inner loops, 4=neighbours on the outer loop (the sides of a box about its bottom face)")] = 0,
+    flip_direction: bool = False,
+    volume_expect: Literal["any", "increase", "decrease"] = "any",
+) -> str:
+    """DRAFT selected PLANAR faces about a neutral plane face — the wall taper a casting or molded part
+    needs to release from its mould. One feature drafts all the faces you list.
+    face_indices: JSON array STRING of face indices from analyze_model(analysis_type='faces'), e.g.
+        "[1,2,3,4]" — the walls to taper. They must be PLANES; a cylindrical or conical face fails
+        DRAFT_FACE_NOT_PLANAR (this is InsertMultiFaceDraft in face-draft mode, which tilts flat walls).
+    neutral_face_index: the planar face the taper is measured from (e.g. the bottom face of a casting).
+        Selected with MARK 1, the API Help's direction/neutral mark; the drafted faces take MARK 2. It
+        must not be in face_indices.
+    angle: RADIANS, not degrees — InsertMultiFaceDraft takes radians (3 deg = 0.052360). This is
+        deliberately different from extrude_feature's angle, which is degrees. A degrees value here would
+        taper 57x too far, and the tool refuses it: it re-reads every drafted face's normal after the
+        rebuild and fails DRAFT_ANGLE_MISMATCH unless each tilted by exactly the angle you asked for.
+    flip_direction: which side of the neutral plane the wall tapers toward. The tilt magnitude is the
+        same either way, so set volume_expect to 'increase' or 'decrease' — that is the assertion that
+        tells the two flips apart (an inward draft of a block's walls decreases the volume).
+    propagate: 0 (default) drafts exactly the faces you listed. 1-4 pull neighbouring faces in, which
+        can change the face enumeration; the tool then fails DRAFT_FACE_COUNT_CHANGED instead of
+        comparing faces that no longer line up, so prefer 0 with an explicit list.
+    Verification after the rebuild is measured, not assumed: the created feature is in the tree, its own
+        IDraftFeatureData2.Angle equals the request, every drafted face tilted by that angle, the neutral
+        face did NOT tilt (that is the mark-swap signature), the FACE COUNT is unchanged, and the
+        unrounded volume moved in the declared direction. Rejected input changes nothing at all.
+    On COMPLETED result_geometry carries {draft, draft_type, parent_feature, angle_rad, angle_deg,
+        angle_applied_rad, flip_direction, flip_applied, propagate, propagate_applied,
+        neutral_face_index, neutral_normal_before, neutral_tilt_rad, drafted_faces [{face_index,
+        normal_before, normal_after, tilt_rad, tilt_deg}], max_tilt_error_rad, volume_before,
+        volume_after, volume_delta, volume_direction (unrounded m3), volume_expect, faces, faces_before,
+        edges, edges_before, vertices, vertices_before, face_count_unchanged, and draft_kind,
+        faces_to_draft_count, neutral_face_area when this definition exposes them}.
+    Requires an active PART document."""
+    return _call(
+        "add_draft",
+        {
+            "face_indices": face_indices,
+            "neutral_face_index": neutral_face_index,
+            "angle": angle,
+            "propagate": propagate,
+            "flip_direction": flip_direction,
+            "volume_expect": volume_expect,
         },
     )
 
@@ -2534,7 +2595,10 @@ def submit_feature_graph(graph: str, fresh_document: bool = True) -> str:
 
     Returns the compiler's per-node report: COMPLETED n/n, or FAILED with a feature-level error
     and how far it got. CAD ops are NOT transactional — on failure partial geometry remains
-    (reported, never hidden). The adapter resyncs state_version after every run, so subsequent
+    (reported, never hidden). A COMPLETED line can also carry WARNINGS(n) — a non-fatal finding
+    (e.g. MATERIAL_NOT_FOUND, where the geometry is built and only the document property is
+    missing): keep the part, fix the property with set_part_material, do not resubmit the graph.
+    The adapter resyncs state_version after every run, so subsequent
     normal tools keep working. Verify the result objectively (analyze_model / compare_parts) —
     never assume."""
     try:

@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -277,6 +278,7 @@ def test_confirmation_requeues_when_summary_changes(
             action["payload"],
             action["risk"],
             action["summary"] + " Reassessed.",
+            {},  # the 4th value is the state handed to an executor; unused by this stub
         ),
     )
     refreshed = cad_env.orchestrator.confirm_action(
@@ -1166,12 +1168,19 @@ def test_finish_job_reuses_unchanged_post_verify(cad_env, tmp_path):
 
     assert finished["status"] == "completed"
     assert finished["verification"]["deep_checks_reused"] is True
-    # The cheap counter WAS consulted...
-    assert len(cad_env.backend.cheap_probes) == probes_before + 1
-    assert cad_env.backend.cheap_probes[-1] == "current_state_version"
-    # ...and the expensive path was NOT: no verify_state, no analyze_model.
+    # SPEED #6: the freshness proof IS the state _post_verify already reads (its state_version
+    # plus its identity, compared by _stamp_matches), so finish_job no longer pays a separate
+    # GET /api/tool/state for the same fact.
+    assert cad_env.backend.cheap_probes[probes_before] == "identity"
+    assert "current_state_version" not in cad_env.backend.cheap_probes[probes_before:]
+    # ...and the expensive path was NOT: no verify_state, no analyze_model. The only backend
+    # call finish_job adds now is its own document close (AUTOCLOSE feature), which re-checks
+    # the identity through the cheap identity probe rather than a feature walk.
     new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
-    assert new_calls == [], new_calls
+    assert new_calls == ["close_document"], new_calls
+    assert finished["closed_document"]["title"] == "out.SLDPRT"
+    assert finished["closed_document"]["path"] == str(tmp_path / "out.SLDPRT")
+    assert finished["document_left_open"] is None
     assert finished["verification"]["all_completed"] is True
     assert finished["trust_level"] == "verified"
 
@@ -1187,7 +1196,8 @@ def test_finish_job_reverifies_when_state_version_advanced(cad_env, tmp_path):
     assert finished["status"] == "completed"
     assert finished["verification"].get("deep_checks_reused") is not True
     new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
-    assert "verify_state" in [name for name, _p in cad_env.backend.events]
+    # the advanced counter is read from the identity response, no feature walk needed
+    assert "identity" in [name for name, _p in cad_env.backend.events]
     assert new_calls.count("analyze_model") == 2, new_calls
 
 
@@ -1206,7 +1216,7 @@ def test_finish_job_reverifies_when_document_switched(cad_env, tmp_path):
 
     new_calls = [tool for tool, _p in cad_env.backend.calls[calls_before:]]
     assert new_calls.count("analyze_model") == 2, new_calls
-    assert [e for e, _p in cad_env.backend.events[calls_before:] if e == "verify_state"]
+    assert [e for e, _p in cad_env.backend.events[calls_before:] if e == "identity"]
     # The switch is detected and the job does NOT come back verified.
     assert finished["status"] != "completed"
     assert finished["verification"]["all_completed"] is False
@@ -1240,19 +1250,26 @@ def test_measure_backend_calls_for_typical_build_save_finish(cad_env, tmp_path):
     #   build (fresh doc): open + 2 analyze + begin + commit execute calls, verify_state x2;
     #   save: assess verify_state + execute verify_state + 2 analyze + save execute, post verify_state;
     #   finish: full re-verify (verify_state + 2 analyze).
-    # AFTER: the save assessment/execution guards use GET /api/tool/identity (identity-only
-    # cadState) and finish_job reuses the stamp, so the whole flow pays verify_state only
-    # where CAD content is genuinely consumed (post-open, and after each write).
+    # AFTER IDENTITY task C: the save guards used GET /api/tool/identity and finish_job reused
+    # the stamp, so verify_state ran only post-open, after each write and in the finish.
+    # AFTER SPEED #1/#2/#3/#6 (this run):
+    #   build: post-open check and the post-graph _post_verify are identity reads;
+    #   save: ONE identity read covers ask+confirm+execute (the confirmed write no longer
+    #          re-probes, #3) and the post-save _post_verify is an identity read;
+    #   finish: the stamp is compared against the state _post_verify already reads (#6), then
+    #          one close_document write (#AUTOCLOSE).
+    # => the whole 6-node build + save + finish flow now pays ZERO feature-tree walks, while
+    # every identity gate and every geometry verdict still runs on its own data.
     assert after_save == 8, after_save
-    assert finish_calls == [], finish_calls
-    assert total == 8, total
-    # Post-open, post-build, post-save, and the finish's own identity re-check inside
-    # _post_verify (its deep checks come from the stamp, so no analyze_model runs).
-    assert verify_states == 4, verify_states
+    assert finish_calls == ["close_document"], finish_calls
+    assert total == 9, total
+    assert verify_states == 0, verify_states
     identities = [name for name, _p in cad_env.backend.events].count("identity")
-    # save assessment + confirm-time reassessment + save execution guards
-    assert identities == 3, identities
-    assert cad_env.backend.cheap_probes[-1] == "current_state_version"
+    # post-open + post-graph + save ask + confirm + post-save + finish + the close re-check
+    assert identities == 7, identities
+    assert cad_env.backend.cheap_probes[-1] == "identity"
+    assert "current_state_version" not in cad_env.backend.cheap_probes
+    assert "identity_fallback_verify_state" not in cad_env.backend.cheap_probes
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1509,6 +1526,12 @@ def test_drawing_switch_is_still_detected_via_the_verify_state_fallback(
 # AFTER (identity-only guards):
 #   3-edit batch:   7 execute calls, verify_state x2 (initial + post), identity x3
 #   3-step drawing: 7 execute calls, verify_state x1 (post), identity x8
+# AFTER SPEED #3/#6 (post-verify reads identity too, and reuses the last step's read instead
+# of reading the same document twice):
+#   3-edit batch:   7 execute calls, verify_state x1 (the pre-write read only), identity x3
+#   3-step drawing: 7 execute calls, verify_state x0,                     identity x8
+# The identity probe reports the same fields the guards compare (title/path/type/isDirty/
+# stateVersion), so every predicate runs on identical data — only the feature-tree walk left.
 # -----------------------------------------------------------------------------
 
 
@@ -1536,7 +1559,9 @@ def test_measure_backend_calls_for_a_three_edit_batch(cad_env):
     assert tools.count("analyze_model") == 2
     # the per-edit guards are identity probes, not feature walks
     assert _count_events(cad_env.backend, "identity") == 3
-    assert _count_events(cad_env.backend, "verify_state") == 2
+    # only the pre-write read still walks the feature tree: the post-verify gate needs no
+    # second read because it reuses the last step's identity (#3/#6)
+    assert _count_events(cad_env.backend, "verify_state") == 1
     assert "identity_fallback_verify_state" not in cad_env.backend.cheap_probes
 
 
@@ -1562,8 +1587,8 @@ def test_measure_backend_calls_for_a_three_step_drawing_workflow(cad_env):
     assert tools.count("add_drawing_view") == 3
     # every identity-only guard (pre-check, created-check, 3x before/after) is the probe
     assert _count_events(cad_env.backend, "identity") == 8
-    # only the final _post_verify still walks the feature tree
-    assert _count_events(cad_env.backend, "verify_state") == 1
+    # and now ZERO feature walks: the post-verify reuses the last step's identity read (#3/#6)
+    assert _count_events(cad_env.backend, "verify_state") == 0
     assert "identity_fallback_verify_state" not in cad_env.backend.cheap_probes
 
 
@@ -1633,6 +1658,172 @@ def test_fresh_feature_graph_failure_reports_the_discarded_created_document(cad_
     assert set(result) == _FAILURE_ENVELOPE_KEYS
     job = cad_env.store.load("job-1", cad_env.token)
     assert job["expected_document"]["path"] == str(cad_env.source)
+
+
+# -----------------------------------------------------------------------------
+# MATERIAL-NONFATAL: a graph-level material the library does not contain is a WARNING on a
+# completed build, never a reason to discard finished geometry. The compiler decides which code
+# is exempt (pycompiler/tests/test_compiler.py); these prove the orchestrator commits and reports
+# it — and that nothing else about the failure/rollback contract moved.
+# -----------------------------------------------------------------------------
+def _graph_with_material(name, library=None):
+    material = {"name": name} if library is None else {"name": name, "library": library}
+    return {
+        "schema_version": "0.8.0-draft",
+        "units": "meters",
+        "material": material,
+        "nodes": [
+            {"id": "n1", "type": "box", "ref": {"datum": "top"},
+             "width": 0.05, "depth": 0.05, "height": 0.02},
+        ],
+    }
+
+
+def test_feature_graph_material_warning_keeps_the_geometry_committed(unbound_env):
+    env = unbound_env
+    result = env.orchestrator.feature_graph(
+        env.job_id,
+        env.token,
+        json.dumps(_graph_with_material("HT200")),
+        fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    # the warning is a warning: error stays null, so nothing here reads as a failed build
+    assert result["error"] is None
+    assert [w["code"] for w in result["warnings"]] == ["MATERIAL_NOT_FOUND"]
+    warning = result["warnings"][0]
+    assert warning["material"] == "HT200"
+    assert warning["library"] == "SolidWorks Materials"
+    assert warning["step"] == "set_part_material"
+    assert warning["message"] and warning["hint"]
+    # the node that ran is reported; the material node is NOT among the completed steps
+    assert result["completed_steps"] == ["n1"]
+    assert result["partial_state"]["compiler"]["node_log"][-1]["id"] == "_material"
+    # committed, not recovered
+    tools = [tool for tool, _params in env.backend.events]
+    assert "commit_undo_scope" in tools
+    assert "rollback_undo_scope" not in tools
+    # and the built part is still the job's document — nothing discarded, nothing restored
+    assert "created_document_discarded" not in result
+    assert result["target_document"] == "Part1"
+    job = env.store.load(env.job_id, env.token)
+    assert job["expected_document"]["title"] == "Part1"
+
+
+def test_feature_graph_valid_material_applies_with_no_warning(unbound_env):
+    env = unbound_env
+    result = env.orchestrator.feature_graph(
+        env.job_id,
+        env.token,
+        json.dumps(_graph_with_material("1060 Alloy")),
+        fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    # an absent key means "nothing to report"; a null warnings list would read as a dropped one
+    assert "warnings" not in result
+    assert result["completed_steps"] == ["n1", "_material"]
+
+
+def test_feature_graph_material_warning_names_the_material_actually_on_the_part(unbound_env):
+    # A part that already carries a material keeps it, and the warning must say so — a message
+    # claiming "no material" would send the user to fix the wrong thing (and a weight check would
+    # silently read the old material's properties).
+    env = unbound_env
+    env.backend.material_on_part = "Gray Cast Iron"
+    env.backend.material_library_on_part = "SolidWorks Materials"
+
+    result = env.orchestrator.feature_graph(
+        env.job_id,
+        env.token,
+        json.dumps(_graph_with_material("HT200")),
+        fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    warning = result["warnings"][0]
+    assert warning["code"] == "MATERIAL_NOT_FOUND"
+    assert warning["material"] == "HT200"
+    assert warning["material_on_part"] == "Gray Cast Iron"
+    assert warning["library_on_part"] == "SolidWorks Materials"
+    # the pre-existing material is untouched, and the run still committed
+    assert env.backend.material_on_part == "Gray Cast Iron"
+    assert result["error"] is None
+    tools = [tool for tool, _params in env.backend.events]
+    assert "commit_undo_scope" in tools and "rollback_undo_scope" not in tools
+
+
+def test_feature_graph_material_not_applied_rolls_back(cad_env):
+    # MATERIAL_NOT_APPLIED is present-but-refused: a real failure, fatal, and the geometry is
+    # rolled back like any other node failure. Only the positively-absent name is exempt.
+    cad_env.backend.feature_graph_handler = None
+    result = cad_env.orchestrator.feature_graph(
+        "job-1",
+        cad_env.token,
+        json.dumps(_graph_with_material("Refused Material")),
+        fresh_document=True,
+    )
+
+    assert result["status"] == "failed", result
+    assert result["error"]["code"] == "MATERIAL_NOT_APPLIED"
+    assert result["error"]["node_id"] == "_material"
+    assert "warnings" not in result
+    assert result["recovery_status"] == "rolled_back"
+    assert result["completed_steps"] == ["n1"]
+    tools = [tool for tool, _params in cad_env.backend.events]
+    assert "rollback_undo_scope" in tools
+    assert "commit_undo_scope" not in tools
+
+
+def test_material_not_found_reported_as_a_failure_still_rolls_back(cad_env):
+    # The exemption lives in the compiler's STATUS, not in a code name checked here. If
+    # set_part_material fails the graph — with MATERIAL_NOT_FOUND included — the recovery path is
+    # exactly the one every other node failure takes.
+    def feature_graph_handler(_graph, _fresh_document):
+        return {
+            "status": "FAILED",
+            "stateVersion": 7,
+            "compiler": {
+                "nodes_completed": 1,
+                "warnings": [],
+                "node_log": [
+                    {"id": "n1", "status": "COMPLETED"},
+                    {"id": "_material", "status": "FAILED"},
+                ],
+            },
+            "error": {"code": "MATERIAL_NOT_FOUND", "message": "material not found"},
+        }
+
+    cad_env.backend.feature_graph_handler = feature_graph_handler
+    result = cad_env.orchestrator.feature_graph(
+        "job-1",
+        cad_env.token,
+        json.dumps(_graph_with_material("HT200")),
+        fresh_document=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["recovery_status"] == "rolled_back"
+    assert "warnings" not in result
+    assert result["created_document_discarded"] is True
+    assert result["restored_active_document"] == str(cad_env.source)
+    assert set(result) == _FAILURE_ENVELOPE_KEYS
+
+
+def test_document_edit_material_failure_is_unchanged(cad_env):
+    # apply_document_edits is not the feature-graph path: an unknown material there stays a step
+    # failure with a rollback. The exempt step is the graph's own post-geometry material op.
+    result = cad_env.orchestrator.document_edits(
+        "job-1",
+        cad_env.token,
+        json.dumps([_edit("set_part_material", material_name="HT200")]),
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "MATERIAL_NOT_FOUND"
+    assert result["recovery_status"] == "rolled_back"
+    assert result["completed_steps"] == []
 
 
 def test_drawing_step_failure_reports_the_discarded_created_drawing(cad_env):
@@ -1712,3 +1903,377 @@ def test_failure_without_a_created_document_has_no_discard_fields(cad_env, tmp_p
     # document_edits writes really did happen in part.SLDPRT and the rollback restored it,
     # so target_document stays the restored document here — unchanged pre-existing behavior.
     assert result["target_document"] == str(cad_env.source)
+
+
+# ---------------------------------------------------------------------------------------------
+# AUTOCLOSE — finish_job closes the document the job itself produced
+#
+# SLDWORKS.exe is one process holding every open document (measured at 5+ GB private memory),
+# so a finished job releases its own document as soon as the work is verified. The gate is
+# deliberately narrow: only a document the job CREATED or OPENED, that is saved to a path,
+# that is not dirty, and that the caller did not ask to keep, is ever closed. Anything else is
+# reported in document_left_open with a reason, and a failed close is reported in close_error
+# WITHOUT changing the completed verdict — verified CAD work is never re-judged by cleanup.
+# ---------------------------------------------------------------------------------------------
+def _autoclose_build(env, job_id, token, tmp_path, name="autoclose.SLDPRT", save=True):
+    """The canonical flow for a document the job produced: fresh build + confirmed first save."""
+    built = env.orchestrator.feature_graph(
+        job_id, token, json.dumps(_six_node_graph()), fresh_document=True
+    )
+    assert built["status"] == "completed", built
+    if not save:
+        return built, None
+    target = tmp_path / name
+    pending = env.orchestrator.save_or_export(
+        job_id, token, "save", file_path=str(target)
+    )
+    assert pending["status"] == "pending_confirmation", pending
+    confirmation = env.orchestrator.request_confirmation(
+        job_id, token, pending["action_id"]
+    )
+    saved = env.orchestrator.confirm_action(
+        job_id,
+        token,
+        pending["action_id"],
+        confirmation["confirmation_token"],
+        confirmation["confirmation_text"],
+        confirmation["action_summary"],
+    )
+    assert saved["status"] == "completed", saved
+    return built, saved
+
+
+def test_finish_job_closes_the_document_its_job_created_and_saved(unbound_env, tmp_path):
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+    target = tmp_path / "autoclose.SLDPRT"
+
+    finished = env.orchestrator.finish_job(env.job_id, env.token)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] == {
+        "title": target.name,
+        "path": str(target),
+        "type": "PART",
+    }
+    assert finished["document_left_open"] is None
+    assert "close_error" not in finished
+    closes = [
+        (tool, params)
+        for tool, params in env.backend.calls
+        if tool == "close_document"
+    ]
+    assert len(closes) == 1, closes
+    # The existing identity-guarded path with save=False: it can neither save nor discard.
+    assert closes[0][1] == {
+        "save": False,
+        "close_all": False,
+        "expected_title": target.name,
+        "expected_path": str(target),
+        "expected_type": "PART",
+    }
+    job = env.store.load(env.job_id, env.token)
+    assert job["status"] == "completed"
+    assert job["target_closed"] is True
+    assert job["closed_document"]["path"] == str(target)
+
+
+def test_finish_job_leaves_a_dirty_document_open(unbound_env, tmp_path):
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+    # The saved document changed after the last verification (a manual CAD edit): closing now
+    # would either discard that work or silently save it.
+    env.backend.state["isDirty"] = True
+
+    finished = env.orchestrator.finish_job(env.job_id, env.token, keep_open=False)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] is None
+    assert finished["document_left_open"]["reason"] == "dirty"
+    assert finished["document_left_open"]["document"]["path"] == str(
+        tmp_path / "autoclose.SLDPRT"
+    )
+    assert not [
+        tool for tool, _params in env.backend.calls if tool == "close_document"
+    ]
+    assert env.store.load(env.job_id, env.token).get("target_closed") is None
+
+
+def test_finish_job_leaves_an_unsaved_document_open(unbound_env, tmp_path):
+    env = unbound_env
+    # Built but never saved: the document is still untitled in SolidWorks.
+    _autoclose_build(env, env.job_id, env.token, tmp_path, save=False)
+
+    finished = env.orchestrator.finish_job(env.job_id, env.token)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] is None
+    assert finished["document_left_open"]["reason"] == "unsaved"
+    assert finished["document_left_open"]["document"]["path"] == ""
+    assert not [
+        tool for tool, _params in env.backend.calls if tool == "close_document"
+    ]
+
+
+def test_finish_job_never_closes_a_pre_existing_document(cad_env):
+    # The normal work-on-an-existing-file flow: the document was already active when the job
+    # started, and it is saved and clean — exactly the document cleanup must not touch.
+    edits = cad_env.orchestrator.document_edits(
+        "job-1",
+        cad_env.token,
+        json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
+    )
+    assert edits["status"] == "completed", edits
+    job = cad_env.store.load("job-1", cad_env.token)
+    assert job["expected_document"]["path"] == str(cad_env.source)
+    assert job.get("document_origin") not in ("created", "opened")
+
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] is None
+    assert finished["document_left_open"]["reason"] == "pre_existing"
+    assert not [
+        tool for tool, _params in cad_env.backend.calls if tool == "close_document"
+    ]
+    after = cad_env.store.load("job-1", cad_env.token)
+    assert after["expected_document"]["path"] == str(cad_env.source)
+    assert after.get("target_closed") is None
+
+
+def test_finish_job_honours_keep_open(unbound_env, tmp_path):
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+
+    finished = env.orchestrator.finish_job(env.job_id, env.token, keep_open=True)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] is None
+    assert finished["document_left_open"]["reason"] == "keep_open"
+    assert not [
+        tool for tool, _params in env.backend.calls if tool == "close_document"
+    ]
+    assert env.store.load(env.job_id, env.token).get("target_closed") is None
+
+
+def test_finish_job_reports_a_close_failure_without_failing_the_job(unbound_env, tmp_path):
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+    env.backend.call_handler = lambda tool, _params: (
+        _failed("COM_ERROR") if tool == "close_document" else None
+    )
+
+    finished = env.orchestrator.finish_job(env.job_id, env.token)
+
+    # The CAD work is verified: a cleanup failure must not change the verdict.
+    assert finished["status"] == "completed", finished
+    assert finished["trust_level"] == "verified"
+    assert finished["verification_status"] == "passed"
+    assert finished["closed_document"] is None
+    assert finished["document_left_open"]["reason"] == "close_failed"
+    assert finished["close_error"]["code"] == "COM_ERROR"
+    job = env.store.load(env.job_id, env.token)
+    assert job["status"] == "completed"
+    assert job.get("target_closed") is None
+    # The document stays bound to the job, so its identity remains on record.
+    assert job["expected_document"]["path"] == str(tmp_path / "autoclose.SLDPRT")
+
+
+def test_finish_job_reports_a_close_that_did_not_take_effect(unbound_env, tmp_path):
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+    before_state = dict(env.backend.state)
+
+    def handler(tool, _params):
+        if tool == "close_document":
+            # Reports success while changing nothing: the re-check has to catch that.
+            return {
+                "status": "COMPLETED",
+                "stateVersion": before_state.get("stateVersion"),
+                "cadState": dict(before_state),
+                "error": None,
+            }
+        return None
+
+    env.backend.call_handler = handler
+    finished = env.orchestrator.finish_job(env.job_id, env.token)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] is None
+    assert finished["close_error"]["code"] == "CLOSE_NOT_CONFIRMED"
+    assert finished["document_left_open"]["reason"] == "close_not_confirmed"
+    assert env.store.load(env.job_id, env.token).get("target_closed") is None
+
+
+def test_finish_job_auto_close_runs_inside_the_write_lock(
+    unbound_env, tmp_path, monkeypatch
+):
+    """The close happens under the same _write_lock finish_job already holds: unchanged."""
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+    lock = env.orchestrator._write_lock
+    seen = {}
+    real_close = env.orchestrator._close_document
+
+    def spy(expected_identity=None, *, save=False, close_all=False):
+        # While the close is in flight, no other thread may hold the orchestrator lock.
+        def probe():
+            acquired = lock.acquire(blocking=False)
+            seen["other_thread_acquired"] = acquired
+            if acquired:
+                lock.release()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+        return real_close(expected_identity, save=save, close_all=close_all)
+
+    monkeypatch.setattr(env.orchestrator, "_close_document", spy)
+    finished = env.orchestrator.finish_job(env.job_id, env.token)
+
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"]["path"] == str(tmp_path / "autoclose.SLDPRT")
+    assert seen == {"other_thread_acquired": False}
+    # Released once finish_job returns — the close path leaks no lock.
+    assert lock.acquire(blocking=False) is True
+    lock.release()
+
+
+def test_finish_job_of_an_already_closed_target_reports_no_new_close(cad_env):
+    closed = cad_env.orchestrator.save_or_export("job-1", cad_env.token, "close")
+    assert closed["status"] == "completed", closed
+    calls_before = len(cad_env.backend.calls)
+
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+
+    assert finished["status"] == "completed", finished
+    assert finished["document_left_open"] is None
+    assert finished["closed_document"] == closed["verification"]["closed_document"]
+    assert [tool for tool, _p in cad_env.backend.calls[calls_before:]] == []
+
+
+def test_begin_job_records_opened_when_nothing_was_active(unbound_env, tmp_path):
+    env = unbound_env
+    target = tmp_path / "made_before.SLDPRT"
+    target.write_bytes(b"saved-by-an-earlier-job")
+    opened_state = {
+        "stateVersion": 2,
+        "activeDocument": target.name,
+        "activeDocumentPath": str(target),
+        "documentType": "PART",
+        "activeSketch": None,
+        "features": [],
+        "dimensions": [],
+        "isDirty": False,
+    }
+
+    def handler(tool, _params):
+        if tool == "open_document":
+            env.backend.state = dict(opened_state)
+        return None
+
+    env.backend.call_handler = handler
+    started = env.orchestrator.begin_job("work on the part I just built", str(target))
+    assert started["status"] == "completed", started
+    job = env.store.load(started["job_id"], started["job_token"])
+    # Nothing was active before the open, so this job is what brought the document in.
+    assert job["document_origin"] == "opened"
+
+    finished = env.orchestrator.finish_job(started["job_id"], started["job_token"])
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"]["path"] == str(target)
+
+
+def test_begin_job_records_pre_existing_when_a_document_was_active(cad_env, tmp_path):
+    other = tmp_path / "other.SLDPRT"
+    other.write_bytes(b"other")
+    started = cad_env.orchestrator.begin_job("open a file", str(other))
+    assert started["status"] == "completed", started
+
+    job = cad_env.store.load(started["job_id"], started["job_token"])
+    # part.SLDPRT was on screen, so that file may already have been open in the background.
+    # With no way to enumerate open documents, the job must not claim it.
+    assert job["document_origin"] == "pre_existing"
+
+
+def test_begin_job_records_pre_existing_with_no_target(cad_env):
+    # One module-level backend per test: an env fixture per test, never two in one signature.
+    started = cad_env.orchestrator.begin_job("attach to whatever is open")
+    assert started["status"] == "completed", started
+    job = cad_env.store.load(started["job_id"], started["job_token"])
+    assert job["document_origin"] == "pre_existing"
+
+
+def test_begin_job_records_unbound_with_no_target(unbound_env):
+    unbound = unbound_env.orchestrator.begin_job("no document yet")
+    assert unbound["status"] == "completed", unbound
+    job = unbound_env.store.load(unbound["job_id"], unbound["job_token"])
+    assert job["document_origin"] == "unbound"
+
+
+def test_created_document_rollback_restores_the_pre_job_origin(cad_env):
+    # open_new_part reports a document that verify_state does not agree is active, so the
+    # created document is discarded and the job is back on the file it never created. The
+    # origin has to follow: leaving it "created" would let a later close name a document the
+    # job no longer owns.
+    imposter = {
+        "stateVersion": 3,
+        "activeDocument": "PartZ",
+        "activeDocumentPath": "",
+        "documentType": "PART",
+        "activeSketch": None,
+        "features": [],
+        "dimensions": [],
+    }
+
+    def handler(tool, _params):
+        if tool == "open_new_part":
+            return {
+                "status": "COMPLETED",
+                "stateVersion": 3,
+                "cadState": dict(imposter),
+                "error": None,
+            }
+        if tool == "close_document":
+            # The discard succeeds and leaves the pre-existing document on screen.
+            return {
+                "status": "COMPLETED",
+                "stateVersion": 3,
+                "cadState": dict(cad_env.backend.state),
+                "error": None,
+            }
+        return None
+
+    cad_env.backend.call_handler = handler
+    built = cad_env.orchestrator.feature_graph(
+        "job-1",
+        cad_env.token,
+        json.dumps({"nodes": []}),
+        fresh_document=True,
+    )
+    assert built["status"] != "completed", built
+
+    job = cad_env.store.load("job-1", cad_env.token)
+    assert job["recovery_status"] == "rolled_back"
+    assert job["document_origin"] == "pre_existing"
+    assert job["expected_document"]["path"] == str(cad_env.source)
+
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+    assert finished["status"] == "completed", finished
+    assert finished["closed_document"] is None
+    assert finished["document_left_open"]["reason"] == "pre_existing"
+
+
+def test_finish_job_close_keeps_the_verified_pre_close_state(unbound_env, tmp_path):
+    """Cleanup may not rewrite the verdict: partial_state stays the verified document."""
+    env = unbound_env
+    _autoclose_build(env, env.job_id, env.token, tmp_path)
+
+    finished = env.orchestrator.finish_job(env.job_id, env.token)
+
+    assert finished["status"] == "completed"
+    assert finished["partial_state"]["activeDocumentPath"] == str(
+        tmp_path / "autoclose.SLDPRT"
+    )
+    assert finished["target_document"] == str(tmp_path / "autoclose.SLDPRT")
+    assert finished["verification"]["all_completed"] is True

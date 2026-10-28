@@ -1,11 +1,11 @@
 ---
 name: solidworks-cad
-description: Use for SolidWorks inspection, creation, editing, drawing reconstruction, saving, exporting, and validation through the dedicated nine-tool MCP workflow, including pictorial, sectional, three-view, threaded-fastener, and part-drawing reasoning, inline plan checkpoints, and directional verification.
+description: Use for SolidWorks work AND for reading engineering drawings — a 三视图 / 零件图 / 工程图 / pictorial / sectional drawing image that must be modelled or rebuilt as a SolidWorks 3D part, plus inspection, creation, editing, saving, exporting and objective verification through the dedicated mcp__solidworks__ tools. Takes precedence over generic CAD skills (build123d, CadQuery, OpenSCAD, STEP scripting) whenever the target is SolidWorks: never install packages or drive another kernel — the SolidWorks MCP tools and the Feature Graph are the only route.
 ---
 
 # SolidWorks CAD
 
-Operate SolidWorks only through these nine high-level `mcp__solidworks__` tools.
+Operate SolidWorks only through these ten high-level `mcp__solidworks__` tools.
 Approved support tools for workflow assistance: `ask_user_question`, `todo_write`,
 `skill`, and `modlens_read_image` (local image file paths only; URL forms such as
 `http://` are rejected).
@@ -28,11 +28,12 @@ result is compact single-line JSON. `start_job` returns `job_id` and
 | `request_confirmation` | Refresh one-time confirmation data for a pending high-risk action. |
 | `confirm_action` | Execute exactly one action after fresh, explicit user approval. |
 | `finish_job` | Run final objective verification and close the authenticated job. |
+| `read_drawing_region` | Zoom part of a drawing image (grid cell or pixel box) so small dimensions can be read; read-only, needs no job and touches no CAD. |
 
 There is no model-visible low-level fallback. Do not use SolidWorks COM, Shell,
 macros, scripts, REST endpoints, desktop automation, or legacy low-level CAD MCP
-tools. Report `CAPABILITY_GAP` when the nine tools cannot express or inspect the
-requested operation. If the nine-tool surface is unavailable, report
+tools. Report `CAPABILITY_GAP` when the ten tools cannot express or inspect the
+requested operation. If the ten-tool surface is unavailable, report
 `MCP_UNAVAILABLE` and make no CAD call.
 
 ## Core Workflow
@@ -74,6 +75,12 @@ This flow applies only when geometry is inferred from drawings or images.
 At node A, start a job only when deep inspection of an active CAD document is
 needed; this is not modeling, and node F reuses that job. Attached images can be
 analyzed before any job exists.
+
+Node A reads the drawing through `read_drawing_region`, not by eye alone: overview
+with the labelled grid first, then a 2–4× zoom of every dimension cluster into a
+dimension ledger, and any value that stays illegible is `UNKNOWN` and asked — never
+estimated from pixels. Follow
+[drawing intake](references/drawing-intake.md) before the ledger is considered done.
 
 ```mermaid
 flowchart TD
@@ -176,12 +183,12 @@ do not invent unsupported flags. On another failure emit `RETRY_EXHAUSTED`.
 
 For a new part or assembly:
 
-1. Default pre-build reading is THREE calls: `feature_graph_quickref` (1-2
-   pages, generated from the schema — every node type with its required and
-   optional fields, units, and a one-line meaning), `forward`, and the one
-   mapping topic that matches the target (`mapping_part`,
-   `mapping_sheet_metal`, or `mapping_assembly`). Read `verification` when the
-   build will be judged on objective evidence.
+1. Default pre-build reading is THREE calls plus paging:
+   `feature_graph_quickref` (1-3 pages, generated from the schema — every node
+   type with its required and optional fields, units, and a one-line meaning),
+   `forward`, and the one mapping topic that matches the target
+   (`mapping_part`, `mapping_sheet_metal`, or `mapping_assembly`). Read
+   `verification` when the build will be judged on objective evidence.
 2. `feature_graph_quickref` is enough to write a graph. Read
    `feature_graph_schema` ONLY for a construct the quickref cannot settle —
    an end condition, a grammar rule, or a worked example — and then jump
@@ -195,6 +202,18 @@ For a new part or assembly:
 5. Call `submit_feature_graph(..., fresh_document=true)`.
 6. Check compiler node results, rebuilt CAD state, topology, dimensions, bounds,
    and physical properties available in `partial_state` and `verification`.
+
+A graph-level `material` that the library positively does not contain is reported in
+`warnings` as `MATERIAL_NOT_FOUND` while the status stays `completed`: the geometry is kept, and
+the warning names the material actually on the part afterwards (`material_on_part`, which may be
+one it already had). `MATERIAL_NOT_APPLIED` — present in the library but not applied, or a library
+that could not be read — is a real failure and rolls the graph back. Never substitute a
+similar-looking material to silence a warning: apply the exact library name, or add the specified
+material to the library, with `apply_document_edits`.
+
+Spell a material name exactly as the **loaded** library holds it, which on a localised install is
+the localised spelling (this install is Chinese: `1060 合金`, not `1060 Alloy`); the same material
+under its English spelling is positively absent from the loaded database and warns.
 
 Do not split a complete graph into low-level modeling calls. Do not invent graph
 fields, feature types, selectors, units, or references absent from the schema.

@@ -30,7 +30,14 @@
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
   config:
-    roots:
+    # `customSkillDirs` is the schema's key (dsh-skill-filesystem Config, lib/index.js:36).
+    # The previous `roots:` here was an unknown key: schemastery drops unknown keys silently, so
+    # this preset's own skills/ directory was NEVER scanned and the solidworks-cad skill was only
+    # ever visible as a project skill with cwd inside the repo. Same pattern the shipped `cordis`
+    # preset uses (config/agent-presets/cordis/agent.cordis.yml:256-260).
+    # `baseUrl` is this composition file's own URL, so the path resolves wherever the preset is
+    # installed — the installed directory's `skills` is a junction to the repo, one source.
+    customSkillDirs:
       - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
 
 - id: tool-skill

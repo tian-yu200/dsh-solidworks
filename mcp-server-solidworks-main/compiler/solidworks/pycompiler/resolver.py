@@ -147,7 +147,8 @@ def resolve_top_face(port, state_version, node_id=None):
         raise FeatureError("top face is ambiguous — multiple upward faces at the same height",
                            code="REFERENCE_AMBIGUOUS", node_id=node_id, step="resolve_top_face")
 
-    return top_i, {"face_index": top_i, "centroid_y": top_y, "point": top_face.get("point")}
+    return top_i, {"face_index": top_i, "centroid_y": top_y, "point": top_face.get("point"),
+                    "face": top_face}
 
 
 def resolve_center_on_face(face_info):
@@ -188,6 +189,257 @@ def _analyze_payload(port, state_version, analysis_type, node_id, step):
 
 def _dist3(a, b):
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def _flat_analyze_lines(resp):
+    """The `key=value` STRINGS an analyze_model scope returns (geometry / mass_properties).
+    Those scopes do not emit a JSON object: the C# side appends plain "bbox_min=[x,y,z]"-style
+    rows to a List<string>, so `_analyze_payload` (which json.loads) cannot read them."""
+    feats = (resp.get("cadState") or {}).get("features") or []
+    return [f for f in feats if isinstance(f, str)]
+
+
+def _parse_vec(text):
+    """'[1,2,3]' -> (1.0, 2.0, 3.0), or None when the row is not a 3-vector."""
+    try:
+        body = text.strip()
+        if not (body.startswith("[") and body.endswith("]")):
+            return None
+        parts = [p for p in body[1:-1].split(",") if p.strip()]
+        if len(parts) != 3:
+            return None
+        return tuple(float(p) for p in parts)
+    except (TypeError, ValueError):
+        return None
+
+
+def body_bbox(port, state_version, node_id=None):
+    """(bbox_min, bbox_max) of the solid bodies, in MODEL metres, or None.
+
+    Read from analyze_model(geometry) — the same call AddBoundingBoxResults feeds — because the
+    hole-placement breakout test needs the part's REAL extent, not the face's area. A planar
+    face's payload carries only a representative point, a normal and an area, so a hole hanging
+    off the edge of a large face is invisible to an area test (that was review defect D1). The
+    bbox is exact for the axis-aligned plate faces these drawings use; it is a bounding box, so
+    for a face that is NOT the whole silhouette it stays a necessary-condition test and the
+    post-cut circle check (compiler.py) is what closes the gap.
+
+    Memoized like every other analyze read, so a graph with many holes pays for it once.
+    """
+    key = MEMO.key("analyze_model", state_version, "geometry_bbox", "", None)
+    cached = MEMO.get(key)
+    if cached is not None:
+        return cached if cached is not False else None
+    try:
+        resp = port.execute("analyze_model",
+                            {"analysis_type": "geometry", "name": ""}, state_version)
+    except Exception:
+        resp = None
+    lo = hi = None
+    if isinstance(resp, dict) and resp.get("status") == "COMPLETED":
+        for line in _flat_analyze_lines(resp):
+            if "=" not in line:
+                continue
+            name, _sep, value = line.partition("=")
+            if name.strip() == "bbox_min":
+                lo = _parse_vec(value)
+            elif name.strip() == "bbox_max":
+                hi = _parse_vec(value)
+    result = (lo, hi) if lo is not None and hi is not None else False
+    MEMO.put(key, result)
+    return result if result is not False else None
+
+
+def check_hole_inside_extent(at, face, diameter, bbox, node_id=None):
+    """D1: reject a hole whose CIRCLE leaves the part's real extent, measured on the FACE PLANE.
+
+    `bbox` is (min, max) model-space corners from body_bbox(). The circle is projected onto the
+    face's two in-plane axes, and its extremes are compared with the body's extent along those
+    same axes. This is what an area test cannot do: on a 60x40 plate the extent is 60 x 40 mm, so
+    a d6.6 hole at x=+29.5 (edge at 30) is rejected, while the four corner holes at +-22
+    (22 + 3.3 = 25.3 < 30) pass — the case the equal-area square got exactly backwards.
+
+    Returns True when the hole is inside (or when there is nothing to measure against), and
+    raises PLACEMENT_BREAKS_OUT when it is not.
+    """
+    if not bbox:
+        return True
+    normal = face.get("normal")
+    if not (isinstance(normal, list) and len(normal) >= 3):
+        return True
+    n = _unit((float(normal[0]), float(normal[1]), float(normal[2])))
+    if n is None:
+        return True
+    # Two in-plane axes: any orthonormal pair works because the bbox is axis-aligned, so project
+    # the bbox onto each in-plane axis and take the circle's extremes along it.
+    u_axis = _any_perpendicular(n)
+    v_axis = _cross(n, u_axis)
+    lo, hi = bbox
+    radius = float(diameter) / 2.0
+    for axis in (u_axis, v_axis):
+        centre = _dot3(at, axis)
+        low = min(_dot3(lo, axis), _dot3(hi, axis))
+        high = max(_dot3(lo, axis), _dot3(hi, axis))
+        if centre - radius < low - _PLANE_TOL or centre + radius > high + _PLANE_TOL:
+            raise FeatureError(
+                "hole breaks out of the part: a d%s mm circle at %s leaves the body extent "
+                "[%s, %s] along the face axis %s (the circle needs %.6g m to %.6g m there). "
+                "Move ref.at inward, or use a smaller diameter."
+                % (_mm(float(diameter)), list(at), _mm(low), _mm(high), list(axis),
+                   centre - radius, centre + radius),
+                code="PLACEMENT_BREAKS_OUT", node_id=node_id,
+                step="check_hole_inside_extent")
+    return True
+
+
+def _mm(value):
+    return "%.4g" % (float(value) * 1000.0)
+
+
+def _dot3(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _unit(v):
+    length = math.sqrt(_dot3(v, v))
+    if length <= 1e-12:
+        return None
+    return (v[0] / length, v[1] / length, v[2] / length)
+
+
+def _any_perpendicular(n):
+    """A unit vector perpendicular to unit `n` (pick the least-aligned model axis)."""
+    candidates = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    pick = min(candidates, key=lambda c: abs(_dot3(c, n)))
+    perp = _cross(n, pick)
+    return _unit(perp) or (0.0, 0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------------------------
+# Off-centre hole placement (batch 10a)
+#
+# A hole used to land at its face's centre, because resolve_center_on_face returns (0, 0) — the
+# sketch frame's ORIGIN is the face's representative point. `ref.position: 'point'` + `ref.at`
+# names a MODEL-space point instead. The mapping needs the FACE SKETCH's own frame, which is only
+# measured once create_sketch has run (its result_geometry.frame, the same reader analyze uses),
+# so the compiler defers this call to that moment — see compiler._place_hole_2d.
+#
+# Why model space and not sketch space: a drawing gives absolute dimensions off the part's datum
+# edges, and every other anchor in this IR (face_anchor, edge_anchor, up_to) is already model
+# space. Sketch space would force the author to know the face sketch's in-plane axes, which is
+# exactly the guesswork the datum-frame table had to document. The compiler knows the frame, so
+# the author does not have to.
+# ---------------------------------------------------------------------------------------------
+
+def _frame_axes(frame):
+    """(origin, xdir, ydir) as float 3-tuples, or None when the frame is unusable."""
+    if not isinstance(frame, dict):
+        return None
+    out = []
+    for key in ("origin", "xdir", "ydir"):
+        v = frame.get(key)
+        if not (isinstance(v, list) and len(v) >= 3
+                and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in v[:3])):
+            return None
+        out.append((float(v[0]), float(v[1]), float(v[2])))
+    return tuple(out)
+
+
+def project_point_into_frame(frame, at):
+    """MODEL point -> (u, v) in the face sketch's 2-D frame, plus the out-of-plane distance.
+
+    The sketch frame is orthonormal (SolidWorks builds it from the face's plane), so the map is
+    the two dot products (at - origin) . xdir and . ydir. The third component is how far the
+    point sits off the sketch plane — the caller rejects a non-zero value, which is what makes
+    "the point must lie on the referenced face" a real check instead of a comment.
+    """
+    axes = _frame_axes(frame)
+    if axes is None:
+        raise FeatureError(
+            "the face sketch frame is missing or malformed (need origin/xdir/ydir), so an "
+            "off-centre hole cannot be placed deterministically.",
+            code="REFERENCE_UNRESOLVED", step="project_point_into_frame")
+    origin, xdir, ydir = axes
+    d = (float(at[0]) - origin[0], float(at[1]) - origin[1], float(at[2]) - origin[2])
+    u = d[0] * xdir[0] + d[1] * xdir[1] + d[2] * xdir[2]
+    v = d[0] * ydir[0] + d[1] * ydir[1] + d[2] * ydir[2]
+    # Residual along the frame's own normal (xdir x ydir) — the off-plane distance.
+    n = (xdir[1] * ydir[2] - xdir[2] * ydir[1],
+         xdir[2] * ydir[0] - xdir[0] * ydir[2],
+         xdir[0] * ydir[1] - xdir[1] * ydir[0])
+    off_plane = d[0] * n[0] + d[1] * n[1] + d[2] * n[2]
+    return u, v, off_plane
+
+
+def check_hole_on_face(at, face, diameter, node_id=None):
+    """Plan-time checks that need only the resolved FACE (no sketch frame yet).
+
+    ONE failure is catchable here: the point is not on the face's plane (a typo in the
+    third coordinate would otherwise silently cut a hole somewhere the author never named).
+    The breakout test is NOT here: it needs the part's real extent, so it lives in
+    check_hole_inside_extent(bbox), which projects the body bbox onto this face's plane.
+    An earlier version compared radius against sqrt(area)/2 and ignored `at` entirely, so a
+    hole hanging off the edge of a large face passed.
+    """
+    normal = face.get("normal")
+    point = face.get("point")
+    if not (isinstance(normal, list) and len(normal) >= 3
+            and isinstance(point, list) and len(point) >= 3):
+        return  # no plane data reported: nothing to check against (resolver already matched)
+    n = (float(normal[0]), float(normal[1]), float(normal[2]))
+    d = (float(at[0]) - float(point[0]), float(at[1]) - float(point[1]),
+         float(at[2]) - float(point[2]))
+    off = abs(d[0] * n[0] + d[1] * n[1] + d[2] * n[2])
+    if off > _PLANE_TOL:
+        raise FeatureError(
+            "hole placement point %s is %.6g m OFF the referenced face's plane (tolerance "
+            "%g m). The point must lie ON the face — read analyze_model(faces) `point`/`normal` "
+            "for that face and move the third coordinate onto it."
+            % (list(at), off, _PLANE_TOL),
+            code="PLACEMENT_OFF_FACE", node_id=node_id, step="check_hole_on_face")
+
+
+def _face_label(face_key):
+    """Human-readable face identity for messages: ('n1', 0) -> "n1 face #0".
+    The key is (BODY node id, face index) because face indices are per-body."""
+    if isinstance(face_key, tuple) and len(face_key) == 2:
+        return "%s face #%s" % (face_key[0], face_key[1])
+    return "face #%s" % (face_key,)
+
+
+def check_holes_do_not_overlap(placements, node_id=None):
+    """Reject two holes on the SAME face whose circles overlap (batch 10a).
+
+    `placements` is [(node_id, face_index, centre_uv, diameter)] for EVERY hole in the graph,
+    in node order — centred holes included (a centred hole cuts a real circle too).
+    `centre_uv` is the hole's centre in the FACE SKETCH's 2-D frame, so the comparison never
+    depends on how each hole was placed: an off-centre hole contributes its mapped (u, v), a
+    centred one the sketch origin (0, 0). Only holes on the same face are compared: two holes at
+    the same (x, z) on OPPOSITE faces of a plate are perfectly legal. Circle-vs-circle in that
+    shared 2-D frame is exact, since the frame is orthonormal (distances are preserved).
+    """
+    for i in range(len(placements)):
+        for j in range(i + 1, len(placements)):
+            a_id, a_face, a_uv, a_dia = placements[i]
+            b_id, b_face, b_uv, b_dia = placements[j]
+            if a_face != b_face:
+                continue
+            gap = math.hypot(a_uv[0] - b_uv[0], a_uv[1] - b_uv[1])
+            need = (float(a_dia) + float(b_dia)) / 2.0
+            if gap < need - 1e-9:
+                raise FeatureError(
+                    "holes '%s' and '%s' OVERLAP on %s: centres are %.6g m apart but "
+                    "their radii need %.6g m. Move one of them."
+                    % (a_id, b_id, _face_label(a_face), gap, need),
+                    code="PLACEMENT_OVERLAP", node_id=node_id,
+                    step="check_holes_do_not_overlap")
+
 
 
 def resolve_face_by_anchor(port, state_version, near, node_id=None):

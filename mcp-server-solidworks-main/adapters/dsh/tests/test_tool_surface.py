@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "request_confirmation",
     "confirm_action",
     "finish_job",
+    "read_drawing_region",
 }
 
 
@@ -29,7 +30,7 @@ def _load_dsh_server():
     return module
 
 
-def test_tool_surface_is_exactly_the_nine_high_level_tools():
+def test_tool_surface_is_exactly_the_ten_high_level_tools():
     server = _load_dsh_server()
     tools = asyncio.run(server.mcp.list_tools())
     assert {tool.name for tool in tools} == EXPECTED_TOOLS
@@ -41,6 +42,14 @@ def test_tool_surface_is_exactly_the_nine_high_level_tools():
         tool for tool in tools if tool.name == "request_confirmation"
     )
     assert "action_id" in request.input_schema["required"]
+    region = next(
+        tool for tool in tools if tool.name == "read_drawing_region"
+    )
+    # image_path is the only required argument: region '' means the overview, and the tool needs
+    # no job, so nothing else may be mandatory.
+    assert region.input_schema["required"] == ["image_path"]
+    assert region.input_schema["properties"]["zoom"]["type"] == "integer"
+    assert region.input_schema["additionalProperties"] is False
 
 
 def test_reference_topics_are_allowlisted():
@@ -366,7 +375,7 @@ def test_reference_topic_literal_still_resolves_to_every_topic():
 
 def test_inspect_state_exposes_the_reference_paging_parameters():
     # The paging knobs must be visible to the model in the registered tool schema, and the
-    # tool surface must still be exactly the nine high-level tools.
+    # tool surface must still be exactly the ten high-level tools.
     import asyncio
 
     server = _load_dsh_server()
@@ -525,11 +534,11 @@ def test_quickref_is_generated_and_covers_every_schema_node_type():
             assert field in section.split("\n\n")[0] or field in section[:2000], (name, field)
 
 
-def test_quickref_fits_in_two_pages_and_every_page_is_under_the_cap():
+def test_quickref_fits_in_the_page_budget_and_every_page_is_under_the_cap():
     import references
 
     pages = _walk_pages("feature_graph_quickref")
-    assert 1 <= len(pages) <= 2, len(pages)
+    assert 1 <= len(pages) <= references.QUICKREF_MAX_PAGES, len(pages)
     for page in pages:
         assert references._serialized_size(page) <= references.REFERENCE_PAGE_MAX_SERIALIZED
 
@@ -593,7 +602,7 @@ def test_default_pre_build_reading_is_a_small_number_of_calls():
 
 _SHELL_SHAPED_NODE = {
     # Deliberately the DENSEST field shape in the schema (shell's), not a tiny probe: four
-    # more nodes of this size must still fit the two-page budget.
+    # more nodes of this size must still fit the paged budget (QUICKREF_MAX_PAGES).
     "description": (
         "Synthetic node type {i}. Hollow-like capability with the same field shape as shell. "
         "COVERED since v9.9.9 — grown for the headroom proof."
@@ -617,9 +626,10 @@ _SHELL_SHAPED_NODE = {
 @pytest.mark.parametrize("count", [4])
 def test_quickref_leaves_headroom_for_four_more_node_types(count):
     # The growth contract: FOUR more node types of the schema's densest shape must still fit
-    # the two-page budget, so the quickref does not have to be re-tuned at every capability
-    # batch. The schema is extended in memory (never written back) with `count` synthetic
-    # node types and the pager is walked over the result.
+    # the QUICKREF_MAX_PAGES budget, so the quickref does not have to be re-tuned (and its
+    # field prose trimmed) at every capability batch. The page SIZE caps are unchanged — the
+    # page COUNT is only how many reads a planner spends. The schema is extended in memory
+    # (never written back) with `count` synthetic node types and the pager is walked.
     import copy
 
     import references
@@ -637,8 +647,9 @@ def test_quickref_leaves_headroom_for_four_more_node_types(count):
     finally:
         references._load_schema = original_loader
 
-    assert len(pages) <= 2, (
-        f"{count} synthetic node types pushed the quickref to {len(pages)} pages"
+    assert len(pages) <= references.QUICKREF_MAX_PAGES, (
+        f"{count} synthetic node types pushed the quickref to {len(pages)} pages "
+        f"(budget {references.QUICKREF_MAX_PAGES})"
     )
     for page in pages:
         size = references._serialized_size(page)
