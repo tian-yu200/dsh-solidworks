@@ -128,11 +128,37 @@ def _is_point3(v):
 
 
 def _normalize_class(value):
-    """'6h' -> '6H'. Returns the canonical spelling, or None when it is not a known class."""
+    """The canonical tolerance class, or None when it is not a known INTERNAL class.
+
+    Only the exact uppercase spelling is accepted. Lowercase is NOT a case variant here: ISO 965
+    writes internal thread classes in UPPERCASE (6H) and EXTERNAL ones in lowercase (6g, 6h).
+    Upper-casing first (as this function used to) turned an external `6h` into the internal `6H`
+    and silently accepted a graph that asked for something v1 cannot build — the callout then
+    claimed an internal tolerance on a hole nobody had validated. So lowercase is rejected, and
+    the caller's message explains why (see _class_error).
+    """
     if not isinstance(value, str):
         return None
-    upper = value.strip().upper()
-    return upper if upper in THREAD_CLASSES else None
+    text = value.strip()
+    return text if text in THREAD_CLASSES else None
+
+
+def _class_error(value):
+    """The message for a rejected `class`, distinguishing an EXTERNAL class from a typo.
+    Returns None when `value` is a valid internal class (nothing to report).
+    """
+    if _normalize_class(value) is not None:
+        return None
+    text = value.strip() if isinstance(value, str) else value
+    if isinstance(text, str) and text.lower() in {c.lower() for c in THREAD_CLASSES}:
+        # Right number, wrong case: that is an EXTERNAL thread class (ISO 965-1 writes internal
+        # classes uppercase, external ones lowercase).
+        return ("%r is an EXTERNAL thread tolerance class (ISO 965-1 writes external "
+                "classes in lowercase: 6g, 6h). v1 supports INTERNAL threads only — pass the "
+                "uppercase internal class %r, or omit 'class' to leave it off the callout."
+                % (value, text.upper()))
+    return ("%r is not an ISO 965-1 internal tolerance class (one of %s)."
+            % (value, sorted(THREAD_CLASSES)))
 
 
 def _resolve_thread_size(designation, pitch):
@@ -202,8 +228,7 @@ def _check_thread_block(block, label, errors, declared_pilot=None, declared_pilo
 
     thread_class = block.get("class")
     if thread_class is not None and _normalize_class(thread_class) is None:
-        errors.append("%s.%s: 'class' %r is not an ISO 965-1 internal tolerance class "
-                      "(one of %s)." % (label, where, thread_class, sorted(THREAD_CLASSES)))
+        errors.append("%s.%s: %s" % (label, where, _class_error(thread_class)))
 
     if block.get("internal") is False:
         errors.append("%s.%s: external threads ('internal': false) are NOT supported in v1 — "
@@ -382,9 +407,7 @@ def validate(graph):
                               % (standard, sorted(THREAD_STANDARDS)))
             default_class = thread_defaults.get("class")
             if default_class is not None and _normalize_class(default_class) is None:
-                errors.append("graph.thread_defaults.class %r is not an ISO 965-1 internal "
-                              "tolerance class (one of %s)."
-                              % (default_class, sorted(THREAD_CLASSES)))
+                errors.append("graph.thread_defaults.class: %s" % _class_error(default_class))
             handedness = thread_defaults.get("handedness")
             if handedness is not None and handedness not in THREAD_HANDEDNESS:
                 errors.append("graph.thread_defaults.handedness %r unsupported (only %s)."

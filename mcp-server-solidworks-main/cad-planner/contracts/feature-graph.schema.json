@@ -433,7 +433,7 @@
    "standard": "opt, dflt 'ISO' — ISO|GB|DIN|JIS -> swCosmeticStandardType_e 8/13/4/9",
    "pitch": "m (opt; required out of table when the designation carries none)",
    "tap_drill": "m (opt; REQUIRED out of table — D-P is wrong: M8x1.25 taps 6.8, not 6.75)",
-   "class": "opt — ISO 965-1 internal 4H-8H / 4G-8G; callout only, never the pilot",
+   "class": "opt — ISO 965-1 INTERNAL class, UPPERCASE 4H-8H / 4G-8G; callout only, never the pilot. Lowercase (6g, 6h) is an EXTERNAL class: v1 has no external threads and rejects it.",
    "handedness": "opt, dflt 'right' — right|left (left appends LH)",
    "representation": "opt, dflt 'cosmetic' — 'real'/'auto' RESERVED (rejected)",
    "internal": "must not be false (external threads unsupported in v1)",

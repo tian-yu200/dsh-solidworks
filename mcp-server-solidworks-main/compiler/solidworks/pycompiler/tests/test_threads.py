@@ -289,11 +289,53 @@ def test_out_of_table_size_needs_pitch_and_tap_drill():
     assert ok == [], ok
 
 
-def test_thread_class_vocabulary_accepts_8h_and_rejects_9h():
-    assert ir_schema.validate(_threaded_hole(class_="8H")) == [] if False else True
+def test_thread_class_vocabulary_accepts_8H_and_rejects_9H():
     assert ir_schema.validate(_threaded_hole(**{"class": "8H"})) == []
     errors = ir_schema.validate(_threaded_hole(**{"class": "9H"}))
     assert any("tolerance class" in e for e in errors), errors
+
+
+def test_lowercase_class_is_rejected_as_an_external_thread_class():
+    # ISO 965-1 writes INTERNAL classes uppercase (6H) and EXTERNAL ones lowercase (6g, 6h).
+    # The validator used to upper-case first, so `6h` was silently accepted as the internal
+    # `6H` and the callout claimed a tolerance on a thread v1 cannot even build.
+    for lower, upper in (("6h", "6H"), ("6g", "6G")):
+        errors = ir_schema.validate(_threaded_hole(**{"class": lower}))
+        assert len(errors) == 1, errors
+        msg = errors[0]
+        assert "EXTERNAL" in msg, msg
+        assert "INTERNAL threads only" in msg, msg
+        assert repr(upper) in msg, msg        # tells the author what to write instead
+        assert "not an ISO 965-1 internal" not in msg, msg
+
+    # The uppercase spelling of the SAME grade stays valid (6H internal, 6G internal).
+    for upper in ("6H", "6G"):
+        assert ir_schema.validate(_threaded_hole(**{"class": upper})) == [], upper
+
+
+def test_lowercase_class_is_rejected_on_a_cosmetic_thread_node():
+    g = {"units": "meters", "nodes": [
+        {"id": "n1", "type": "box", "ref": {"datum": "top"},
+         "width": 0.05, "depth": 0.05, "height": 0.02},
+        {"id": "n2", "type": "hole",
+         "ref": {"node_face": {"node": "n1", "selector": "top"}, "position": "center"},
+         "diameter": 0.005, "depth": "through_all"},
+        {"id": "n3", "type": "cosmetic_thread",
+         "ref": {"node": "n2", "edge_anchor": {"near": [0.0, 0.02, 0.0]}},
+         "designation": "M6", "depth": "through_all", "class": "6h"}]}
+    errors = ir_schema.validate(g)
+    assert any("EXTERNAL" in e for e in errors), errors
+    g["nodes"][2]["class"] = "6H"
+    assert ir_schema.validate(g) == []
+
+
+def test_lowercase_class_is_rejected_in_thread_defaults():
+    g = _threaded_hole()
+    g["thread_defaults"] = {"class": "6h"}
+    errors = ir_schema.validate(g)
+    assert any("EXTERNAL" in e and "thread_defaults" in e for e in errors), errors
+    g["thread_defaults"] = {"class": "6H"}
+    assert ir_schema.validate(g) == []
 
 
 def test_reserved_representations_are_rejected_explicitly():

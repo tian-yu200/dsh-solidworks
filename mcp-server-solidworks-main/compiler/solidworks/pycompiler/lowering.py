@@ -29,7 +29,7 @@ from .errors import FeatureError
 # Shared vocabulary, NOT re-declared here: a second copy of "what counts as a through depth"
 # would let the validator and the lowering drift apart on exactly the token that decides a cut's
 # end condition. ir_schema imports only contours/thread_table, so this is not a cycle.
-from .ir_schema import THROUGH_DEPTHS, THREAD_STANDARD_ENUM
+from .ir_schema import THROUGH_DEPTHS, THREAD_CLASSES, THREAD_STANDARD_ENUM
 
 Op = namedtuple("Op", ["tool", "params", "note"])
 
@@ -673,11 +673,21 @@ def _thread_params(node, thread, edge_index, defaults=None, pilot=None, pilot_de
 
 
 def _thread_class(thread, defaults):
-    """The canonical tolerance class ('6H') from the block or the graph defaults, else None."""
+    """The canonical tolerance class ('6H') from the block or the graph defaults, else None.
+
+    The value is already VALIDATED (ir_schema._normalize_class rejects anything that is not an
+    exact uppercase internal class), so this only trims and picks the winner: the node's own
+    field beats the graph defaults. It deliberately does NOT upper-case: if a lowercase external
+    class ever reached here it would be a validation bug, and silently promoting `6h` to `6H`
+    would print an internal callout for an external thread �� the exact failure the validator
+    now refuses. An unexpected value falls through to None so the callout omits the class
+    rather than claiming a tolerance nobody validated.
+    """
     for source in (thread, defaults or {}):
         value = source.get("class")
         if value:
-            return str(value).strip().upper()
+            text = str(value).strip()
+            return text if text in THREAD_CLASSES else None
     return None
 
 

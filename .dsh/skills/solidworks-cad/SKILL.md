@@ -241,6 +241,8 @@ M42x2 40 mm), and a `diameter` that disagrees with it is rejected as
 `PILOT_MISMATCH`. The diameter handed to SolidWorks is the NOMINAL MAJOR
 diameter in meters. Put the class-qualified spec in the callout/note (e.g.
 `M5-8H`): SolidWorks 2025 does not resolve `Size`, so the note carries it.
+Write the class in UPPERCASE (6H): lowercase (6g, 6h) means an EXTERNAL
+thread class, which v1 does not support and rejects.
 A counterbore is cut BEFORE the pilot. `add_cosmetic_thread` is additive per
 edge — never retry it. Inch and real (cut) threads are out of scope.
 
