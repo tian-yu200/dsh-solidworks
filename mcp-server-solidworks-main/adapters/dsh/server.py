@@ -373,6 +373,14 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
     crop hides what it left out. Whatever stays illegible after zooming is UNKNOWN and goes to the
     user — do not invent a dimension, tolerance, material or standard-part value.
 
+    READING PROTOCOL (follow it exactly; the per-step cost is what makes it matter):
+    1. call ONCE with region='' for the gridded overview, and list EVERY dimension cluster you
+       must read with its cell or pixel box;
+    2. request EVERY needed crop in ONE step as parallel read_drawing_region calls (up to 12);
+    3. at most ONE more parallel batch, only for values still illegible;
+    4. then write PLAN.md v1 (dimension ledger, plan, every unread value marked UNKNOWN) and ask
+       the user. Do not zoom again before the user answers.
+
     Crops are charged against a per-drawing budget (default 15, env DSH_SOLIDWORKS_INTAKE_CROP_LIMIT)
     reported in every response as budget {crops_used, crop_limit}; the overview is free. At the limit
     further crops are refused with INTAKE_BUDGET_EXHAUSTED: write PLAN.md v1 then, list unread values

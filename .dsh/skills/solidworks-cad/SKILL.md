@@ -91,10 +91,14 @@ At node A, start a job only when deep inspection of an active CAD document is
 needed; this is not modeling, and node F reuses that job. Attached images can be
 analyzed before any job exists.
 
-Node A reads the drawing through `read_drawing_region`, not by eye alone: overview
-with the labelled grid first, then a 2–4× zoom of every dimension cluster into a
-dimension ledger, and any value that stays illegible is `UNKNOWN` and asked — never
-estimated from pixels. Follow
+Node A reads the drawing through `read_drawing_region`, not by eye alone: one
+overview with the labelled grid, then EVERY dimension cluster requested in ONE step
+as parallel crops (up to 12), then at most one more batch for what is still
+illegible. Each step costs 45-90 s, so batch instead of reading one cluster per step.
+Then PLAN.md v1 is mandatory: dimension ledger, plan, every unread value `UNKNOWN`
+and asked — never estimated from pixels; do not zoom again before the user answers.
+The crop budget is 15 per drawing (overview free) and `INTAKE_BUDGET_EXHAUSTED`
+means write PLAN.md v1 now. Follow
 [drawing intake](references/drawing-intake.md) before the ledger is considered done.
 
 ```mermaid
