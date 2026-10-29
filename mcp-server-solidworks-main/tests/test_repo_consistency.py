@@ -162,6 +162,56 @@ def test_frontmatter_guard_rejects_the_colon_space_shape():
     # (it parses as a mapping instead, which the skill test above also rejects)
 
 
+class _JsTagTolerant(yaml.SafeLoader):
+    """The composition carries `!!js` expressions (the skills dir path). They are opaque to a
+    consistency check and unknown to SafeLoader, so resolve them to their literal text. Still a
+    SafeLoader: the added constructor returns the scalar STRING and can never instantiate an
+    object, which is the only reason the tag is accepted at all."""
+
+
+def _js_tag(loader, suffix, node):
+    return getattr(node, "value", None)
+
+
+_JsTagTolerant.add_multi_constructor("tag:yaml.org,2002:js", _js_tag)
+
+
+def _composition_rows(path):
+    with open(path, encoding="utf-8") as fh:
+        rows = yaml.load(fh, Loader=_JsTagTolerant)
+    assert isinstance(rows, list) and rows, f"{path}: composition must be a non-empty list"
+    return rows
+
+
+def test_preset_persona_loads_the_skill_before_any_tool_call():
+    # A session that skips the skill never reads the intake procedure or the Feature Graph rules
+    # and goes straight to the tools; the catalog entry alone does not make the model use it.
+    path = os.path.join(
+        REPO_ROOT, "dsh-integration", "presets", "solidworks-cad", "agent.cordis.yml"
+    )
+    rows = _composition_rows(path)
+    persona = next((row for row in rows if row.get("id") == "persona"), None)
+    assert persona is not None, "composition has no persona row"
+    text = (persona.get("config") or {}).get("text") or ""
+    assert text.strip(), "persona text is empty"
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    # "near the top": the rule must sit in the second paragraph (right after the greeting), so a
+    # model that skims cannot reach a tool instruction before reading it.
+    head = "\n\n".join(paragraphs[:2])
+    assert "skill" in head, "the persona must name the skill tool in its opening rules"
+    assert "solidworks-cad" in head, "the persona must name the skill to load"
+    assert "工具" in head and "第一步" in head, (
+        "the persona must state that loading the skill is the FIRST step of a new task, before "
+        "any other tool call")
+    assert "停止" in head, (
+        "the persona must say: if the skill cannot be loaded, state it and stop")
+    first_tools_para = next((i for i, p in enumerate(paragraphs)
+                             if "mcp__solidworks__" in p), None)
+    assert first_tools_para is not None and first_tools_para >= 2, (
+        "the skill-first rule must come before the paragraph that tells the model to use the "
+        "mcp__solidworks__ tools, or the tools win the race it is meant to lose")
+
+
 def _server_tool_names():
     path = os.path.join(REPO_ROOT, "mcp-server-solidworks-main", "adapters", "dsh", "server.py")
     with open(path, encoding="utf-8") as fh:
