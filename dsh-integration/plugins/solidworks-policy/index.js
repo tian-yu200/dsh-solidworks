@@ -42,6 +42,13 @@ const REGION_LOCAL_ONLY_REASON =
   "read_drawing_region accepts only a non-empty local image file path; URL forms such as " +
   "http://, https://, ftp:// and file:// are not allowed. Save the attachment locally first.";
 
+function denialReason(toolName) {
+  return (
+    `Tool \`${toolName}\` is unavailable in the SolidWorks profile. ` +
+    "Use the eleven high-level SolidWorks MCP tools or the approved support tools."
+  );
+}
+
 function isLocalImagePath(value) {
   return (
     typeof value === "string" &&
@@ -50,11 +57,52 @@ function isLocalImagePath(value) {
   );
 }
 
-function denialReason(toolName) {
-  return (
-    `Tool \`${toolName}\` is unavailable in the SolidWorks profile. ` +
-    "Use the eleven high-level SolidWorks MCP tools or the approved support tools."
-  );
+/**
+ * The restrictable tool set for one agent scope, as the core itself reports it.
+ *
+ * `tools.restrict()` refuses a filter naming anything outside that scope's inherited registry, and
+ * it says so with the whole set: "…names unknown global tool "x"…; known global tools: a, b, c".
+ * No public read-only call gives a plugin that set — `tools.get(name)` and `tools.schemas()` both
+ * answer for the GLOBAL view unless a scope key is passed, and a scope key is not something a plugin
+ * can obtain (`scopeOf` lives in `@deepseek-ai/dsh-scope`, which this plugin does not depend on).
+ * That distinction is not academic: `skill` is registered by `dsh-tool-skill` inside the agent
+ * preset's own scope, so a global-view check would call it unknown and restrict() would then deny
+ * the very tool the persona's first rule requires.
+ * @returns the allowed names this scope can be restricted to, or null when the report is unreadable.
+ */
+function restrictableFromError(message) {
+  const match = /known global tools: (.*)$/.exec(String(message).split("\n").pop());
+  if (!match) return null;
+  const known = match[1]
+    .split(", ")
+    .map((name) => name.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+  if (!known.length) return null;
+  return ALLOWED_TOOLS.filter((toolName) => known.includes(toolName));
+}
+
+function restrictAgent(agent, logger) {
+  const tools = agent.ctx.tools;
+  try {
+    tools.restrict({ allow: ALLOWED_TOOLS });
+    return;
+  } catch (error) {
+    const allow = restrictableFromError(error && error.message);
+    if (!allow) {
+      logger?.warn?.(
+        `${name}: could not read the restrictable tool set from ${JSON.stringify(
+          String(error && error.message),
+        )}; leaving the catalog unrestricted (the guard still refuses everything off the allowlist)`,
+      );
+      return;
+    }
+    if (!allow.length) return;
+    const dropped = ALLOWED_TOOLS.filter((toolName) => !allow.includes(toolName));
+    logger?.warn?.(
+      `${name}: restricting without ${dropped.join(", ")} — this composition has no such tool`,
+    );
+    tools.restrict({ allow });
+  }
 }
 
 function apply(ctx) {
@@ -63,7 +111,7 @@ function apply(ctx) {
   );
 
   ctx.on("agent/created", ({ agent }) => {
-    agent.ctx.tools.restrict({ allow: ALLOWED_TOOLS });
+    restrictAgent(agent, ctx.logger);
   });
 
   ctx.on("tools/pre-execute", (exec, next) => {
@@ -92,4 +140,12 @@ function apply(ctx) {
   });
 }
 
-export { ALLOWED_TOOLS, SOLIDWORKS_TOOLS, SUPPORT_TOOLS, apply, inject, name };
+export {
+  ALLOWED_TOOLS,
+  SOLIDWORKS_TOOLS,
+  SUPPORT_TOOLS,
+  apply,
+  inject,
+  name,
+  restrictableFromError,
+};
