@@ -14,6 +14,16 @@ BACKUP_ROOT = Path(os.getenv("DSH_SOLIDWORKS_BACKUP_ROOT", WORKSPACE_ROOT / "bac
 # read_drawing_region output: one folder per source drawing (gitignored, under artifacts/).
 INTAKE_ROOT = Path(os.getenv("DSH_SOLIDWORKS_INTAKE_ROOT", WORKSPACE_ROOT / "artifacts" / "intake"))
 
+# The solidworks-cad skill's own reference files, served as read-only MCP resources. This is the
+# repository path: the installed preset keeps its `skills` child as a junction to exactly this
+# directory, so one copy answers both. Override for a checkout elsewhere.
+SKILL_REFERENCES_DIR = Path(os.getenv(
+    "DSH_SOLIDWORKS_SKILL_REFERENCES",
+    WORKSPACE_ROOT
+    / "dsh-integration" / "presets" / "solidworks-cad" / "skills"
+    / "solidworks-cad" / "references",
+))
+
 RECIPE_PATH = SOLIDPILOT_ROOT / "cad-planner" / "recipe-usage.md"
 FEATURE_GRAPH_SCHEMA_PATH = (
     SOLIDPILOT_ROOT / "cad-planner" / "contracts" / "feature-graph.schema.json"

@@ -20,6 +20,11 @@ const SUPPORT_TOOLS = [
   "todo_write",
   "skill",
   "modlens_read_image",
+  // The skill's references are served as resources by the solidworks MCP server, and this preset
+  // has no file tool — without these two the "read the reference" instruction in SKILL.md would
+  // itself be refused. Read-only: they list and read, never write.
+  "read_mcp_resource",
+  "list_mcp_resources",
 ];
 
 const ALLOWED_TOOLS = Object.freeze([

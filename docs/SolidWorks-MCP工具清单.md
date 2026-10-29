@@ -44,6 +44,8 @@
 | `todo_write` | 维护任务待办清单。 |
 | `skill` | 加载并读取技能。 |
 | `modlens_read_image` | 读取图片证据；仅接受本地图片文件路径，`http://`、`https://`、`ftp://`、`file://` 等 URL 形式一律拒绝。 |
+| `list_mcp_resources` | 列出 `solidworks` 服务器开放的只读资源（技能参考文档清单，含标题与一行描述）。 |
+| `read_mcp_resource` | 按 URI 读取一份技能参考文档，形如 `solidworks://skill/references/<file>.md`；带路径或 `..` 的 URI 以 `SKILL_RESOURCE_TRAVERSAL_REFUSED` 拒绝，不在清单内的名字以 `SKILL_RESOURCE_NOT_FOUND` 拒绝。本预设没有本地文件工具，这是读取参考文档的唯一入口。 |
 
 ## 2. `start_job`
 

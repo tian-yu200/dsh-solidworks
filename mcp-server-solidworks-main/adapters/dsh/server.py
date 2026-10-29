@@ -4,8 +4,10 @@ import re
 from typing import Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import ResourceSecurity
 
 import intake
+import skill_resources
 from backend import ExecutionLayerError
 from orchestrator import orchestrator
 
@@ -390,6 +392,47 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
     return _image_result(
         lambda: intake.result_payload(image_path, region, zoom, reset_budget)
     )
+
+
+def read_skill_reference(name: str) -> str:
+    """One solidworks-cad skill reference document, by bare file name.
+
+    Resource URI: solidworks://skill/references/<file>.md — read it with read_mcp_resource
+    (server "solidworks", that URI). `name` is the file name only: a path, a `..` segment or a
+    drive letter is refused with SKILL_RESOURCE_TRAVERSAL_REFUSED, and a name that is not a served
+    file with SKILL_RESOURCE_NOT_FOUND. The bytes come from the skill directory, which is a
+    junction to the repository, so this is the same file SKILL.md links.
+
+    list_mcp_resources on server "solidworks" is the authoritative roster: it carries a title and a
+    one-line description per reference. A reference added after this server started is readable
+    through this URI immediately but appears in the listing only after a restart.
+    """
+    return skill_resources.refuse_as_resource_error(skill_resources.read, name)
+
+
+def _register_skill_resources():
+    """Expose the skill's references as resources, because the preset has no file tool.
+
+    The template's `name` parameter is exempt from the framework's own path checks on purpose: that
+    check answers a `..` URI with a generic "unknown resource", which reads as a typo and invites
+    retries, while the coded refusal states the rule. Containment is enforced in skill_resources
+    against the resolved root instead, which is the stronger check (it also stops a symlink).
+    """
+    mcp.resource(
+        skill_resources.TEMPLATE_URI,
+        name=skill_resources.TEMPLATE_NAME,
+        title="solidworks-cad skill reference",
+        description=(
+            "One reference document of the solidworks-cad skill, addressed by bare file name: "
+            "solidworks://skill/references/<file>.md. No paths, no parent segments."
+        ),
+        mime_type="text/markdown",
+        security=ResourceSecurity(exempt_params={"name"}),
+    )(read_skill_reference)
+    return skill_resources.register_on(mcp)
+
+
+_register_skill_resources()
 
 
 def _normalize_tool_surface():

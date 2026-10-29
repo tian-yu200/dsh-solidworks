@@ -45,10 +45,12 @@ DeepSeek Harness
 | `cancel_action` | 取消待确认动作，不执行该动作 |
 | `finish_job` | 完成最终客观验证并结束任务 |
 
-除以上 11 个 SolidWorks 工具外，策略插件还放行 4 个支撑工具：
+除以上 11 个 SolidWorks 工具外，策略插件还放行 6 个支撑工具：
 `ask_user_question`（向用户提问）、`todo_write`（维护待办清单）、`skill`（加载技能）、
 `modlens_read_image`（读取图片证据；仅接受本地图片文件路径，`http://`、`https://`、
-`ftp://`、`file://` 等 URL 形式一律拒绝）。除此之外的任何工具一律拒绝。
+`ftp://`、`file://` 等 URL 形式一律拒绝）、`list_mcp_resources`（列出本服务器开放的只读资源）、
+`read_mcp_resource`（按 `solidworks://skill/references/<file>.md` 读取技能参考文档；本预设没有本地
+文件工具，这是唯一入口）。除此之外的任何工具一律拒绝。
 
 注册事实源：
 `mcp-server-solidworks-main/adapters/dsh/server.py`。

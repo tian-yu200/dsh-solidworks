@@ -93,7 +93,8 @@ estimated dimension is an invented one, and it silently becomes the model's trut
 ## 4. Only then plan and build
 
 Write the inline PLAN.md-style plan (see
-[reconstruction reasoning](reconstruction-reasoning.md)) with the ledger's UNKNOWNs listed as open
+[reconstruction reasoning](solidworks://skill/references/reconstruction-reasoning.md), read with
+`read_mcp_resource` on server `solidworks`) with the ledger's UNKNOWNs listed as open
 questions, get approval for that plan version, and only then compose the Feature Graph. Every
 graph value must be traceable to a `legible: yes` ledger row or to a user answer.
 

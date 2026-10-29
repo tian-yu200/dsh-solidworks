@@ -7,8 +7,9 @@ description: "Use for SolidWorks work AND for reading engineering drawings — a
 
 Operate SolidWorks only through these eleven high-level `mcp__solidworks__` tools.
 Approved support tools for workflow assistance: `ask_user_question`, `todo_write`,
-`skill`, and `modlens_read_image` (local image file paths only; URL forms such as
-`http://` are rejected).
+`skill`, `modlens_read_image` (local image file paths only; URL forms such as
+`http://` are rejected), `list_mcp_resources` and `read_mcp_resource` — the only way to open a
+skill reference, since this preset has no file tool.
 The runtime tool schemas and returned payloads are the authoritative contract.
 Parse each tool's JSON string before acting on its envelope status. Every tool
 result is compact single-line JSON. `start_job` returns `job_id` and
@@ -84,6 +85,15 @@ job binds only through its own document-creating call,
 `close_all=true` runs but never binds. Otherwise start a new job with
 `target_document`, or open the document first and start a new job.
 
+## Reading a Skill Reference
+
+A `solidworks://skill/references/<file>.md` link is a read-only MCP resource, never a file path:
+this preset ships no file tool, so a path cannot be opened. Read it with `read_mcp_resource`,
+server `solidworks`, that exact URI. `list_mcp_resources` (same server) is the current roster with
+one title and one-line description each. A URI carrying a path or a `..` segment is refused with
+`SKILL_RESOURCE_TRAVERSAL_REFUSED`, a name that is not on the roster with
+`SKILL_RESOURCE_NOT_FOUND`; read the roster instead of guessing a file name.
+
 ## Drawing Reconstruction Flow
 
 This flow applies only when geometry is inferred from drawings or images.
@@ -99,7 +109,7 @@ Then PLAN.md v1 is mandatory: dimension ledger, plan, every unread value `UNKNOW
 and asked — never estimated from pixels; do not zoom again before the user answers.
 The crop budget is 15 per drawing (overview free) and `INTAKE_BUDGET_EXHAUSTED`
 means write PLAN.md v1 now. Follow
-[drawing intake](references/drawing-intake.md) before the ledger is considered done.
+[drawing intake](solidworks://skill/references/drawing-intake.md) before the ledger is considered done.
 
 ```mermaid
 flowchart TD
@@ -153,7 +163,7 @@ If a flow edit adds or removes a back edge, recompute the graph and table.
 Every dimension the drawing evidence cannot read stays `unresolved` in the plan.
 Never fill placement or size coordinates from pixel proportions without explicit
 user approval in the plan (the Missing Dimension Gate in
-[reconstruction-reasoning.md](references/reconstruction-reasoning.md)).
+[reconstruction-reasoning.md](solidworks://skill/references/reconstruction-reasoning.md)).
 
 At exhaustion, stop mutation:
 
@@ -236,7 +246,7 @@ under its English spelling is positively absent from the loaded database and war
 
 Do not split a complete graph into low-level modeling calls. Do not invent graph
 fields, feature types, selectors, units, or references absent from the schema.
-The [capability map](references/feature-graph-capability-map.md) summarizes
+The [capability map](solidworks://skill/references/feature-graph-capability-map.md) summarizes
 expressible constructs; record inexpressible ones as `CAPABILITY_GAP`.
 
 For a part whose complete graph would be oversized (asymmetric cast parts,
@@ -244,7 +254,7 @@ crossed-bore housings), submit ordered milestones as SEQUENTIAL graphs against
 the SAME locked document: the first with `fresh_document=true`, later ones with
 `fresh_document=false` into the active document after inspecting the live
 geometry and anchoring to it (see the milestone strategy in
-[reconstruction-reasoning.md](references/reconstruction-reasoning.md)). Never
+[reconstruction-reasoning.md](solidworks://skill/references/reconstruction-reasoning.md)). Never
 shrink a graph by dropping evidenced features — report the split in the plan
 instead.
 
@@ -344,11 +354,11 @@ Use the returned trust level accurately:
 
 For a model reconstructed from images, PDF pages, orthographic views, or sections:
 
-Read [reconstruction reasoning](references/reconstruction-reasoning.md) in full
-before analysis. Also read [part drawing evidence](references/part-drawing-evidence.md)
+Read [reconstruction reasoning](solidworks://skill/references/reconstruction-reasoning.md) in full
+before analysis. Also read [part drawing evidence](solidworks://skill/references/part-drawing-evidence.md)
 when any dimension, title block, hole/thread callout, bolt, screw, stud, nut,
 washer, fastener, BOM, tolerance, datum, roughness, material, finish, revision,
-or technical note appears, and [assembly reconstruction](references/assembly-reconstruction.md)
+or technical note appears, and [assembly reconstruction](solidworks://skill/references/assembly-reconstruction.md)
 when the evidence describes a multi-part assembly. These local references add
 reasoning rules; they do not replace runtime MCP schema/reference topics.
 
@@ -449,7 +459,7 @@ sources, standard-part identity, thread semantics, and measurable checks are
 coherent. Every nonconstruction detail must be `resolved`, `explained`, or
 explicitly `unresolved`. Keep reconstruction and manufacturing completeness as
 separate statuses. While writing modeling todos, check the
-[capability map](references/feature-graph-capability-map.md); plan only features
+[capability map](solidworks://skill/references/feature-graph-capability-map.md); plan only features
 the vocabulary can express and record the rest as `CAPABILITY_GAP`.
 
 If one decision can change topology or handedness, set `BLOCKED` and ask one
