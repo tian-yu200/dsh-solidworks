@@ -352,7 +352,8 @@ def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
 
 
 @mcp.tool(structured_output=False)
-def read_drawing_region(image_path: str, region: str = "", zoom: int = 2):
+def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
+                        reset_budget: bool = False):
     """Crop and enlarge part of an engineering drawing so small dimension text can be READ.
 
     Read-only: it touches no CAD document, needs no job, and never starts SolidWorks. It exists
@@ -371,9 +372,15 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2):
     the session to cite. A region outside the image is rejected, never clipped: a silently clipped
     crop hides what it left out. Whatever stays illegible after zooming is UNKNOWN and goes to the
     user — do not invent a dimension, tolerance, material or standard-part value.
+
+    Crops are charged against a per-drawing budget (default 15, env DSH_SOLIDWORKS_INTAKE_CROP_LIMIT)
+    reported in every response as budget {crops_used, crop_limit}; the overview is free. At the limit
+    further crops are refused with INTAKE_BUDGET_EXHAUSTED: write PLAN.md v1 then, list unread values
+    as UNKNOWN and ask the user. reset_budget=true zeroes this drawing's counter before the call and
+    may be used ONLY after the user has explicitly asked for more reading.
     """
     return _image_result(
-        lambda: intake.result_payload(image_path, region, zoom)
+        lambda: intake.result_payload(image_path, region, zoom, reset_budget)
     )
 
 

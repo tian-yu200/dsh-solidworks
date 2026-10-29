@@ -11,6 +11,7 @@ Local files only. A drawing that still has to be downloaded is the user's step, 
 import hashlib
 import json
 import math
+import os
 import re
 from io import BytesIO
 from pathlib import Path
@@ -43,6 +44,38 @@ GRID_ROWS = 6
 MAX_SOURCE_BYTES = 64_000_000
 MAX_SOURCE_PIXELS = 60_000_000
 MIN_CROP_AREA = 64            # px² — below this there is no content to read, only noise
+
+# --- reading budget ----------------------------------------------------------------------------
+# A wall-clock limit is not a rule the model can follow, because it has no clock; a COUNT is. Crops
+# are tallied per source drawing (by its SHA-256) for the life of this server process. The OVERVIEW
+# is exempt on purpose: it is the single call that produces the crop plan the budget pays for, and
+# charging it would punish exactly the behaviour the workflow asks for first.
+CROP_LIMIT_DEFAULT = 15
+CROP_LIMIT_ENV = "DSH_SOLIDWORKS_INTAKE_CROP_LIMIT"
+_CROPS_USED = {}              # source sha256 -> crops already served for that drawing
+
+
+def crop_limit():
+    """The crop budget for one drawing, read per call so the environment can retune it."""
+    raw = os.getenv(CROP_LIMIT_ENV)
+    if raw is None:
+        return CROP_LIMIT_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        # A malformed override must not disable the budget — that is the failure it exists to stop.
+        return CROP_LIMIT_DEFAULT
+    return value if value > 0 else CROP_LIMIT_DEFAULT
+
+
+def crops_used(source_sha):
+    return _CROPS_USED.get(source_sha, 0)
+
+
+def reset_crops(source_sha):
+    """Zero one drawing's counter. Reached only through an explicit reset_budget request."""
+    previous = _CROPS_USED.pop(source_sha, 0)
+    return previous
 
 _CELL_RE = re.compile(r"^([A-Ha-h])([1-9][0-9]?)$")
 # A leading minus is parsed on purpose: a negative coordinate is a well-formed box that lies
@@ -251,14 +284,28 @@ def _output_name(source_sha, kind, region, zoom):
     return f"{source_sha[:16]}_{kind}_{safe}_z{zoom}.png"
 
 
-def read_region(image_path, region="", zoom=DEFAULT_ZOOM):
-    """Crop/zoom one region of a drawing, or return the labelled overview grid."""
+def read_region(image_path, region="", zoom=DEFAULT_ZOOM, reset_budget=False):
+    """Crop/zoom one region of a drawing, or return the labelled overview grid.
+
+    Crops are charged against a per-drawing budget; the overview is free. `reset_budget` zeroes the
+    counter for this drawing before the call and is for use only when the user has asked for more
+    reading.
+    """
     if isinstance(zoom, bool) or not isinstance(zoom, int) or not MIN_ZOOM <= zoom <= MAX_ZOOM:
         _fail("INVALID_ZOOM", f"zoom must be an integer {MIN_ZOOM}–{MAX_ZOOM} (got {zoom!r}).")
     path, image = _open_source(image_path)
     width, height = image.size
     source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
     box, kind, label = parse_region(region, width, height)
+
+    limit = crop_limit()
+    if reset_budget:
+        reset_crops(source_sha)
+    if kind != "overview" and crops_used(source_sha) >= limit:
+        _fail("INTAKE_BUDGET_EXHAUSTED",
+              f"crop budget for this drawing is used up ({limit} crops); write PLAN.md v1 now, "
+              "list unread values as UNKNOWN and ask the user. Re-read only after the user "
+              "explicitly asks for it, by passing reset_budget=true.")
 
     if kind == "overview":
         fitted, data, scale, mode = _fit_budget(draw_grid(image.copy()), 1)
@@ -279,6 +326,9 @@ def read_region(image_path, region="", zoom=DEFAULT_ZOOM):
     directory.mkdir(parents=True, exist_ok=True)
     out_path = directory / _output_name(source_sha, kind, region, zoom)
     out_path.write_bytes(data)
+    if kind != "overview":
+        # charged only once the crop exists: a rejected or failed region must not eat the budget
+        _CROPS_USED[source_sha] = crops_used(source_sha) + 1
 
     meta = {
         "status": "completed",
@@ -296,7 +346,8 @@ def read_region(image_path, region="", zoom=DEFAULT_ZOOM):
         "zoom": 1 if kind == "overview" else zoom,
         "region": region_out,
         "grid": grid_geometry(width, height),
-        "budget": {"max_pixels": MAX_OUTPUT_PIXELS, "max_bytes": MAX_OUTPUT_BYTES},
+        "budget": {"max_pixels": MAX_OUTPUT_PIXELS, "max_bytes": MAX_OUTPUT_BYTES,
+                   "crops_used": crops_used(source_sha), "crop_limit": limit},
         "read_next": "Read the returned path. If a dimension is still not legible, zoom that cell "
                      "(zoom 3 or 4) rather than guessing; anything still illegible is UNKNOWN and "
                      "goes to the user — never an invented value.",
@@ -304,8 +355,8 @@ def read_region(image_path, region="", zoom=DEFAULT_ZOOM):
     return data, meta
 
 
-def result_payload(image_path, region="", zoom=DEFAULT_ZOOM):
+def result_payload(image_path, region="", zoom=DEFAULT_ZOOM, reset_budget=False):
     """(image content block, one-line JSON) — what the MCP tool returns."""
-    data, meta = read_region(image_path, region, zoom)
+    data, meta = read_region(image_path, region, zoom, reset_budget)
     return (MCPImage(data=data, format="png"),
             json.dumps(meta, ensure_ascii=False, separators=(",", ":")))

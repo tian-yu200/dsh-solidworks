@@ -278,7 +278,11 @@ def test_the_tool_wraps_a_refusal_as_a_typed_envelope(tmp_path, monkeypatch, she
     assert payload["error"]["code"] == "INVALID_REGION"
 
 
-def test_grid_geometry_covers_every_cell_of_a_non_square_sheet(intake_root, tmp_path):
+def test_grid_geometry_covers_every_cell_of_a_non_square_sheet(intake_root, tmp_path,
+                                                               fresh_budget, monkeypatch):
+    # 48 crops is a geometry sweep, not a reading session: lift the budget so the test measures
+    # the grid, and let the budget tests own the limit.
+    monkeypatch.setenv(intake.CROP_LIMIT_ENV, "100")
     path = tmp_path / "wide.png"
     Image.new("RGB", (1680, 1107), (255, 255, 255)).save(path)
     for column in intake.GRID_COLUMNS:
@@ -296,3 +300,85 @@ def test_overview_of_a_landscape_sheet_labels_the_grid_in_order(intake_root, tmp
     Image.new("RGB", (800, 600), (255, 255, 255)).save(path)
     assert _meta(str(path), "A1")["region"]["source_box"] == [0, 0, 100, 100]
     assert _meta(str(path), "H6")["region"]["source_box"] == [700, 500, 800, 600]
+
+
+# ---------------------------------------------------------------------------------------------
+# The crop budget. A wall-clock limit is unenforceable for a model that has no clock, so reading is
+# bounded by a COUNT per drawing, reported in every response, and refused loudly at the limit.
+# ---------------------------------------------------------------------------------------------
+
+@pytest.fixture
+def fresh_budget(monkeypatch):
+    """Isolate the per-process counter and the limit, so tests never see each other's crops."""
+    monkeypatch.setattr(intake, "_CROPS_USED", {})
+    monkeypatch.delenv(intake.CROP_LIMIT_ENV, raising=False)
+    return intake._CROPS_USED
+
+
+def test_crops_are_counted_and_reported(intake_root, sheet, fresh_budget):
+    assert _meta(str(sheet), "B2")["budget"]["crops_used"] == 1
+    second = _meta(str(sheet), "C3")["budget"]
+    assert second["crops_used"] == 2
+    assert second["crop_limit"] == intake.CROP_LIMIT_DEFAULT == 15
+    # the pixel/byte budget is still there — this only adds keys
+    assert second["max_pixels"] == intake.MAX_OUTPUT_PIXELS
+    assert second["max_bytes"] == intake.MAX_OUTPUT_BYTES
+
+
+def test_overview_is_exempt_from_the_budget(intake_root, sheet, fresh_budget):
+    for _ in range(5):
+        meta = _meta(str(sheet))
+        assert meta["action"] == "overview"
+        assert meta["budget"]["crops_used"] == 0
+    assert fresh_budget == {}                       # nothing charged, not even an entry
+    # and the overview still reports the limit, so the model can plan against it
+    assert _meta(str(sheet))["budget"]["crop_limit"] == 15
+
+
+def test_crops_are_refused_once_the_limit_is_reached(intake_root, sheet, fresh_budget,
+                                                     monkeypatch):
+    monkeypatch.setenv(intake.CROP_LIMIT_ENV, "2")
+    assert _meta(str(sheet), "B2")["budget"]["crops_used"] == 1
+    third = _meta(str(sheet), "C3")
+    assert third["budget"]["crops_used"] == 2
+    with pytest.raises(RuntimeError, match="INTAKE_BUDGET_EXHAUSTED") as raised:
+        _meta(str(sheet), "D4")
+    message = str(raised.value)
+    # the refusal must send the model to the plan, not back at the image
+    assert "write PLAN.md v1 now" in message
+    assert "UNKNOWN" in message and "ask the user" in message
+    # a refused call must not charge anything further
+    assert fresh_budget[intake.hashlib.sha256(sheet.read_bytes()).hexdigest()] == 2
+
+
+def test_the_budget_is_per_drawing(intake_root, tmp_path, fresh_budget, monkeypatch):
+    monkeypatch.setenv(intake.CROP_LIMIT_ENV, "1")
+    one = tmp_path / "one.png"
+    two = tmp_path / "two.png"
+    Image.new("RGB", (600, 400), (255, 255, 255)).save(one)
+    Image.new("RGB", (600, 400), (250, 250, 250)).save(two)
+    assert _meta(str(one), "A1")["budget"]["crops_used"] == 1
+    with pytest.raises(RuntimeError, match="INTAKE_BUDGET_EXHAUSTED"):
+        _meta(str(one), "B2")
+    # the exhausted drawing must not block a different sheet
+    other = _meta(str(two), "A1")["budget"]
+    assert other["crops_used"] == 1 and other["crop_limit"] == 1
+
+
+def test_reset_budget_clears_the_counter_and_the_env_sets_the_limit(
+        intake_root, sheet, fresh_budget, monkeypatch):
+    monkeypatch.setenv(intake.CROP_LIMIT_ENV, "1")
+    assert _meta(str(sheet), "B2")["budget"]["crops_used"] == 1
+    with pytest.raises(RuntimeError, match="INTAKE_BUDGET_EXHAUSTED"):
+        _meta(str(sheet), "C3")
+    # explicit reset (the docs allow it only on the user's request) zeroes it BEFORE the call,
+    # so the call that resets is itself charged — one crop, not zero
+    _data, meta = intake.read_region(str(sheet), "C3", 2, True)
+    assert meta["budget"]["crops_used"] == 1
+    with pytest.raises(RuntimeError, match="INTAKE_BUDGET_EXHAUSTED"):
+        _meta(str(sheet), "D4")
+    # a malformed override must not disable the budget
+    monkeypatch.setenv(intake.CROP_LIMIT_ENV, "not-a-number")
+    assert intake.crop_limit() == intake.CROP_LIMIT_DEFAULT
+    monkeypatch.setenv(intake.CROP_LIMIT_ENV, "0")
+    assert intake.crop_limit() == intake.CROP_LIMIT_DEFAULT
