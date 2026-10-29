@@ -10,7 +10,7 @@ does not start SolidWorks, so it runs before `start_job`. Like `modlens_read_ima
 **local image file path only** — URLs (`http://`, `https://`, `ftp://`, `file://`) are rejected, and
 it is not restricted to a folder: any local file the session can name is readable.
 
-## 0. The reading protocol — three rounds, then plan
+## 0. The reading protocol — three rounds, then the reading result
 
 Reading must CONVERGE FAST. Each step costs 45-90 s, so the number of STEPS matters as much as the
 number of crops: batching is the point, not politeness. Follow these rounds exactly.
@@ -19,23 +19,37 @@ number of crops: batching is the point, not politeness. Follow these rounds exac
   overview, which is FREE (never charged to the budget). From it, write down every view, the
   projection system, the scale and title block, and **the complete list of dimension clusters to
   read**, each with its cell (`C4`) or source-pixel box (`x0,y0,x1,y1`) and the zoom it needs.
-- **Round 2 — ONE batch.** Request EVERY cluster from that list in a SINGLE step as parallel
-  `read_drawing_region` calls — up to 12 in the same step. Do not read one cluster per step.
-- **Round 3 — at most one more batch.** Only for values still illegible after round 2 (a tighter
-  box, or `zoom=4`). Nothing else gets re-read. Anything still ambiguous after this round is
-  `UNKNOWN`.
-- **Then PLAN.md v1 is MANDATORY.** Write it now — before any further crop: the dimension ledger
-  (one row per dimension, values in millimetres as the drawing states them), the plan, and every
-  value not read marked `UNKNOWN`. Ask the user with `ask_user_question`, citing the crop path.
-  **Do not zoom again before the user answers.**
+- **Round 2 — ONE call, every cluster.** Pass them all at once:
+  `read_drawing_region(image_path, regions=["B2","C4","D3",...], zoom=3)` — up to 12 regions in one
+  call, sharing one zoom. One call, not one call per cluster. The response is one image per region
+  plus one JSON line listing each region's box, output path and budget.
+- **Round 3 — at most one more call.** Only for values still illegible after round 2 (a tighter
+  box, or `zoom=4`). Anything still ambiguous after this round is `UNKNOWN`.
+- **Then send the READING RESULT and stop.** The first deliverable is NOT the full plan: it is
+  - the **dimension ledger** — id, value, kind, view, grid cell or box, `legible: yes|no`;
+  - a **question list** for every uncertain or undimensioned item.
+  Send both with `ask_user_question`. A candidate reading may be offered ("looks like 26 — confirm?")
+  but never enters the ledger as a fact. The full PLAN.md and the Feature Graph come only after the
+  user answers. **Do not zoom again before then.**
 
-The tool enforces a **crop budget per drawing**: every response carries
+**No re-reading — enforced by the tool.** Every crop box is remembered per drawing (by SHA-256). A
+new crop whose area lies at least 70% inside ONE earlier crop is a REPEAT. ONE repeat of an area is
+allowed, and only at a **strictly higher zoom** (the legitimate "this is still too small" move). Any
+further repeat is refused with `REGION_ALREADY_READ`, naming the earlier crop; what is still
+unreadable there is `UNKNOWN` and is asked. The overview is exempt, and `reset_budget` clears the
+memory too.
+
+The tool also enforces a **crop budget per drawing**: every response carries
 `budget: {crops_used, crop_limit}`. The default is **15 crops**; the overview is free; the count is
-per source image (by SHA-256) for the life of the server process. At the limit further crops are
-refused with `INTAKE_BUDGET_EXHAUSTED` — that means **write PLAN.md v1 now**, list the unread values
-as `UNKNOWN` and ask the user; it is not a reason to retry. `reset_budget=true` zeroes this
-drawing's counter before the call and may be used **ONLY after the user has explicitly asked for
-more reading** — never on your own initiative.
+per source image for the life of the server process. Each region of a batch is charged
+individually, and a refused region does not stop the others. At the limit further crops are
+refused with `INTAKE_BUDGET_EXHAUSTED` — that means **send the reading result now**, list the unread
+values as `UNKNOWN` and ask the user; it is not a reason to retry. `reset_budget=true` zeroes this
+drawing's counter and read memory before the call and may be used **ONLY after the user has
+explicitly asked for more reading** — never on your own initiative.
+
+**No escape hatch.** Never measure pixels, open a browser, run a script, or use any other tool to
+estimate a size. A value the drawing does not state is `UNKNOWN` and is ASKED, not estimated.
 
 ## 1. Overview first
 
@@ -63,8 +77,9 @@ cell label, or a source-pixel box `x0,y0,x1,y1` when a cluster straddles cells. 
 thread callouts, tolerance stacks, and radii. Crops are drawn without the grid overlay, so the
 pixels the tool returns are exactly the drawing's.
 
-Issue them as parallel calls in ONE step (up to 12). A second, final batch is allowed for whatever
-is still illegible; after that the ledger is closed and PLAN.md v1 is written.
+Pass the whole list as ONE call: `read_drawing_region(image_path, regions=[...], zoom=3)`. A
+second, final call is allowed for whatever is still illegible; after that the ledger is closed and
+the reading result is sent.
 
 Fill one row of the ledger per dimension. Values are what the drawing STATES, in millimetres:
 
@@ -98,8 +113,9 @@ Write the inline PLAN.md-style plan (see
 questions, get approval for that plan version, and only then compose the Feature Graph. Every
 graph value must be traceable to a `legible: yes` ledger row or to a user answer.
 
-PLAN.md v1 is written at the end of the reading rounds (§0) — before the user answers, not after.
-Approval is what unblocks building, never what unblocks writing the plan.
+The READING RESULT (ledger + questions) goes to the user at the end of the reading rounds (§0),
+before they answer. The full PLAN.md is written from the confirmed ledger once they have answered;
+approval of that plan is what unblocks building.
 
 ## 5. Forbidden during intake
 

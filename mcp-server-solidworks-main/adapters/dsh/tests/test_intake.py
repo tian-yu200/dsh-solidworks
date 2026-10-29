@@ -91,7 +91,7 @@ def test_zoom_enlarges_a_crop(intake_root, sheet):
     assert meta["scale_basis"] == "region"
 
 
-def test_lower_case_cell_and_padding_are_accepted(intake_root, sheet):
+def test_lower_case_cell_and_padding_are_accepted(intake_root, sheet, fresh_budget):
     assert _meta(str(sheet), " c4 ")["region"]["source_box"] == [300, 450, 450, 600]
 
 
@@ -311,6 +311,9 @@ def test_overview_of_a_landscape_sheet_labels_the_grid_in_order(intake_root, tmp
 def fresh_budget(monkeypatch):
     """Isolate the per-process counter and the limit, so tests never see each other's crops."""
     monkeypatch.setattr(intake, "_CROPS_USED", {})
+    # The crop MEMORY (repeat detection) is per-process too: without this, a crop served by one
+    # test would look "already read" to the next one.
+    monkeypatch.setattr(intake, "_CROP_MEMORY", {})
     monkeypatch.delenv(intake.CROP_LIMIT_ENV, raising=False)
     return intake._CROPS_USED
 

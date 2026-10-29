@@ -355,6 +355,7 @@ def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
 
 @mcp.tool(structured_output=False)
 def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
+                        regions: list[str] | None = None,
                         reset_budget: bool = False):
     """Crop and enlarge part of an engineering drawing so small dimension text can be READ.
 
@@ -368,6 +369,9 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
         guessed pixels; or a cell label like 'B2'; or a source-pixel box 'x0,y0,x1,y1'.
     zoom: integer 1–4, applied to a crop (the overview is fitted to the image budget). Use 3–4 for
         dimension text, and re-ask with a bigger zoom before calling anything illegible.
+    regions: optional LIST of cell labels or boxes (up to 12), all at the shared `zoom`. ONE call
+        returns one image per region plus a JSON line listing them; a refused region is reported
+        in that JSON and the others still return. Use this for the whole reading round.
 
     Returns the cropped image and one line of JSON: output path, output pixels/bytes, the exact
     source-pixel box, and the grid map. Crops accumulate under artifacts/intake/<image-hash>/ for
@@ -378,10 +382,18 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
     READING PROTOCOL (follow it exactly; the per-step cost is what makes it matter):
     1. call ONCE with region='' for the gridded overview, and list EVERY dimension cluster you
        must read with its cell or pixel box;
-    2. request EVERY needed crop in ONE step as parallel read_drawing_region calls (up to 12);
-    3. at most ONE more parallel batch, only for values still illegible;
-    4. then write PLAN.md v1 (dimension ledger, plan, every unread value marked UNKNOWN) and ask
-       the user. Do not zoom again before the user answers.
+    2. request EVERY needed crop in ONE call: pass regions=['B2','C4','D3',...] (up to 12, one
+       shared zoom). One call, not one call per region — each step costs 45-90 s;
+    3. at most ONE more call, only for values still illegible (a tighter box or zoom=4). A box
+       that was already read is REFUSED with REGION_ALREADY_READ;
+    4. then send the READING RESULT and stop: the dimension ledger (id, value, kind, view, cell or
+       box, legible yes/no) PLUS a question list for every uncertain or undimensioned item, both
+       through ask_user_question. A candidate reading may be offered ("looks like 26 - confirm?")
+       but never enters the ledger as a fact. The full PLAN.md and the Feature Graph come only
+       after the user answers. Do not zoom again before then.
+
+    Never measure pixels, open a browser, run a script, or use any other tool to estimate a size:
+    a value the drawing does not state is UNKNOWN and is ASKED, not estimated.
 
     Crops are charged against a per-drawing budget (default 15, env DSH_SOLIDWORKS_INTAKE_CROP_LIMIT)
     reported in every response as budget {crops_used, crop_limit}; the overview is free. At the limit
@@ -389,6 +401,10 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
     as UNKNOWN and ask the user. reset_budget=true zeroes this drawing's counter before the call and
     may be used ONLY after the user has explicitly asked for more reading.
     """
+    if regions:
+        return _image_result(
+            lambda: intake.result_batch(image_path, regions, zoom, reset_budget)
+        )
     return _image_result(
         lambda: intake.result_payload(image_path, region, zoom, reset_budget)
     )

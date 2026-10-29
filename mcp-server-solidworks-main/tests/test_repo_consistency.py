@@ -12,18 +12,25 @@ live one level above the adapters:
 3. The model surface registered by `adapters/dsh/server.py` is exactly the set
    the `solidworks-policy` plugin allowlists, and is exactly the documented
    eleven tools (README, docs/SolidWorks-MCP工具清单.md, SKILL Tool Boundary).
-4. The `SKILL.md` frontmatter parses as YAML with a REAL YAML parser and yields a
-   string `name` and a string `description`. DSH's skill loader ignores a file whose
-   frontmatter does not parse (it logs "ignored: invalid YAML frontmatter" and the skill
-   never reaches any catalog), and a plain scalar containing ": " is exactly how that
-   happens — silently, in every mode. A stdlib-only check cannot see this class of bug.
+4. The `SKILL.md` frontmatter parses as YAML with a REAL YAML parser and yields a string
+   `name` and a string `description`. DSH's skill loader ignores a file whose frontmatter does
+   not parse (it logs "ignored: invalid YAML frontmatter" and the skill never reaches any
+   catalog), and a plain scalar containing ": " is exactly how that happens — silently, in every
+   mode. A stdlib-only check cannot see this class of bug.
+5. The `solidworks-policy` plugin's support-tool set is the fixed approved set (no shell,
+   browser, fetch, git or file-write name can appear), its `peerDependencies` admit BOTH the CLI
+   core and the desktop core — otherwise dsh's profile preflight disables the row silently — and
+   its own node:test suite passes.
 
 Run with the adapter venv python from `mcp-server-solidworks-main/`:
 `adapters/claude/.venv/Scripts/python.exe -m pytest`
 """
 import os
 import re
+import shutil
+import subprocess
 
+import pytest
 import yaml  # PyYAML (requirements-dev.txt): the same parser family DSH itself uses
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -212,6 +219,29 @@ def test_preset_persona_loads_the_skill_before_any_tool_call():
         "mcp__solidworks__ tools, or the tools win the race it is meant to lose")
 
 
+def test_persona_makes_the_reading_result_the_first_deliverable():
+    # Measured 2026-10-29 (four DSH sessions, one L-bracket drawing): none produced a plan. The
+    # model treated every uncertain value as "look harder" instead of writing it down as a
+    # question. The persona has to say that the FIRST deliverable is the ledger plus questions.
+    path = os.path.join(
+        REPO_ROOT, "dsh-integration", "presets", "solidworks-cad", "agent.cordis.yml"
+    )
+    rows = _composition_rows(path)
+    persona = next((row for row in rows if row.get("id") == "persona"), None)
+    assert persona is not None, "composition has no persona row"
+    text = (persona.get("config") or {}).get("text") or ""
+
+    assert "尺寸表" in text and "问题清单" in text, (
+        "the persona must name the reading result: a dimension ledger plus a question list")
+    assert "ask_user_question" in text, "the reading result must be submitted with ask_user_question"
+    assert "一律提问" in text, "an uncertain value must always be asked"
+    assert "候选" in text, "a candidate reading may be offered, but only as a candidate"
+    assert "浏览器" in text and "测量像素" in text, (
+        "the persona must forbid measuring pixels with a browser, a script or any other tool")
+    assert "用户回答前不写 Feature Graph" in text, (
+        "no Feature Graph before the user has answered")
+
+
 def _server_tool_names():
     path = os.path.join(REPO_ROOT, "mcp-server-solidworks-main", "adapters", "dsh", "server.py")
     with open(path, encoding="utf-8") as fh:
@@ -355,3 +385,82 @@ def test_quickref_field_lines_are_whole_and_balanced():
             source and re.search(r"\b%s\b" % re.escape(last), source)
         )
         assert ok, f"mid-sentence cut in {current}.{field!r}: {spec!r}"
+
+
+# --- the solidworks-policy plugin (tool restriction) --------------------------
+
+POLICY_DIR = os.path.join(REPO_ROOT, "dsh-integration", "plugins", "solidworks-policy")
+POLICY_JS = os.path.join(POLICY_DIR, "index.js")
+POLICY_MANIFEST = os.path.join(POLICY_DIR, "package.json")
+
+# What a SolidWorks CAD session may use besides the eleven CAD tools. The desktop (tauri) profile
+# has no modlens package, so that entry is inert there; it stays because SKILL.md and README.md
+# document it as approved for the CLI profile, where whole-sheet reading has no other route.
+POLICY_SUPPORT_TOOLS = {
+    "ask_user_question",
+    "todo_write",
+    "skill",
+    "modlens_read_image",
+    "read_mcp_resource",
+    "list_mcp_resources",
+}
+
+
+def _policy_source():
+    with open(POLICY_JS, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _policy_array(name):
+    match = re.search(r"const %s = \[(.*?)\];" % name, _policy_source(), re.S)
+    assert match, "%s array not found in solidworks-policy/index.js" % name
+    return {n for n in re.findall(r'"([a-z_]+)"', match.group(1))}
+
+
+def test_policy_support_tools_are_exactly_the_approved_set():
+    """The allowlist is closed: the eleven CAD tools plus this fixed support set, and nothing else.
+
+    Equality is the whole check — a future `bash`/`fetch`/`playwright` entry can only arrive by
+    editing this test, which is the point. What the guard refuses is covered by the plugin's own
+    node suite (test/policy.test.mjs), where the denial runs against a stub registry.
+    """
+    support = _policy_array("SUPPORT_TOOLS")
+    assert support == POLICY_SUPPORT_TOOLS, (
+        "solidworks-policy SUPPORT_TOOLS drifted: +%s -%s"
+        % (sorted(support - POLICY_SUPPORT_TOOLS), sorted(POLICY_SUPPORT_TOOLS - support)))
+    cad = _policy_array("SOLIDWORKS_TOOLS")
+    assert {n.replace("mcp__solidworks__", "") for n in cad} == EXPECTED_TOOLS, (
+        "the CAD half must stay the eleven documented tools")
+
+
+def test_policy_peer_dependencies_admit_the_cli_and_the_desktop_core():
+    """dsh's own profile preflight DISABLES a plugin row whose dsh peers the runtime fails.
+
+    `@deepseek-ai/dsh-app-boot` evaluates every `@deepseek-ai/dsh*` peer against the running dsh
+    version and writes `disabled: true` on the row otherwise, so a range pinned to the 0.1 line
+    silently un-registers the policy in the desktop (0.2.0-rc.2) — with no tool restriction and no
+    error. Both installed cores must be named explicitly.
+    """
+    import json
+
+    with open(POLICY_MANIFEST, encoding="utf-8") as fh:
+        peers = json.load(fh)["peerDependencies"]
+    assert set(peers) == {"@deepseek-ai/cordis", "@deepseek-ai/dsh-tools"}
+    assert peers["@deepseek-ai/dsh-tools"] == "^0.1.0-rc.6 || ^0.2.0-rc.2", (
+        "the range must keep admitting the CLI core (0.1.x) and the desktop core (0.2.x); "
+        "dropping an alternative disables the policy in that profile without any error")
+    assert peers["@deepseek-ai/cordis"] == "^4.0.1"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not on PATH")
+def test_policy_plugin_behaviour_tests_pass():
+    """Run the plugin's own node:test suite (restrict tolerance, guard, pre-execute)."""
+    result = subprocess.run(
+        ["node", "--test", os.path.join(POLICY_DIR, "test", "policy.test.mjs")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert result.returncode == 0, (
+        "node --test failed:\n%s\n%s" % (result.stdout, result.stderr))

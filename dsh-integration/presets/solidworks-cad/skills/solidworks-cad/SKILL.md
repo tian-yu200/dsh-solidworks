@@ -102,13 +102,15 @@ needed; this is not modeling, and node F reuses that job. Attached images can be
 analyzed before any job exists.
 
 Node A reads the drawing through `read_drawing_region`, not by eye alone: one
-overview with the labelled grid, then EVERY dimension cluster requested in ONE step
-as parallel crops (up to 12), then at most one more batch for what is still
-illegible. Each step costs 45-90 s, so batch instead of reading one cluster per step.
-Then PLAN.md v1 is mandatory: dimension ledger, plan, every unread value `UNKNOWN`
-and asked — never estimated from pixels; do not zoom again before the user answers.
-The crop budget is 15 per drawing (overview free) and `INTAKE_BUDGET_EXHAUSTED`
-means write PLAN.md v1 now. Follow
+overview with the labelled grid, then EVERY cluster in ONE call
+(`regions=[...]`, up to 12), then at most one more call for what is still illegible.
+Each step costs 45-90 s, so batch instead of one cluster per step. Then send the
+READING RESULT and stop: dimension ledger (id, value, kind, view, cell/box, legible)
+plus a question list, via `ask_user_question`; a candidate never becomes a fact
+until confirmed. No pixel measuring, no browser, no scripts, no zooming before the
+user answers; PLAN.md and the graph come after. Re-reading is refused
+(`REGION_ALREADY_READ`); budget 15/drawing (overview free), and
+`INTAKE_BUDGET_EXHAUSTED` means send the reading result now. Follow
 [drawing intake](solidworks://skill/references/drawing-intake.md) before the ledger is considered done.
 
 ```mermaid
