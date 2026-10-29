@@ -12,6 +12,7 @@ const SOLIDWORKS_TOOLS = [
   "mcp__solidworks__confirm_action",
   "mcp__solidworks__cancel_action",
   "mcp__solidworks__finish_job",
+  "mcp__solidworks__read_drawing_text",
   "mcp__solidworks__read_drawing_region",
 ];
 
@@ -45,7 +46,7 @@ const REGION_LOCAL_ONLY_REASON =
 function denialReason(toolName) {
   return (
     `Tool \`${toolName}\` is unavailable in the SolidWorks profile. ` +
-    "Use the eleven high-level SolidWorks MCP tools or the approved support tools."
+    "Use the twelve high-level SolidWorks MCP tools or the approved support tools."
   );
 }
 

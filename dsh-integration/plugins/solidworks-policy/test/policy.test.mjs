@@ -195,8 +195,8 @@ test("the guard admits exactly the allowlist", () => {
   }
 });
 
-test("the allowlist is the eleven CAD tools plus the support tools, with no duplicates", () => {
-  assert.equal(SOLIDWORKS_TOOLS.length, 11);
+test("the allowlist is the twelve CAD tools plus the support tools, with no duplicates", () => {
+  assert.equal(SOLIDWORKS_TOOLS.length, 12);
   assert.ok(SOLIDWORKS_TOOLS.every((toolName) => toolName.startsWith("mcp__solidworks__")));
   assert.deepEqual(
     [...ALLOWED_TOOLS],

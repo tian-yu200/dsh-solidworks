@@ -24,6 +24,7 @@
 | `confirm_action` | 对应原动作 | 用户明确批准精确摘要后执行一个待办动作。 |
 | `cancel_action` | 取消待办 | 取消待确认动作，不执行其 payload。 |
 | `finish_job` | 验证 | 运行最终客观验证并结束任务。 |
+| `read_drawing_text` | 只读 | 用 Windows 内置 OCR 一次读出图上所有文字及其位置和网格格；读图第一步，不需要任务，不接触 CAD。 |
 | `read_drawing_region` | 只读 | 放大工程图局部，读取小尺寸文字；不需要任务，不接触 CAD。 |
 
 专用 profile 的策略插件只允许这 11 个 SolidWorks 工具，外加下方 4 个支撑工具。

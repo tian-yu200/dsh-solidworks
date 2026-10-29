@@ -1,7 +1,7 @@
 """The solidworks-cad skill's own reference files, served as read-only MCP resources.
 
 WHY THIS EXISTS. The SolidWorks CAD preset has no local file tool — deliberately: the
-solidworks-policy allowlist is the eleven `mcp__solidworks__*` tools plus four support tools. So a
+solidworks-policy allowlist is the twelve `mcp__solidworks__*` tools plus four support tools. So a
 `references/<file>.md` link inside SKILL.md was a pointer the model could not follow. A live
 desktop session tried `mcp__fetch__fetch` with a `file://` URL (rejected: local paths only, the
 reverse of every other rule here), then `list_mcp_resources` and `list_mcp_resource_templates`

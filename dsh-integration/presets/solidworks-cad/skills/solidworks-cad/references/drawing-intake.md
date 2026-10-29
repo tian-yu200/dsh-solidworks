@@ -15,6 +15,11 @@ it is not restricted to a folder: any local file the session can name is readabl
 Reading must CONVERGE FAST. Each step costs 45-90 s, so the number of STEPS matters as much as the
 number of crops: batching is the point, not politeness. Follow these rounds exactly.
 
+- **Round 0 — one OCR pass (do this FIRST).** `read_drawing_text(image_path)` OCRs the whole
+  sheet with Windows' built-in engine and returns every text with its box and grid cell. It costs
+  ~3 s and is not charged to the crop budget. Treat its list as a CANDIDATE table: it is
+  deterministic and often right, but it misreads small symbols, so anything that matters is
+  confirmed by a crop below. It usually removes most of the crops you would otherwise need.
 - **Round 1 — one overview.** `read_drawing_region(image_path)` with an empty `region`: the gridded
   overview, which is FREE (never charged to the budget). From it, write down every view, the
   projection system, the scale and title block, and **the complete list of dimension clusters to

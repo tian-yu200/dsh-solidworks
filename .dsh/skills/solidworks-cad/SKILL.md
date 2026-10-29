@@ -5,7 +5,7 @@ description: "Use for SolidWorks work AND for reading engineering drawings — a
 
 # SolidWorks CAD
 
-Operate SolidWorks only through these eleven high-level `mcp__solidworks__` tools.
+Operate SolidWorks only through these twelve high-level `mcp__solidworks__` tools.
 Approved support tools for workflow assistance: `ask_user_question`, `todo_write`,
 `skill`, `modlens_read_image` (local image file paths only; URL forms such as
 `http://` are rejected), `list_mcp_resources` and `read_mcp_resource` — the only way to open a
@@ -30,11 +30,12 @@ result is compact single-line JSON. `start_job` returns `job_id` and
 | `confirm_action` | Execute exactly one action after fresh, explicit user approval. |
 | `cancel_action` | Cancel a queued confirmation action without executing it; use this to release a pending Feature Graph. |
 | `finish_job` | Run final objective verification and close the authenticated job. |
+| `read_drawing_text` | OCR every text on a drawing image with its position and grid cell; step 1 of reading, read-only. |
 | `read_drawing_region` | Zoom part of a drawing image (grid cell or pixel box) so small dimensions can be read; read-only, needs no job and touches no CAD. |
 
 There is no model-visible low-level fallback. Do not use SolidWorks COM, Shell,
 macros, scripts, REST endpoints, desktop automation, or legacy low-level CAD MCP
-tools. Report `CAPABILITY_GAP` when these eleven tools cannot express or inspect the
+tools. Report `CAPABILITY_GAP` when these twelve tools cannot express or inspect the
 requested operation. If the tool surface is unavailable, report `MCP_UNAVAILABLE`
 and make no CAD call.
 
@@ -544,7 +545,5 @@ Report:
 - final `status`, `verification_status`, `recovery_status`, and `trust_level`
 - assumptions, unavailable checks, or capability gaps
 
-Never claim success from appearance or a tool return code alone.
-
-Keep this main skill at or below 550 lines; disclose detailed domain rules through
-the directly linked reference files.
+Never claim success from appearance or a tool return code alone. Keep this main
+skill at or below 550 lines; disclose detail through the linked reference files.

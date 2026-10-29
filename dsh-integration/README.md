@@ -7,7 +7,7 @@ browser profiles and supplies a dedicated CAD preset and policy.
 
 ```text
 DSH web or solidworks profile
-  -> host-owned MCP client and eleven high-level tools
+  -> host-owned MCP client and twelve high-level tools
   -> solidworks-cad preset for CAD instructions and skills
   -> Python orchestration and job policy
   -> SolidPilot compiler and C# execution service
@@ -17,7 +17,7 @@ DSH web or solidworks profile
 The model never receives direct access to COM, Shell, macros, REST execution
 endpoints, or the legacy low-level CAD MCP tool surface.
 
-Both browser profiles own an MCP client so every resumed session sees the eleven
+Both browser profiles own an MCP client so every resumed session sees the twelve
 tools from the host layer, including sessions composed from an older preset
 generation. The `solidworks-cad` preset owns only CAD instructions and skills.
 The dedicated profile also selects that preset by default and adds the policy
@@ -75,7 +75,8 @@ The dedicated MCP exposes exactly:
 7. `request_confirmation`
 8. `confirm_action`
 9. `finish_job`
-10. `read_drawing_region`
+10. `read_drawing_text`
+11. `read_drawing_region`
 
 `read_drawing_region` is the drawing-intake zoom: a local image path plus a grid cell or a
 source-pixel box, returning a crop that stays inside the model's image budget. It is read-only,

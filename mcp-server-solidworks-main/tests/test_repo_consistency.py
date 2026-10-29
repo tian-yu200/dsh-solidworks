@@ -11,7 +11,7 @@ live one level above the adapters:
    copies — no dead knowledge files, no dangling links.
 3. The model surface registered by `adapters/dsh/server.py` is exactly the set
    the `solidworks-policy` plugin allowlists, and is exactly the documented
-   eleven tools (README, docs/SolidWorks-MCP工具清单.md, SKILL Tool Boundary).
+   twelve tools (README, docs/SolidWorks-MCP工具清单.md, SKILL Tool Boundary).
 4. The `SKILL.md` frontmatter parses as YAML with a REAL YAML parser and yields a string
    `name` and a string `description`. DSH's skill loader ignores a file whose frontmatter does
    not parse (it logs "ignored: invalid YAML frontmatter" and the skill never reaches any
@@ -55,7 +55,8 @@ EXPECTED_TOOLS = frozenset(
         "confirm_action",
         "cancel_action",
         "finish_job",
-        "read_drawing_region",
+        "read_drawing_text",
+    "read_drawing_region",
     }
 )
 
@@ -269,7 +270,7 @@ def test_ten_tool_surface_is_registered_and_allowlisted():
         f"the policy allowlist; {SURFACE_DRIFT_HINT}"
     )
     assert registered == EXPECTED_TOOLS, (
-        f"model surface drifted from the documented eleven tools "
+        f"model surface drifted from the documented twelve tools "
         f"(diff={sorted(registered ^ EXPECTED_TOOLS)}); {SURFACE_DRIFT_HINT}"
     )
 
@@ -393,7 +394,7 @@ POLICY_DIR = os.path.join(REPO_ROOT, "dsh-integration", "plugins", "solidworks-p
 POLICY_JS = os.path.join(POLICY_DIR, "index.js")
 POLICY_MANIFEST = os.path.join(POLICY_DIR, "package.json")
 
-# What a SolidWorks CAD session may use besides the eleven CAD tools. The desktop (tauri) profile
+# What a SolidWorks CAD session may use besides the twelve CAD tools. The desktop (tauri) profile
 # has no modlens package, so that entry is inert there; it stays because SKILL.md and README.md
 # document it as approved for the CLI profile, where whole-sheet reading has no other route.
 POLICY_SUPPORT_TOOLS = {
@@ -418,7 +419,7 @@ def _policy_array(name):
 
 
 def test_policy_support_tools_are_exactly_the_approved_set():
-    """The allowlist is closed: the eleven CAD tools plus this fixed support set, and nothing else.
+    """The allowlist is closed: the twelve CAD tools plus this fixed support set, and nothing else.
 
     Equality is the whole check — a future `bash`/`fetch`/`playwright` entry can only arrive by
     editing this test, which is the point. What the guard refuses is covered by the plugin's own
@@ -430,7 +431,7 @@ def test_policy_support_tools_are_exactly_the_approved_set():
         % (sorted(support - POLICY_SUPPORT_TOOLS), sorted(POLICY_SUPPORT_TOOLS - support)))
     cad = _policy_array("SOLIDWORKS_TOOLS")
     assert {n.replace("mcp__solidworks__", "") for n in cad} == EXPECTED_TOOLS, (
-        "the CAD half must stay the eleven documented tools")
+        "the CAD half must stay the twelve documented tools")
 
 
 def test_policy_peer_dependencies_admit_the_cli_and_the_desktop_core():

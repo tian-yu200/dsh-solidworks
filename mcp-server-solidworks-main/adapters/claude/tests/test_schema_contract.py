@@ -20,7 +20,7 @@ recipe-usage.md. Resources have no `tool-schemas.json` counterpart (that file's 
 key is a tool), so the declared surface is `server._RECIPE_SECTIONS` itself.
 
 THIRD CHECK (2026-08-29, DSH fork): the contract may be a superset of this adapter's surface.
-Upstream exposed every wire tool through server.py; the dsh-solidwork fork moved eleven of them
+Upstream exposed every wire tool through server.py; the dsh-solidwork fork moved twelve of them
 (drawing tables/annotations, exploded views, Toolbox inserts, undo scopes) behind the DSH
 orchestrator's nine high-level tools, where `backend.call(name, params)` dispatches them by
 name. So a tool that is in tool-schemas.json but not exposed by server.py is drift ONLY if no

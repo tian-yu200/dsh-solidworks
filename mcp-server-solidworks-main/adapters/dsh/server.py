@@ -7,6 +7,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import ResourceSecurity
 
 import intake
+import ocr
 import skill_resources
 from backend import ExecutionLayerError
 from orchestrator import orchestrator
@@ -354,6 +355,34 @@ def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
 
 
 @mcp.tool(structured_output=False)
+def read_drawing_text(image_path: str) -> str:
+    """STEP 1 OF READING A DRAWING: OCR every text on the sheet, with its position.
+
+    Read-only and standalone: no CAD document, no job, no SolidWorks, no crop budget. It uses
+    Windows' built-in OCR (Windows.Media.Ocr) — nothing to install — and reads the sheet at three
+    rotations so vertical dimension text is caught too.
+
+    Call this FIRST, before any `read_drawing_region` crop. A whole sheet inside the image budget
+    renders 3 mm digits as a few pixels; OCR reads them at full resolution and returns ONE table
+    instead of a dozen zoom round trips (each of which costs 45-90 s).
+
+    image_path: LOCAL image file path only, same rules as `read_drawing_region`.
+
+    Returns one JSON object: `texts` is a list of {text, raw, box:[x0,y0,x1,y1] in SOURCE pixels,
+    grid_cell (A-H x 1-6, same grid as the overview), rotation, confidence}. `raw` is what the
+    engine returned and `text` is the symbol-normalised form (look-alikes mapped to D/R/x/+-/deg
+    and thread classes). Text found in more than one rotation is merged.
+
+    THIS IS A CANDIDATE TABLE, NOT TRUTH. OCR misreads small text. Map its values to features, and
+    verify anything that matters against a crop before using it in a graph. Anything still
+    uncertain is UNKNOWN: ask the user, never guess.
+
+    Windows OCR reports no per-text confidence, so `confidence` is null rather than invented.
+    """
+    return _json_result(lambda: ocr.result_payload(image_path))
+
+
+@mcp.tool(structured_output=False)
 def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
                         regions: list[str] | None = None,
                         reset_budget: bool = False):
@@ -380,6 +409,7 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
     user — do not invent a dimension, tolerance, material or standard-part value.
 
     READING PROTOCOL (follow it exactly; the per-step cost is what makes it matter):
+    0. call read_drawing_text FIRST: one OCR pass gives you every text and its grid cell;
     1. call ONCE with region='' for the gridded overview, and list EVERY dimension cluster you
        must read with its cell or pixel box;
     2. request EVERY needed crop in ONE call: pass regions=['B2','C4','D3',...] (up to 12, one
