@@ -12,6 +12,11 @@ live one level above the adapters:
 3. The model surface registered by `adapters/dsh/server.py` is exactly the set
    the `solidworks-policy` plugin allowlists, and is exactly the documented
    eleven tools (README, docs/SolidWorks-MCP工具清单.md, SKILL Tool Boundary).
+4. The `SKILL.md` frontmatter parses as YAML with a REAL YAML parser and yields a
+   string `name` and a string `description`. DSH's skill loader ignores a file whose
+   frontmatter does not parse (it logs "ignored: invalid YAML frontmatter" and the skill
+   never reaches any catalog), and a plain scalar containing ": " is exactly how that
+   happens — silently, in every mode. A stdlib-only check cannot see this class of bug.
 
 Run with the adapter venv python from `mcp-server-solidworks-main/`:
 `adapters/claude/.venv/Scripts/python.exe -m pytest`
@@ -19,12 +24,17 @@ Run with the adapter venv python from `mcp-server-solidworks-main/`:
 import os
 import re
 
+import yaml  # PyYAML (requirements-dev.txt): the same parser family DSH itself uses
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MIRROR = os.path.join(REPO_ROOT, ".dsh", "skills", "solidworks-cad")
 PRESET = os.path.join(
     REPO_ROOT, "dsh-integration", "presets", "solidworks-cad", "skills", "solidworks-cad"
 )
 SKILL_MAX_LINES = 550
+# DSH's loader only requires a non-empty string, so this is OUR bound: the 1024-char convention a
+# skill catalog is built to, kept so a future cap cannot silently drop the skill.
+SKILL_MAX_DESCRIPTION = 1024
 
 EXPECTED_TOOLS = frozenset(
     {
@@ -102,6 +112,54 @@ def test_skill_budget_and_reference_links():
             f"reference files {orphans} at {root} are not linked from SKILL.md; "
             "link them or remove them"
         )
+
+
+def _frontmatter(path):
+    """The YAML block between the leading `---` pair, exactly as DSH's loader takes it."""
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    assert lines and lines[0].strip() == "---", f"{path}: SKILL.md must open with ---"
+    assert "---" in lines[1:], f"{path}: SKILL.md frontmatter has no closing ---"
+    return "\n".join(lines[1:lines.index("---", 1)])
+
+
+def test_skill_frontmatter_is_valid_yaml_with_string_fields():
+    # DSH logs `skill file ... ignored: invalid YAML frontmatter` and the skill then exists in NO
+    # catalog, in any mode — no error reaches the model, the skill is simply absent. The bug that
+    # did it here was a plain-scalar description containing "SolidWorks: never", which YAML reads
+    # as a nested mapping. Only a real YAML parser can catch that.
+    for root, label in ((PRESET, "install preset"), (MIRROR, ".dsh mirror")):
+        path = os.path.join(root, "SKILL.md")
+        block = _frontmatter(path)
+        try:
+            data = yaml.safe_load(block)
+        except yaml.YAMLError as ex:
+            raise AssertionError(
+                f"{label} SKILL.md frontmatter is not valid YAML, so DSH drops the skill: {ex}"
+            ) from ex
+        assert isinstance(data, dict), f"{label}: frontmatter must be a mapping, got {type(data)}"
+        name, description = data.get("name"), data.get("description")
+        # DSH's stringField() requires a non-empty STRING for both, or the file is ignored.
+        assert isinstance(name, str) and name == "solidworks-cad", (
+            f"{label}: name must be the string 'solidworks-cad', got {name!r}")
+        assert isinstance(description, str) and description.strip(), (
+            f"{label}: description must be a non-empty string, got {type(description)} — a colon "
+            "inside an unquoted plain scalar turns it into a mapping and DSH ignores the skill")
+        assert len(description) <= SKILL_MAX_DESCRIPTION, (
+            f"{label}: description is {len(description)} chars "
+            f"(bound {SKILL_MAX_DESCRIPTION})")
+
+
+def test_frontmatter_guard_rejects_the_colon_space_shape():
+    # The guard must have teeth: the exact bug shape may not come back as a usable string.
+    buggy = "name: solidworks-cad\ndescription: use when the target is SolidWorks: never install\n"
+    try:
+        parsed = yaml.safe_load(buggy)
+    except yaml.YAMLError:
+        return
+    assert not isinstance(parsed.get("description"), str), (
+        "a colon-space plain scalar parsed as a string — this test no longer detects the bug")
+    # (it parses as a mapping instead, which the skill test above also rejects)
 
 
 def _server_tool_names():

@@ -1,6 +1,6 @@
 ---
 name: solidworks-cad
-description: Use for SolidWorks work AND for reading engineering drawings — a 三视图 / 零件图 / 工程图 / pictorial / sectional drawing image that must be modelled or rebuilt as a SolidWorks 3D part, plus inspection, creation, editing, saving, exporting and objective verification through the dedicated mcp__solidworks__ tools. Takes precedence over generic CAD skills (build123d, CadQuery, OpenSCAD, STEP scripting) whenever the target is SolidWorks: never install packages or drive another kernel — the SolidWorks MCP tools and the Feature Graph are the only route.
+description: "Use for SolidWorks work AND for reading engineering drawings — a 三视图 / 零件图 / 工程图 / pictorial / sectional drawing image that must be modelled or rebuilt as a SolidWorks 3D part, plus inspection, creation, editing, saving, exporting and objective verification through the dedicated mcp__solidworks__ tools. Takes precedence over generic CAD skills (build123d, CadQuery, OpenSCAD, STEP scripting) whenever the target is SolidWorks — never install packages or drive another kernel — the SolidWorks MCP tools and the Feature Graph are the only route."
 ---
 
 # SolidWorks CAD
