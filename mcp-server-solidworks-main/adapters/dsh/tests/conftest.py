@@ -371,6 +371,8 @@ def cad_env(tmp_path, monkeypatch):
         "job-1", "test CAD job", orchestrator._identity(state)
     )
     job["last_state"] = dict(state)
+    job["document_write_allowed"] = True  # fixture models an explicitly targeted document
+    job["explicit_target_document"] = True
     store.save(job)
     return SimpleNamespace(
         orchestrator=orchestrator,

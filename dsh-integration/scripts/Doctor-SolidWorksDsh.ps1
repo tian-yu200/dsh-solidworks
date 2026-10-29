@@ -215,8 +215,8 @@ if (Test-Path -LiteralPath $Python) {
 
     Push-Location $AdapterDir
     try {
-        & $Python -c "import asyncio,server; assert len(asyncio.run(server.mcp.list_tools())) == 10" *> $null
-        Add-Check "MCP import / 10 tools" ($LASTEXITCODE -eq 0) $Server
+        & $Python -c "import asyncio,server; assert len(asyncio.run(server.mcp.list_tools())) == 11" *> $null
+        Add-Check "MCP import / 11 tools" ($LASTEXITCODE -eq 0) $Server
     } finally {
         Pop-Location
     }

@@ -5,7 +5,7 @@ description: Use for SolidWorks work AND for reading engineering drawings — a 
 
 # SolidWorks CAD
 
-Operate SolidWorks only through these ten high-level `mcp__solidworks__` tools.
+Operate SolidWorks only through these eleven high-level `mcp__solidworks__` tools.
 Approved support tools for workflow assistance: `ask_user_question`, `todo_write`,
 `skill`, and `modlens_read_image` (local image file paths only; URL forms such as
 `http://` are rejected).
@@ -27,14 +27,29 @@ result is compact single-line JSON. `start_job` returns `job_id` and
 | `save_or_export` | Save, export, batch export, or close through the safety policy. |
 | `request_confirmation` | Refresh one-time confirmation data for a pending high-risk action. |
 | `confirm_action` | Execute exactly one action after fresh, explicit user approval. |
+| `cancel_action` | Cancel a queued confirmation action without executing it; use this to release a pending Feature Graph. |
 | `finish_job` | Run final objective verification and close the authenticated job. |
 | `read_drawing_region` | Zoom part of a drawing image (grid cell or pixel box) so small dimensions can be read; read-only, needs no job and touches no CAD. |
 
 There is no model-visible low-level fallback. Do not use SolidWorks COM, Shell,
 macros, scripts, REST endpoints, desktop automation, or legacy low-level CAD MCP
-tools. Report `CAPABILITY_GAP` when the ten tools cannot express or inspect the
-requested operation. If the ten-tool surface is unavailable, report
-`MCP_UNAVAILABLE` and make no CAD call.
+tools. Report `CAPABILITY_GAP` when these eleven tools cannot express or inspect the
+requested operation. If the tool surface is unavailable, report `MCP_UNAVAILABLE`
+and make no CAD call.
+
+Two job-scoped write rules:
+- **Pending Feature Graph** — once `submit_feature_graph` returns
+  `pending_confirmation`, every document write is refused with
+  `GRAPH_PENDING_CONFIRMATION` until that action is confirmed or cancelled.
+  Confirm it with `confirm_action`, or release the guard with
+  `cancel_action`.
+- **Targetless job on a pre-existing document** — a job begun without
+  `target_document` binds read-only to whatever document was active, and
+  refuses `save_or_export`, `apply_document_edits` and
+  `submit_feature_graph(fresh_document=false)` with
+  `JOB_DOCUMENT_READ_ONLY`. Start a new job with `target_document` to edit
+  that document, or build a fresh document with a confirmed
+  `fresh_document` Feature Graph.
 
 ## Core Workflow
 

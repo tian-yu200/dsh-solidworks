@@ -2,13 +2,13 @@
 
 本文说明 `dsh-solidwork` 的两层工具边界：
 
-1. 模型可见的 10 个高层工具。
+1. 模型可见的 11 个高层工具。
 2. 仅由编排器使用的低层 SolidPilot 与 C# 执行命令。
 
 模型能力的事实源是：
 `mcp-server-solidworks-main/adapters/dsh/server.py`。
 
-## 1. 模型可见的 10 个工具
+## 1. 模型可见的 11 个工具
 
 调用前缀为 `mcp__solidworks__`。
 
@@ -22,10 +22,11 @@
 | `save_or_export` | 写/覆盖/另存为/关闭 | 保存、导出、批量导出或关闭。 |
 | `request_confirmation` | 只读确认 | 验证待办动作并轮换一次性确认 token。 |
 | `confirm_action` | 对应原动作 | 用户明确批准精确摘要后执行一个待办动作。 |
+| `cancel_action` | 取消待办 | 取消待确认动作，不执行其 payload。 |
 | `finish_job` | 验证 | 运行最终客观验证并结束任务。 |
 | `read_drawing_region` | 只读 | 放大工程图局部，读取小尺寸文字；不需要任务，不接触 CAD。 |
 
-专用 profile 的策略插件只允许这 10 个 SolidWorks 工具，外加下方 4 个支撑工具。
+专用 profile 的策略插件只允许这 11 个 SolidWorks 工具，外加下方 4 个支撑工具。
 任何其他 `mcp__solidworks__*` 工具都不属于模型可调用接口。
 
 `read_drawing_region(image_path, region="", zoom=2)`：`image_path` 只接受本地图片文件路径
@@ -56,7 +57,7 @@
 
 任务会记录目标文档标题、路径和类型。用户在 SolidWorks 中切换活动文档后，下一次任务调用会因身份不一致而停止。
 
-`target_document` 留空且当前没有活动文档时，任务处于未绑定状态：它只能通过任务自身的建文档调用绑定，即 `submit_feature_graph` 且 `fresh_document=true`。其余所有依赖文档的调用——`apply_document_edits`、`submit_feature_graph` 且 `fresh_document=false`、`drawing_workflow`、save/export/batch/close，以及执行非建文档待办动作的 `confirm_action`——都会在发起任何执行层调用前失败并返回 `JOB_DOCUMENT_UNBOUND`。此时需要用 `target_document` 重新 `start_job`，或先打开文档再启动新任务。`save_or_export` 的 `close` 且 `close_all=true` 在未绑定任务上允许执行，但不会建立绑定。
+`target_document` 留空且当前没有活动文档时，任务处于未绑定状态：它只能通过任务自身的建文档调用绑定，即 `submit_feature_graph` 且 `fresh_document=true`。若留空时已有活动文档，任务将该文档绑定为只读。此任务不得保存、另存为、导出、关闭或编辑该文档，也不得以 `fresh_document=false` 建模；这些写操作在任何执行层调用前以 `JOB_DOCUMENT_READ_ONLY` 拒绝。两种情况下，待确认 Feature Graph 均会阻止其他文档写操作，以 `GRAPH_PENDING_CONFIRMATION` 提示先确认或用 `cancel_action` 取消。`close_all=true` 也不得绕过这些保护。无活动文档的未绑定任务仍可通过已确认的 `close_all` 执行显式全局关闭，但不会建立文档绑定。
 
 ## 3. `inspect_state`
 
@@ -255,7 +256,7 @@ action_summary
 | 输出 | `save_document`、`export_document`、`batch_export`、`close_document` |
 | 事务 | `begin_undo_scope`、`commit_undo_scope`、`rollback_undo_scope` |
 
-这些名字不是 DSH 模型接口。模型需要的能力必须通过 10 个高层工具表达。
+这些名字不是 DSH 模型接口。模型需要的能力必须通过 11 个高层工具表达。
 
 ## 12. 事实来源
 

@@ -250,10 +250,15 @@ class CadOrchestrator:
             job["document_origin"] = (
                 ORIGIN_PRE_EXISTING if previous_identity else ORIGIN_UNBOUND
             )
+            job["document_write_allowed"] = bool(
+                job.get("previous_document_write_allowed", False)
+            )
+            job.pop("previous_document_write_allowed", None)
         else:
             job["expected_document"] = created_identity or {}
             job["last_state"] = state
             job["document_origin"] = ORIGIN_CREATED
+            job["document_write_allowed"] = True
         return recovery_status, state, event
 
     @staticmethod
@@ -784,6 +789,8 @@ class CadOrchestrator:
             job["document_origin"] = self._document_origin(
                 target_document, active_before, state
             )
+            job["document_write_allowed"] = bool(target_document)
+            job["explicit_target_document"] = bool(target_document)
             job_store.save(job)
             # The result must stay SMALL: the host elides a long tool result down to its
             # head + a marker + its tail, which used to bury `job_token` in the removed
@@ -825,6 +832,38 @@ class CadOrchestrator:
                 f"CAD job {job_id} target document is already closed"
             )
         return job
+
+    @staticmethod
+    def _pending_feature_graph(job):
+        return next(
+            (
+                action
+                for action in (job.get("pending_actions") or {}).values()
+                if action.get("kind") == "feature_graph"
+                and not action.get("consumed")
+            ),
+            None,
+        )
+
+    def _require_no_pending_feature_graph(self, job, operation):
+        action = self._pending_feature_graph(job)
+        if action:
+            raise RuntimeError(
+                "GRAPH_PENDING_CONFIRMATION: "
+                f"{operation} is refused while Feature Graph action "
+                f"'{action.get('action_id', 'unknown')}' is awaiting confirmation. "
+                "Confirm or cancel that graph first."
+            )
+
+    def _require_document_write_access(self, job, operation):
+        self._require_no_pending_feature_graph(job, operation)
+        if not job.get("document_write_allowed", False):
+            raise RuntimeError(
+                "JOB_DOCUMENT_READ_ONLY: this job began without an explicit target "
+                "document, and the active document was pre-existing. It is bound "
+                "read-only; start a new job with target_document or build a fresh "
+                "document with a confirmed fresh_document Feature Graph."
+            )
 
     @staticmethod
     def _job_is_unbound(job):
@@ -1220,6 +1259,20 @@ class CadOrchestrator:
                 )
             if payload_hash(action.get("payload")) != action.get("payload_hash"):
                 raise PermissionError("Pending action parameters changed after approval")
+            kind = action["kind"]
+            if kind != "feature_graph":
+                self._require_no_pending_feature_graph(
+                    job, f"confirm_action({kind})"
+                )
+                is_unbound_close_all = (
+                    kind == "save_or_export"
+                    and action.get("payload", {}).get("operation") == "close"
+                    and action.get("payload", {}).get("close_all")
+                    and self._job_is_unbound(job)
+                )
+                if not is_unbound_close_all:
+                    self._require_bound_job(job, f"confirm_action({kind})")
+                    self._require_document_write_access(job, f"confirm_action({kind})")
             # Re-check the binding at approval time: the job may still be unbound (or may have
             # been left unbound by a failed create), in which case executing the action would
             # act on whatever document the user has open. Only the job's own document-creating
@@ -1234,7 +1287,6 @@ class CadOrchestrator:
                     "then retry."
                 )
 
-            kind = action["kind"]
             payload, current_risk, current_summary, assessed_state = (
                 self._reassess_risk(kind, action["payload"], job)
             )
@@ -1278,6 +1330,28 @@ class CadOrchestrator:
                 )
             raise ValueError(f"Unsupported pending action kind: {kind}")
 
+    def cancel_action(self, job_id, job_token, action_id):
+        """Cancel a queued action without executing it; used to release dependent write guards."""
+        with self._write_lock:
+            job = self._load_job(job_id, job_token)
+            action = (job.get("pending_actions") or {}).get(action_id)
+            if not action:
+                raise ValueError(f"Unknown pending action: {action_id}")
+            if action.get("consumed"):
+                raise ValueError("Pending action has already been consumed")
+            action["consumed"] = True
+            action["cancelled"] = True
+            action["cancelled_at"] = utc_now()
+            job_store.save(job)
+            return envelope(
+                status="cancelled",
+                job_id=job_id,
+                action_id=action_id,
+                target_document=self._target(job.get("last_state") or {}),
+                instruction="The pending action was cancelled and was not executed.",
+                **self._job_metadata(job),
+            )
+
     def feature_graph(self, job_id, job_token, graph_json, fresh_document=True):
         graph = json.loads(graph_json)
         if not isinstance(graph, dict):
@@ -1286,10 +1360,12 @@ class CadOrchestrator:
         risk = graph_risk(graph)
         with self._write_lock:
             job = self._load_job(job_id, job_token)
+            self._require_no_pending_feature_graph(job, "submit_feature_graph")
             if not payload["fresh_document"]:
                 # Building into the ACTIVE document needs a known target; a fresh_document
                 # graph creates its own document, which is how an unbound job gets bound.
                 self._require_bound_job(job, "submit_feature_graph with fresh_document=false")
+                self._require_document_write_access(job, "submit_feature_graph")
             if risk == "batch":
                 return self._queue_confirmation(
                     job,
@@ -1307,6 +1383,10 @@ class CadOrchestrator:
         before = {}
 
         if fresh_document:
+            job["previous_document_write_allowed"] = bool(
+                job.get("document_write_allowed", False)
+            )
+            job_store.save(job)
             opened = backend.call(
                 "open_new_assembly"
                 if self._graph_is_assembly(payload["graph"])
@@ -1314,6 +1394,8 @@ class CadOrchestrator:
                 {},
             )
             if opened.get("status") != "COMPLETED":
+                job.pop("previous_document_write_allowed", None)
+                job_store.save(job)
                 error = self._response_error(opened)
                 self._record_failure(
                     job,
@@ -1405,6 +1487,7 @@ class CadOrchestrator:
             before = current
             job["expected_document"] = self._identity(current)
             job["document_origin"] = ORIGIN_CREATED
+            job["document_write_allowed"] = True
             job["last_state"] = current
             job_store.save(job)
         else:
@@ -1597,6 +1680,8 @@ class CadOrchestrator:
             }
         )
         self._record_success(job, "feature_graph", "built_unverified")
+        job.pop("previous_document_write_allowed", None)
+        job_store.save(job)
         # A non-fatal compiler finding (today: MATERIAL_NOT_FOUND) — the geometry is committed and
         # the document just lacks the requested property. Emitted only when there IS one, and
         # never as `error`: a warning that reads as a failure invites a rollback of good work.
@@ -1623,6 +1708,7 @@ class CadOrchestrator:
         with self._write_lock:
             job = self._load_job(job_id, job_token)
             self._require_bound_job(job, "apply_document_edits")
+            self._require_document_write_access(job, "apply_document_edits")
             if risk in ("destructive", "batch"):
                 return self._queue_confirmation(
                     job,
@@ -1852,6 +1938,7 @@ class CadOrchestrator:
         with self._write_lock:
             job = self._load_job(job_id, job_token)
             self._require_bound_job(job, "drawing_workflow")
+            self._require_no_pending_feature_graph(job, "drawing_workflow")
             if risk == "batch":
                 return self._queue_confirmation(
                     job,
@@ -1920,6 +2007,7 @@ class CadOrchestrator:
             }
             job["expected_document"] = created_identity
             job["document_origin"] = ORIGIN_CREATED
+            job["document_write_allowed"] = True
             job["last_state"] = state
             self._record_failure(
                 job,
@@ -2008,6 +2096,7 @@ class CadOrchestrator:
         step_states.append(state)
         job["expected_document"] = self._identity(state)
         job["document_origin"] = ORIGIN_CREATED
+        job["document_write_allowed"] = True
         job["last_state"] = state
         job_store.save(job)
         # The identity of the drawing this workflow created: a failure later on discards it,
@@ -2447,10 +2536,19 @@ class CadOrchestrator:
         }
         with self._write_lock:
             job = self._load_job(job_id, job_token)
+            self._require_no_pending_feature_graph(job, f"save_or_export({operation})")
             # close_all intentionally targets whatever is open, so it is the one operation
             # allowed on an unbound job; every other operation needs a bound document.
             if not (operation == "close" and close_all):
                 self._require_bound_job(job, f"save_or_export({operation})")
+                self._require_document_write_access(job, f"save_or_export({operation})")
+            elif job.get("document_origin") == ORIGIN_PRE_EXISTING and not job.get(
+                "document_write_allowed", False
+            ):
+                raise RuntimeError(
+                    "JOB_DOCUMENT_READ_ONLY: close_all is refused because this "
+                    "targetless job is bound to a pre-existing user document."
+                )
             payload, assessed_state, risk, summary = (
                 self._assess_save_or_export(job, payload)
             )
@@ -2846,6 +2944,7 @@ class CadOrchestrator:
             job = self._load_job(
                 job_id, job_token, allow_closed_target=True
             )
+            self._require_no_pending_feature_graph(job, "finish_job")
             if job.get("target_closed"):
                 state = {}
                 verification = {

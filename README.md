@@ -30,7 +30,7 @@ DeepSeek Harness
 
 ## 模型可见工具
 
-专用会话只能看到以下 9 个 `mcp__solidworks__*` 工具：
+专用会话只能看到以下 11 个 `mcp__solidworks__*` 工具：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -42,9 +42,10 @@ DeepSeek Harness
 | `save_or_export` | 保存、导出、批量导出或关闭 |
 | `request_confirmation` | 为待确认危险动作刷新一次性确认数据 |
 | `confirm_action` | 在用户明确批准后执行精确待办动作 |
+| `cancel_action` | 取消待确认动作，不执行该动作 |
 | `finish_job` | 完成最终客观验证并结束任务 |
 
-除以上 9 个 SolidWorks 工具外，策略插件还放行 4 个支撑工具：
+除以上 11 个 SolidWorks 工具外，策略插件还放行 4 个支撑工具：
 `ask_user_question`（向用户提问）、`todo_write`（维护待办清单）、`skill`（加载技能）、
 `modlens_read_image`（读取图片证据；仅接受本地图片文件路径，`http://`、`https://`、
 `ftp://`、`file://` 等 URL 形式一律拒绝）。除此之外的任何工具一律拒绝。

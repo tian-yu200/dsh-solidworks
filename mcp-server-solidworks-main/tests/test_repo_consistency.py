@@ -11,7 +11,7 @@ live one level above the adapters:
    copies — no dead knowledge files, no dangling links.
 3. The model surface registered by `adapters/dsh/server.py` is exactly the set
    the `solidworks-policy` plugin allowlists, and is exactly the documented
-   ten tools (README, docs/SolidWorks-MCP工具清单.md, SKILL Tool Boundary).
+   eleven tools (README, docs/SolidWorks-MCP工具清单.md, SKILL Tool Boundary).
 
 Run with the adapter venv python from `mcp-server-solidworks-main/`:
 `adapters/claude/.venv/Scripts/python.exe -m pytest`
@@ -26,7 +26,7 @@ PRESET = os.path.join(
 )
 SKILL_MAX_LINES = 550
 
-EXPECTED_TEN_TOOLS = frozenset(
+EXPECTED_TOOLS = frozenset(
     {
         "start_job",
         "inspect_state",
@@ -36,6 +36,7 @@ EXPECTED_TEN_TOOLS = frozenset(
         "save_or_export",
         "request_confirmation",
         "confirm_action",
+        "cancel_action",
         "finish_job",
         "read_drawing_region",
     }
@@ -129,9 +130,9 @@ def test_ten_tool_surface_is_registered_and_allowlisted():
         f"server.py registers {sorted(registered ^ allowlisted)} differently from "
         f"the policy allowlist; {SURFACE_DRIFT_HINT}"
     )
-    assert registered == EXPECTED_TEN_TOOLS, (
-        f"model surface drifted from the documented ten tools "
-        f"(diff={sorted(registered ^ EXPECTED_TEN_TOOLS)}); {SURFACE_DRIFT_HINT}"
+    assert registered == EXPECTED_TOOLS, (
+        f"model surface drifted from the documented eleven tools "
+        f"(diff={sorted(registered ^ EXPECTED_TOOLS)}); {SURFACE_DRIFT_HINT}"
     )
 
 

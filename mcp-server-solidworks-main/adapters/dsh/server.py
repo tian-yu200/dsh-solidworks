@@ -189,7 +189,9 @@ def submit_feature_graph(
     """Compile and execute a complete Feature Graph using SolidPilot's existing compiler.
 
     IR distances are meters and angles are radians. Large graphs return
-    pending_confirmation instead of executing immediately.
+    pending_confirmation instead of executing immediately. While a graph is pending,
+    document writes are refused with GRAPH_PENDING_CONFIRMATION until it is confirmed
+    or cancelled with cancel_action.
 
     A completed result may carry `warnings`: a non-fatal finding (today MATERIAL_NOT_FOUND)
     on work that is committed and verified — do NOT resubmit the graph or roll it back;
@@ -261,6 +263,11 @@ def save_or_export(
     the open document in memory and also returns pending_confirmation (risk save_as; the
     action_summary names the document and the target path). file_path is the full target for
     save/export and the extensionless base path for batch_export.
+
+    A queued Feature Graph blocks this and other writes until confirm_action or cancel_action.
+    Jobs started without target_document bind to the active document read-only; saving,
+    exporting, closing, or editing it is refused with JOB_DOCUMENT_READ_ONLY. A fresh
+    document created by a confirmed Feature Graph is writable by its job.
     """
     return _json_result(
         lambda: orchestrator.save_or_export(
@@ -316,6 +323,18 @@ def confirm_action(
             user_confirmation,
             action_summary,
         )
+    )
+
+
+@mcp.tool(structured_output=False)
+def cancel_action(job_id: str, job_token: str, action_id: str) -> str:
+    """Cancel a queued confirmation action without executing it.
+
+    Use this to cancel an unconfirmed Feature Graph and release its document-write guard.
+    Cancellation is final for that action; submit a new action if work is still wanted.
+    """
+    return _json_result(
+        lambda: orchestrator.cancel_action(job_id, job_token, action_id)
     )
 
 

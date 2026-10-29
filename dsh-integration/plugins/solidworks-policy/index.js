@@ -10,6 +10,7 @@ const SOLIDWORKS_TOOLS = [
   "mcp__solidworks__save_or_export",
   "mcp__solidworks__request_confirmation",
   "mcp__solidworks__confirm_action",
+  "mcp__solidworks__cancel_action",
   "mcp__solidworks__finish_job",
   "mcp__solidworks__read_drawing_region",
 ];
@@ -47,7 +48,7 @@ function isLocalImagePath(value) {
 function denialReason(toolName) {
   return (
     `Tool \`${toolName}\` is unavailable in the SolidWorks profile. ` +
-    "Use the ten high-level SolidWorks MCP tools or the approved support tools."
+    "Use the eleven high-level SolidWorks MCP tools or the approved support tools."
   );
 }
 

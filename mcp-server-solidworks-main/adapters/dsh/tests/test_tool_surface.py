@@ -17,6 +17,7 @@ EXPECTED_TOOLS = {
     "save_or_export",
     "request_confirmation",
     "confirm_action",
+    "cancel_action",
     "finish_job",
     "read_drawing_region",
 }
@@ -375,7 +376,7 @@ def test_reference_topic_literal_still_resolves_to_every_topic():
 
 def test_inspect_state_exposes_the_reference_paging_parameters():
     # The paging knobs must be visible to the model in the registered tool schema, and the
-    # tool surface must still be exactly the ten high-level tools.
+    # tool surface must still be exactly the eleven high-level tools.
     import asyncio
 
     server = _load_dsh_server()

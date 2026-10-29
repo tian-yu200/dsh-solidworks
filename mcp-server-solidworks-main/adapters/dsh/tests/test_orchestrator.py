@@ -1128,6 +1128,16 @@ def _six_node_graph():
     }
 
 
+def _batch_graph():
+    """Small fake-backend graph over the batch threshold, without invoking any CAD service."""
+    graph = _six_node_graph()
+    graph["nodes"].extend(
+        {"id": f"batch-{index}", "type": "box"}
+        for index in range(27)
+    )
+    return graph
+
+
 def _build_save_finish(env, tmp_path):
     """The task's scenario: build a fresh 6-node graph, save it, then finish the job.
 
@@ -2277,3 +2287,147 @@ def test_finish_job_close_keeps_the_verified_pre_close_state(unbound_env, tmp_pa
     )
     assert finished["target_document"] == str(tmp_path / "autoclose.SLDPRT")
     assert finished["verification"]["all_completed"] is True
+
+
+def _confirm_job_action(env, job_id, job_token, pending):
+    confirmation = env.orchestrator.request_confirmation(
+        job_id, job_token, pending["action_id"]
+    )
+    return env.orchestrator.confirm_action(
+        job_id,
+        job_token,
+        pending["action_id"],
+        confirmation["confirmation_token"],
+        confirmation["confirmation_text"],
+        confirmation["action_summary"],
+    )
+
+
+def test_pending_fresh_graph_blocks_all_job_writes_until_cancelled(cad_env, tmp_path):
+    env = cad_env
+    started = env.orchestrator.begin_job("new model, no explicit target")
+    pending = env.orchestrator.feature_graph(
+        started["job_id"], started["job_token"], json.dumps(_batch_graph()),
+        fresh_document=True,
+    )
+    assert pending["status"] == "pending_confirmation"
+    output = tmp_path / "incident-save-as.SLDPRT"
+    calls_before = len(env.backend.calls)
+    for operation, kwargs in (
+        ("save", {"file_path": str(output)}),
+        ("export", {"file_path": str(tmp_path / "incident.step"), "format": "STEP"}),
+        ("batch_export", {"file_path": str(tmp_path / "incident"), "formats_json": '["STEP"]'}),
+    ):
+        with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
+            env.orchestrator.save_or_export(
+                started["job_id"], started["job_token"], operation, **kwargs
+            )
+    with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
+        env.orchestrator.document_edits(
+            started["job_id"], started["job_token"],
+            json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
+        )
+    with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
+        env.orchestrator.feature_graph(
+            started["job_id"], started["job_token"], json.dumps({"nodes": []}),
+            fresh_document=False,
+        )
+    with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
+        env.orchestrator.drawing_workflow(
+            started["job_id"], started["job_token"], json.dumps({"views": []})
+        )
+    with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
+        env.orchestrator.finish_job(started["job_id"], started["job_token"])
+    assert env.backend.calls[calls_before:] == []
+    assert not output.exists()
+    assert env.backend.state["activeDocumentPath"] == str(env.source)
+
+    cancelled = env.orchestrator.cancel_action(
+        started["job_id"], started["job_token"], pending["action_id"]
+    )
+    assert cancelled["status"] == "cancelled"
+    with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
+        env.orchestrator.save_or_export(
+            started["job_id"], started["job_token"], "save", file_path=str(output)
+        )
+    assert env.backend.calls[calls_before:] == []
+    assert env.backend.state["activeDocumentPath"] == str(env.source)
+
+
+def test_targetless_preexisting_document_is_read_only(cad_env, tmp_path):
+    env = cad_env
+    started = env.orchestrator.begin_job("inspect active user part")
+    calls_before = len(env.backend.calls)
+    for operation, kwargs in (
+        ("save", {"file_path": str(tmp_path / "copy.SLDPRT")}),
+        ("export", {"file_path": str(tmp_path / "out.step"), "format": "STEP"}),
+        ("batch_export", {"file_path": str(tmp_path / "out"), "formats_json": '["STEP"]'}),
+    ):
+        with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
+            env.orchestrator.save_or_export(
+                started["job_id"], started["job_token"], operation, **kwargs
+            )
+    with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
+        env.orchestrator.document_edits(
+            started["job_id"], started["job_token"],
+            json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
+        )
+    with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
+        env.orchestrator.feature_graph(
+            started["job_id"], started["job_token"], json.dumps({"nodes": []}),
+            fresh_document=False,
+        )
+    for kwargs in ({}, {"close_all": True}):
+        with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
+            env.orchestrator.save_or_export(
+                started["job_id"], started["job_token"], "close", **kwargs
+            )
+    assert env.backend.calls[calls_before:] == []
+    assert env.backend.state["activeDocumentPath"] == str(env.source)
+
+
+def test_explicit_target_can_be_edited_and_saved(cad_env):
+    env = cad_env
+    started = env.orchestrator.begin_job("edit explicitly targeted part", str(env.source))
+    assert started["status"] == "completed", started
+    edited = env.orchestrator.document_edits(
+        started["job_id"], started["job_token"],
+        json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
+    )
+    assert edited["status"] == "completed", edited
+    saved = env.orchestrator.save_or_export(
+        started["job_id"], started["job_token"], "save"
+    )
+    if saved["status"] == "pending_confirmation":
+        saved = _confirm_job_action(env, started["job_id"], started["job_token"], saved)
+    assert saved["status"] == "completed", saved
+
+
+@pytest.mark.parametrize("keep_open", [False, True])
+def test_confirmed_fresh_graph_can_save_and_finish(cad_env, tmp_path, keep_open):
+    env = cad_env
+    started = env.orchestrator.begin_job("new model without target")
+    pending = env.orchestrator.feature_graph(
+        started["job_id"], started["job_token"], json.dumps(_batch_graph()),
+        fresh_document=True,
+    )
+    assert pending["status"] == "pending_confirmation"
+    built = _confirm_job_action(env, started["job_id"], started["job_token"], pending)
+    assert built["status"] == "completed", built
+    output = tmp_path / ("keep-open.SLDPRT" if keep_open else "auto-close.SLDPRT")
+    saved = env.orchestrator.save_or_export(
+        started["job_id"], started["job_token"], "save", file_path=str(output)
+    )
+    assert saved["status"] == "pending_confirmation", saved
+    saved = _confirm_job_action(env, started["job_id"], started["job_token"], saved)
+    assert saved["status"] == "completed", saved
+    finished = env.orchestrator.finish_job(
+        started["job_id"], started["job_token"], keep_open=keep_open
+    )
+    assert finished["status"] == "completed", finished
+    if keep_open:
+        assert finished["document_left_open"]["reason"] == "keep_open"
+        assert env.backend.state["activeDocumentPath"] == str(output)
+    else:
+        assert finished["closed_document"]["path"] == str(output)
+        assert env.backend.state["activeDocumentPath"] == str(env.source)
