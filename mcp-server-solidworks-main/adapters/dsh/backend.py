@@ -134,6 +134,24 @@ class SolidWorksBackend:
     def begin_transaction(self, name):
         return self.call("begin_undo_scope", {"name": name})
 
+    def documents(self):
+        """Read every open document without activation; missing/partial inventory fails closed."""
+        response = pooled_get(IDENTITY_ENDPOINT.rsplit("/", 1)[0] + "/documents", IDENTITY_TIMEOUT_SECONDS)
+        if response.status_code != 200:
+            raise ExecutionLayerError("DOCUMENT_INVENTORY_UNAVAILABLE: update the execution service before building")
+        body = response.json()
+        docs = body.get("documents")
+        fields = {"document_id", "title", "path", "type", "isDirty", "updateStamp"}
+        if (not isinstance(docs, list) or "active_document" not in body
+                or not isinstance(body.get("undo_scope_active"), bool)
+                or any(not isinstance(d, dict) or not fields.issubset(d)
+                       or not d["document_id"] or not isinstance(d["isDirty"], bool)
+                       or not isinstance(d["updateStamp"], int) for d in docs)
+                or len({d["document_id"] for d in docs}) != len(docs)
+                or (body["active_document"] is not None and body["active_document"] not in docs)):
+            raise ExecutionLayerError("DOCUMENT_INVENTORY_INVALID: incomplete document evidence")
+        return body
+
     def commit_transaction(self, name="DSH SolidWorks operation"):
         return self.call("commit_undo_scope", {"name": name})
 

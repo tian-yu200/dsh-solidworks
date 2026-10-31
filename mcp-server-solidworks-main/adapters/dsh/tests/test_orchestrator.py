@@ -9,6 +9,10 @@ from policy import payload_hash, secret_hash
 from models import utc_now
 
 
+def _minimal_graph():
+    return {"units": "meters", "nodes": [{"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02}]}
+
+
 def _edit(tool, **params):
     return {"tool": tool, "params": params}
 
@@ -318,9 +322,9 @@ def test_partial_failure_stops_remaining_edits(cad_env):
             ]
         ),
     )
-    assert result["status"] == "failed"
+    assert result["status"] == "partial"
     assert result["completed_steps"] == ["modify_dimension"]
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "recovery_unverified"
     assert write_calls == 2
 
 
@@ -355,10 +359,10 @@ def test_verification_failure_rolls_back_and_is_never_completed(cad_env):
         json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
     )
 
-    assert result["status"] == "verification_failed"
-    assert result["execution_status"] == "completed"
+    assert result["status"] == "partial"
+    assert result["execution_status"] == "partial"
     assert result["verification_status"] == "failed"
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "recovery_unverified"
     tools = [tool for tool, _params in cad_env.backend.calls]
     assert "rollback_undo_scope" in tools
     assert "commit_undo_scope" not in tools
@@ -391,7 +395,7 @@ def test_rollback_failure_reports_partial_state(cad_env):
 
     assert result["status"] == "partial"
     assert result["execution_status"] == "partial"
-    assert result["recovery_status"] == "rollback_failed"
+    assert result["recovery_status"] == "recovery_unverified"
     assert result["trust_level"] == "unverified"
 
 
@@ -610,12 +614,13 @@ def test_drawing_stops_if_created_document_is_not_still_active(cad_env):
     assert job["expected_document"]["title"] == "Drawing1"
     assert job["recovery_status"] == "rollback_failed"
 
-    with pytest.raises(RuntimeError, match="ACTIVE_DOCUMENT_CHANGED"):
-        cad_env.orchestrator.document_edits(
-            "job-1",
-            cad_env.token,
-            json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
-        )
+    pending = cad_env.orchestrator.document_edits(
+        "job-1", cad_env.token,
+        json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
+    )
+    assert pending["status"] == "pending_confirmation"
+    assert "恢复未验证" in pending["action_summary"]
+    assert [tool for tool, _ in cad_env.backend.calls] == ["create_drawing"]
 
 
 def test_drawing_recovery_never_closes_a_switched_document(cad_env):
@@ -814,7 +819,7 @@ def test_failed_post_step_verification_is_not_reported_as_completed(cad_env, tmp
         json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
     )
 
-    assert result["status"] == "failed"
+    assert result["status"] == "partial"
     assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
     assert result["completed_steps"] == []
 
@@ -865,7 +870,7 @@ def test_unbound_job_refuses_every_document_bound_operation(
         env.orchestrator.feature_graph(
             env.job_id,
             env.token,
-            json.dumps({"nodes": []}),
+            json.dumps(_minimal_graph()),
             fresh_document=False,
         )
 
@@ -951,7 +956,7 @@ def test_unbound_job_binds_through_its_own_feature_graph(unbound_env, tmp_path):
         env.job_id,
         env.token,
         json.dumps(
-            {"nodes": [{"id": "n1", "type": "sketch", "plane": "Top Plane"}]}
+            _minimal_graph()
         ),
         fresh_document=True,
     )
@@ -1039,7 +1044,7 @@ def test_post_verify_exception_rolls_back_and_is_recorded_for_document_edits(
     assert job["failure_history"]
     assert job["failure_history"][-1]["phase"] == "verification"
     assert job["verification_status"] in {"failed", "unavailable"}
-    assert job["recovery_status"] in {"rolled_back", "rollback_failed"}
+    assert job["recovery_status"] == "recovery_unverified"
 
 
 def test_post_verify_exception_rolls_back_and_is_recorded_for_save_or_export(
@@ -1132,7 +1137,8 @@ def _batch_graph():
     """Small fake-backend graph over the batch threshold, without invoking any CAD service."""
     graph = _six_node_graph()
     graph["nodes"].extend(
-        {"id": f"batch-{index}", "type": "box"}
+        {"id": f"batch-{index}", "type": "box", "width": 0.01,
+         "depth": 0.01, "height": 0.01}
         for index in range(27)
     )
     return graph
@@ -1152,20 +1158,10 @@ def _build_save_finish(env, tmp_path):
     saved = env.orchestrator.save_or_export(
         "job-1", env.token, "save", file_path=str(tmp_path / "out.SLDPRT")
     )
-    # The first save of a job-created untitled document confirms too (USER DECISION on hermes
-    # F1), so the canonical build->save->finish flow runs through the confirmation protocol.
-    assert saved["status"] == "pending_confirmation", saved
-    assert saved["risk"] == "save_as"
-    confirmation = _request_confirmation(env, saved)
-    saved = env.orchestrator.confirm_action(
-        "job-1",
-        env.token,
-        saved["action_id"],
-        confirmation["confirmation_token"],
-        confirmation["confirmation_text"],
-        confirmation["action_summary"],
-    )
+    # USER DECISION 2026-10-31: the first save of the part this job created, to a new path,
+    # runs at once. The hermes-F1 title-collision hazard is closed by the stable document_id.
     assert saved["status"] == "completed", saved
+    assert saved["risk"] == "write"
     return built, saved
 
 
@@ -1275,8 +1271,9 @@ def test_measure_backend_calls_for_typical_build_save_finish(cad_env, tmp_path):
     assert total == 9, total
     assert verify_states == 0, verify_states
     identities = [name for name, _p in cad_env.backend.events].count("identity")
-    # post-open + post-graph + save ask + confirm + post-save + finish + the close re-check
-    assert identities == 7, identities
+    # post-open + post-graph + save (its own part's first save runs at once since 2026-10-31,
+    # so ask and confirm are one read) + post-save + finish + the close re-check
+    assert identities == 6, identities
     assert cad_env.backend.cheap_probes[-1] == "identity"
     assert "current_state_version" not in cad_env.backend.cheap_probes
     assert "identity_fallback_verify_state" not in cad_env.backend.cheap_probes
@@ -1320,23 +1317,42 @@ def test_save_to_a_different_path_requires_save_as_confirmation(cad_env, tmp_pat
     assert job["expected_document"]["path"] == str(target)
 
 
-def test_first_save_of_a_job_created_untitled_document_confirms_too(
-    cad_env, tmp_path
-):
-    # USER DECISION (hermes F1): the job-created exemption is GONE. An unsaved document is
-    # bound by TITLE only (same_document compares titles when there is no path), so a title
-    # collision could point an unconfirmed first save at the USER's document — the first
-    # save of an untitled document therefore ALWAYS confirms, even for a fresh build.
+def test_first_save_of_the_job_created_part_to_a_new_file_runs_at_once(cad_env, tmp_path):
+    # USER DECISION 2026-10-31. hermes F1 removed an earlier exemption because an untitled
+    # document was bound by TITLE only; the exemption is back ONLY when the active document is
+    # this job's own instance by the execution layer's stable document_id.
     built = cad_env.orchestrator.feature_graph(
-        "job-1", cad_env.token, json.dumps({"nodes": []}), fresh_document=True
+        "job-1", cad_env.token, json.dumps(_minimal_graph()), fresh_document=True
     )
     assert built["status"] == "completed", built
-    assert cad_env.store.load("job-1", cad_env.token)[
-        "expected_document"
-    ]["path"] == ""
-
-    pending = cad_env.orchestrator.save_or_export(
+    saved = cad_env.orchestrator.save_or_export(
         "job-1", cad_env.token, "save", file_path=str(tmp_path / "first.SLDPRT")
+    )
+    assert saved["status"] == "completed", saved
+    assert saved["risk"] == "write"
+    assert [tool for tool, _ in cad_env.backend.calls].count("save_document") == 1
+
+
+@pytest.mark.parametrize("hazard", ["other_instance_active", "target_exists"])
+def test_first_save_still_confirms_without_proof_of_ownership_or_onto_a_file(
+    cad_env, tmp_path, monkeypatch, hazard
+):
+    built = cad_env.orchestrator.feature_graph(
+        "job-1", cad_env.token, json.dumps(_minimal_graph()), fresh_document=True
+    )
+    assert built["status"] == "completed", built
+    target = tmp_path / "first.SLDPRT"
+    if hazard == "target_exists":
+        target.write_bytes(b"existing")
+    else:
+        real = cad_env.module.backend.documents
+        def another_active():
+            inventory = real()
+            return {**inventory, "active_document": {**(inventory.get("active_document") or {}),
+                                                     "document_id": "someone-else"}}
+        monkeypatch.setattr(cad_env.module.backend, "documents", another_active)
+    pending = cad_env.orchestrator.save_or_export(
+        "job-1", cad_env.token, "save", file_path=str(target)
     )
     assert pending["status"] == "pending_confirmation"
     assert pending["risk"] == "save_as"
@@ -1431,9 +1447,9 @@ def test_document_switch_between_edit_steps_is_detected_via_identity(
 
     events = [name for name, _p in cad_env.backend.events]
     assert "identity" in events
-    assert result["status"] == "failed"
+    assert result["status"] == "partial"
     assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "recovery_unverified"
 
 
 def test_document_switch_is_still_detected_via_the_verify_state_fallback(
@@ -1459,7 +1475,7 @@ def test_document_switch_is_still_detected_via_the_verify_state_fallback(
     assert "identity_fallback_verify_state" in cad_env.backend.cheap_probes
     assert "verify_state" in [name for name, _p in cad_env.backend.events]
     # ...and the switch was caught exactly the same way.
-    assert result["status"] == "failed"
+    assert result["status"] == "partial"
     assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
 
 
@@ -1493,8 +1509,8 @@ def test_drawing_document_switch_between_steps_is_detected_via_identity(
     assert result["error"]["code"] == "POST_STEP_VERIFICATION_FAILED"
     # recovery closed the created drawing and restored the previous document
     job = cad_env.store.load("job-1", cad_env.token)
-    assert job["recovery_status"] == "rolled_back"
-    assert job["expected_document"]["title"] == "part.SLDPRT"
+    assert job["recovery_status"] == "discarded"
+    assert job["expected_document"] == {}
 
 
 def test_drawing_switch_is_still_detected_via_the_verify_state_fallback(
@@ -1623,11 +1639,13 @@ _FAILURE_ENVELOPE_KEYS = {
     "verification",
     "error",
     "created_document_discarded",
-    "restored_active_document",
+    "active_document_after_recovery",
     "execution_status",
     "verification_status",
     "recovery_status",
     "trust_level",
+    "automatic_retry_allowed", "repair_attempts_used", "operation_target",
+    "remaining_modified_document", "recovery_method", "undo_restoration_verified",
 }
 
 
@@ -1649,15 +1667,15 @@ def test_fresh_feature_graph_failure_reports_the_discarded_created_document(cad_
 
     cad_env.backend.feature_graph_handler = feature_graph_handler
     result = cad_env.orchestrator.feature_graph(
-        "job-1", cad_env.token, json.dumps({"nodes": []}), fresh_document=True
+        "job-1", cad_env.token, json.dumps(_minimal_graph()), fresh_document=True
     )
 
     assert result["status"] == "failed"
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "discarded"
     # the write target is the DISCARDED created untitled part, never the restored file
     assert result["target_document"] == "Part1"
     assert result["created_document_discarded"] is True
-    assert result["restored_active_document"] == str(cad_env.source)
+    assert result["active_document_after_recovery"] == str(cad_env.source)
     # the restored previous document appears as recovered CAD state, not as the target
     assert result["partial_state"]["cad"]["activeDocumentPath"] == str(
         cad_env.source
@@ -1667,7 +1685,8 @@ def test_fresh_feature_graph_failure_reports_the_discarded_created_document(cad_
     # reporting-only change: nothing else was added to or removed from the envelope
     assert set(result) == _FAILURE_ENVELOPE_KEYS
     job = cad_env.store.load("job-1", cad_env.token)
-    assert job["expected_document"]["path"] == str(cad_env.source)
+    assert job["expected_document"] == {}
+    assert job["document_write_allowed"] is False
 
 
 # -----------------------------------------------------------------------------
@@ -1779,7 +1798,7 @@ def test_feature_graph_material_not_applied_rolls_back(cad_env):
     assert result["error"]["code"] == "MATERIAL_NOT_APPLIED"
     assert result["error"]["node_id"] == "_material"
     assert "warnings" not in result
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "discarded"
     assert result["completed_steps"] == ["n1"]
     tools = [tool for tool, _params in cad_env.backend.events]
     assert "rollback_undo_scope" in tools
@@ -1814,10 +1833,10 @@ def test_material_not_found_reported_as_a_failure_still_rolls_back(cad_env):
     )
 
     assert result["status"] == "failed"
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "discarded"
     assert "warnings" not in result
     assert result["created_document_discarded"] is True
-    assert result["restored_active_document"] == str(cad_env.source)
+    assert result["active_document_after_recovery"] == str(cad_env.source)
     assert set(result) == _FAILURE_ENVELOPE_KEYS
 
 
@@ -1830,9 +1849,9 @@ def test_document_edit_material_failure_is_unchanged(cad_env):
         json.dumps([_edit("set_part_material", material_name="HT200")]),
     )
 
-    assert result["status"] == "failed"
+    assert result["status"] == "partial"
     assert result["error"]["code"] == "MATERIAL_NOT_FOUND"
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "recovery_unverified"
     assert result["completed_steps"] == []
 
 
@@ -1856,13 +1875,13 @@ def test_drawing_step_failure_reports_the_discarded_created_drawing(cad_env):
 
     assert result["status"] == "failed"
     assert result["error"]["code"] == "DRAWING_STEP_FAILED"
-    assert result["recovery_status"] == "rolled_back"
+    assert result["recovery_status"] == "discarded"
     assert result["target_document"] == "Drawing1"
     assert result["created_document_discarded"] is True
-    assert result["restored_active_document"] == str(cad_env.source)
+    assert result["active_document_after_recovery"] == str(cad_env.source)
     assert set(result) == _FAILURE_ENVELOPE_KEYS
     job = cad_env.store.load("job-1", cad_env.token)
-    assert job["expected_document"]["path"] == str(cad_env.source)
+    assert job["expected_document"] == {}
 
 
 def test_drawing_post_verify_failure_reports_the_discarded_created_drawing(cad_env):
@@ -1883,7 +1902,7 @@ def test_drawing_post_verify_failure_reports_the_discarded_created_drawing(cad_e
     assert result["status"] == "verification_failed"
     assert result["target_document"] == "Drawing1"
     assert result["created_document_discarded"] is True
-    assert result["restored_active_document"] == str(cad_env.source)
+    assert result["active_document_after_recovery"] == str(cad_env.source)
 
 
 def test_failure_without_a_created_document_has_no_discard_fields(cad_env, tmp_path):
@@ -1907,9 +1926,9 @@ def test_failure_without_a_created_document_has_no_discard_fields(cad_env, tmp_p
         json.dumps([_edit("modify_dimension", name="D1", value=0.01)]),
     )
 
-    assert result["status"] == "failed"
+    assert result["status"] == "partial"
     assert "created_document_discarded" not in result
-    assert "restored_active_document" not in result
+    assert "active_document_after_recovery" not in result
     # document_edits writes really did happen in part.SLDPRT and the rollback restored it,
     # so target_document stays the restored document here — unchanged pre-existing behavior.
     assert result["target_document"] == str(cad_env.source)
@@ -1926,7 +1945,8 @@ def test_failure_without_a_created_document_has_no_discard_fields(cad_env, tmp_p
 # WITHOUT changing the completed verdict — verified CAD work is never re-judged by cleanup.
 # ---------------------------------------------------------------------------------------------
 def _autoclose_build(env, job_id, token, tmp_path, name="autoclose.SLDPRT", save=True):
-    """The canonical flow for a document the job produced: fresh build + confirmed first save."""
+    """The canonical flow for a document the job produced: fresh build + first save (no
+    confirmation since the user decision of 2026-10-31: its own part, to a new file)."""
     built = env.orchestrator.feature_graph(
         job_id, token, json.dumps(_six_node_graph()), fresh_document=True
     )
@@ -1934,20 +1954,8 @@ def _autoclose_build(env, job_id, token, tmp_path, name="autoclose.SLDPRT", save
     if not save:
         return built, None
     target = tmp_path / name
-    pending = env.orchestrator.save_or_export(
+    saved = env.orchestrator.save_or_export(
         job_id, token, "save", file_path=str(target)
-    )
-    assert pending["status"] == "pending_confirmation", pending
-    confirmation = env.orchestrator.request_confirmation(
-        job_id, token, pending["action_id"]
-    )
-    saved = env.orchestrator.confirm_action(
-        job_id,
-        token,
-        pending["action_id"],
-        confirmation["confirmation_token"],
-        confirmation["confirmation_text"],
-        confirmation["action_summary"],
     )
     assert saved["status"] == "completed", saved
     return built, saved
@@ -2221,7 +2229,7 @@ def test_begin_job_records_unbound_with_no_target(unbound_env):
     assert job["document_origin"] == "unbound"
 
 
-def test_created_document_rollback_restores_the_pre_job_origin(cad_env):
+def test_unverified_create_never_rebinds_or_closes_a_previous_document(cad_env):
     # open_new_part reports a document that verify_state does not agree is active, so the
     # created document is discarded and the job is back on the file it never created. The
     # origin has to follow: leaving it "created" would let a later close name a document the
@@ -2258,20 +2266,17 @@ def test_created_document_rollback_restores_the_pre_job_origin(cad_env):
     built = cad_env.orchestrator.feature_graph(
         "job-1",
         cad_env.token,
-        json.dumps({"nodes": []}),
+        json.dumps(_minimal_graph()),
         fresh_document=True,
     )
     assert built["status"] != "completed", built
 
     job = cad_env.store.load("job-1", cad_env.token)
-    assert job["recovery_status"] == "rolled_back"
-    assert job["document_origin"] == "pre_existing"
-    assert job["expected_document"]["path"] == str(cad_env.source)
-
-    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
-    assert finished["status"] == "completed", finished
-    assert finished["closed_document"] is None
-    assert finished["document_left_open"]["reason"] == "pre_existing"
+    assert job["recovery_status"] == "rollback_failed"
+    assert job["expected_document"]["title"] == "PartZ"
+    assert job["document_origin"] == "created"
+    assert job["document_write_allowed"] is False
+    assert "close_document" not in [t for t, _ in cad_env.backend.calls]
 
 
 def test_finish_job_close_keeps_the_verified_pre_close_state(unbound_env, tmp_path):
@@ -2303,12 +2308,46 @@ def _confirm_job_action(env, job_id, job_token, pending):
     )
 
 
-def test_pending_fresh_graph_blocks_all_job_writes_until_cancelled(cad_env, tmp_path):
+def test_invalid_batch_graph_fails_before_confirmation_or_document_creation(cad_env):
+    env = cad_env
+    started = env.orchestrator.begin_job("new model, validate before approval")
+    graph = _batch_graph()
+    graph["units"] = "m"
+    calls_before = len(env.backend.calls)
+
+    with pytest.raises(RuntimeError, match="VALIDATION_FAILED: units must be 'meters'"):
+        env.orchestrator.feature_graph(
+            started["job_id"], started["job_token"], json.dumps(graph),
+            fresh_document=True,
+        )
+
+    assert len(env.backend.calls) == calls_before
+    job = env.store.load(started["job_id"], started["job_token"])
+    assert not any(
+        action.get("kind") == "feature_graph" and not action.get("consumed")
+        for action in (job.get("pending_actions") or {}).values()
+    )
+
+
+def test_fresh_batch_graph_builds_without_a_second_confirmation(cad_env):
+    # User decision 2026-10-31: the approved plan authorizes a fresh build of any size; it only
+    # creates its own document, so the over-ten-nodes confirmation applies to existing documents.
     env = cad_env
     started = env.orchestrator.begin_job("new model, no explicit target")
-    pending = env.orchestrator.feature_graph(
+    built = env.orchestrator.feature_graph(
         started["job_id"], started["job_token"], json.dumps(_batch_graph()),
         fresh_document=True,
+    )
+    assert built["status"] == "completed", built
+    assert built["risk"] == "write"
+
+
+def test_pending_graph_blocks_all_job_writes_until_cancelled(cad_env, tmp_path):
+    env = cad_env
+    started = env.orchestrator.begin_job("edit explicitly targeted part", str(env.source))
+    pending = env.orchestrator.feature_graph(
+        started["job_id"], started["job_token"], json.dumps(_batch_graph()),
+        fresh_document=False,
     )
     assert pending["status"] == "pending_confirmation"
     output = tmp_path / "incident-save-as.SLDPRT"
@@ -2329,7 +2368,7 @@ def test_pending_fresh_graph_blocks_all_job_writes_until_cancelled(cad_env, tmp_
         )
     with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
         env.orchestrator.feature_graph(
-            started["job_id"], started["job_token"], json.dumps({"nodes": []}),
+            started["job_id"], started["job_token"], json.dumps(_minimal_graph()),
             fresh_document=False,
         )
     with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
@@ -2346,10 +2385,6 @@ def test_pending_fresh_graph_blocks_all_job_writes_until_cancelled(cad_env, tmp_
         started["job_id"], started["job_token"], pending["action_id"]
     )
     assert cancelled["status"] == "cancelled"
-    with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
-        env.orchestrator.save_or_export(
-            started["job_id"], started["job_token"], "save", file_path=str(output)
-        )
     assert env.backend.calls[calls_before:] == []
     assert env.backend.state["activeDocumentPath"] == str(env.source)
 
@@ -2374,7 +2409,7 @@ def test_targetless_preexisting_document_is_read_only(cad_env, tmp_path):
         )
     with pytest.raises(RuntimeError, match="JOB_DOCUMENT_READ_ONLY"):
         env.orchestrator.feature_graph(
-            started["job_id"], started["job_token"], json.dumps({"nodes": []}),
+            started["job_id"], started["job_token"], json.dumps(_minimal_graph()),
             fresh_document=False,
         )
     for kwargs in ({}, {"close_all": True}):
@@ -2404,23 +2439,19 @@ def test_explicit_target_can_be_edited_and_saved(cad_env):
 
 
 @pytest.mark.parametrize("keep_open", [False, True])
-def test_confirmed_fresh_graph_can_save_and_finish(cad_env, tmp_path, keep_open):
+def test_fresh_graph_can_save_and_finish(cad_env, tmp_path, keep_open):
     env = cad_env
     started = env.orchestrator.begin_job("new model without target")
-    pending = env.orchestrator.feature_graph(
+    built = env.orchestrator.feature_graph(
         started["job_id"], started["job_token"], json.dumps(_batch_graph()),
         fresh_document=True,
     )
-    assert pending["status"] == "pending_confirmation"
-    built = _confirm_job_action(env, started["job_id"], started["job_token"], pending)
     assert built["status"] == "completed", built
     output = tmp_path / ("keep-open.SLDPRT" if keep_open else "auto-close.SLDPRT")
     saved = env.orchestrator.save_or_export(
         started["job_id"], started["job_token"], "save", file_path=str(output)
     )
-    assert saved["status"] == "pending_confirmation", saved
-    saved = _confirm_job_action(env, started["job_id"], started["job_token"], saved)
-    assert saved["status"] == "completed", saved
+    assert saved["status"] == "completed", saved  # first save of its own part: no confirmation
     finished = env.orchestrator.finish_job(
         started["job_id"], started["job_token"], keep_open=keep_open
     )
@@ -2431,3 +2462,65 @@ def test_confirmed_fresh_graph_can_save_and_finish(cad_env, tmp_path, keep_open)
     else:
         assert finished["closed_document"]["path"] == str(output)
         assert env.backend.state["activeDocumentPath"] == str(env.source)
+
+
+# --- finish_job completeness (2026-10-31: a staged recovery dropped the R3 fillet node and the part
+# was finished without it, unsaved) --------------------------------------------------------------
+
+def _box_and_fillet():
+    return {"units": "meters", "nodes": [
+        {"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02},
+        {"id": "r3", "type": "fillet", "radius": .003, "edges": [{"near": [.01, .01, 0]}]},
+    ]}
+
+
+def test_finish_reports_a_feature_a_resubmission_dropped(cad_env, tmp_path):
+    env = cad_env
+    started = env.orchestrator.begin_job("new part")
+    env.backend.feature_graph_handler = lambda *_: {
+        "status": "FAILED", "error": {"code": "REFERENCE_UNRESOLVED", "message": "probe"},
+        "compiler": {"node_log": [{"id": "n1", "status": "COMPLETED"}]}}
+    first = env.orchestrator.feature_graph(started["job_id"], started["job_token"],
+                                           json.dumps(_box_and_fillet()), fresh_document=True)
+    assert first["recovery_status"] == "discarded", first
+    env.backend.feature_graph_handler = None
+    pending = env.orchestrator.feature_graph(started["job_id"], started["job_token"],
+                                             json.dumps(_minimal_graph()), fresh_document=True)
+    assert pending["status"] == "pending_confirmation"  # dropping a node is a design change
+    built = _confirm_job_action(env, started["job_id"], started["job_token"], pending)
+    assert built["status"] == "completed", built
+    output = tmp_path / "dropped.SLDPRT"
+    saved = env.orchestrator.save_or_export(started["job_id"], started["job_token"], "save",
+                                            file_path=str(output))
+    if saved["status"] == "pending_confirmation":
+        saved = _confirm_job_action(env, started["job_id"], started["job_token"], saved)
+    finished = env.orchestrator.finish_job(started["job_id"], started["job_token"])
+    codes = [w["code"] for w in finished.get("warnings", [])]
+    assert codes == ["PLANNED_FEATURES_MISSING"], finished
+    assert finished["warnings"][0]["missing"] == {"fillet": 1}
+    assert finished["warnings"][0]["planned_ids"] == {"fillet": ["r3"]}
+
+
+def test_finish_reminds_to_save_a_new_part(cad_env):
+    env = cad_env
+    started = env.orchestrator.begin_job("new part")
+    built = env.orchestrator.feature_graph(started["job_id"], started["job_token"],
+                                           json.dumps(_box_and_fillet()), fresh_document=True)
+    assert built["status"] == "completed", built
+    finished = env.orchestrator.finish_job(started["job_id"], started["job_token"], keep_open=True)
+    assert [w["code"] for w in finished.get("warnings", [])] == ["CREATED_DOCUMENT_UNSAVED"], finished
+
+
+def test_complete_saved_build_finishes_without_warnings(cad_env, tmp_path):
+    env = cad_env
+    started = env.orchestrator.begin_job("new part")
+    built = env.orchestrator.feature_graph(started["job_id"], started["job_token"],
+                                           json.dumps(_box_and_fillet()), fresh_document=True)
+    assert built["status"] == "completed", built
+    saved = env.orchestrator.save_or_export(started["job_id"], started["job_token"], "save",
+                                            file_path=str(tmp_path / "complete.SLDPRT"))
+    if saved["status"] == "pending_confirmation":
+        saved = _confirm_job_action(env, started["job_id"], started["job_token"], saved)
+    assert saved["status"] == "completed", saved
+    finished = env.orchestrator.finish_job(started["job_id"], started["job_token"])
+    assert "warnings" not in finished, finished

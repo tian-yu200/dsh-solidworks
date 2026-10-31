@@ -11,10 +11,10 @@ $OutputPath = if ($OutputPath) { $OutputPath } else { Join-Path $ProjectRoot "st
 $Dsh = Join-Path $DshRoot "node_modules\.bin\dsh.CMD"
 $Raw = & $Dsh --profile solidworks --dump-config 2>&1 | Out-String
 $Redacted = $Raw `
-    -replace '(?im)(api[_-]?key\s*[:=]\s*)\S+', '$1<redacted>' `
-    -replace '(?im)(authorization\s*[:=]\s*)\S+', '$1<redacted>' `
+    -replace '(?im)(api[_-]?key\s*[:=]\s*).*$', '$1<redacted>' `
+    -replace '(?im)(authorization\s*[:=]\s*).*$', '$1<redacted>' `
     -replace '(?im)(bearer\s+)[A-Za-z0-9._~+/-]+=*', '$1<redacted>' `
-    -replace '(?im)(token\s*[:=]\s*)\S+', '$1<redacted>'
+    -replace '(?im)(token\s*[:=]\s*).*$', '$1<redacted>'
 
 $Directory = Split-Path -Parent $OutputPath
 if ($Directory) {

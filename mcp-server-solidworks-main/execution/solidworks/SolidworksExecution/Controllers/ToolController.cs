@@ -69,6 +69,23 @@ namespace SolidworksExecution.Controllers
             return Request.CreateResponse(HttpStatusCode.OK, info);
         }
 
+        [HttpGet]
+        [Route("documents")]
+        public HttpResponseMessage Documents()
+        {
+            try
+            {
+                var info = StaExecutor.Instance.Run(() => _service.GetOpenDocumentsInfo());
+                return Request.CreateResponse(HttpStatusCode.OK, info);
+            }
+            catch (Exception ex)
+            {
+                ExecLog.Write($"<- documents UNAVAILABLE {ex.GetType().Name}: {ex.Message}");
+                return Request.CreateResponse(HttpStatusCode.ServiceUnavailable,
+                    new { error = "DOCUMENT_INVENTORY_UNAVAILABLE" });
+            }
+        }
+
         // Health endpoint (P0.6). `~/` escapes the api/tool prefix → GET /health. Reports the server is
         // up, the current state_version, and whether SolidWorks COM is currently attachable (probed on the
         // STA thread — COM_ATTACH is lazy/per-request, so this is a fresh attach attempt) plus the active

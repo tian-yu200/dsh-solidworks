@@ -220,27 +220,18 @@ def test_preset_persona_loads_the_skill_before_any_tool_call():
         "mcp__solidworks__ tools, or the tools win the race it is meant to lose")
 
 
-def test_persona_makes_the_reading_result_the_first_deliverable():
-    # Measured 2026-10-29 (four DSH sessions, one L-bracket drawing): none produced a plan. The
-    # model treated every uncertain value as "look harder" instead of writing it down as a
-    # question. The persona has to say that the FIRST deliverable is the ledger plus questions.
-    path = os.path.join(
-        REPO_ROOT, "dsh-integration", "presets", "solidworks-cad", "agent.cordis.yml"
-    )
-    rows = _composition_rows(path)
-    persona = next((row for row in rows if row.get("id") == "persona"), None)
-    assert persona is not None, "composition has no persona row"
-    text = (persona.get("config") or {}).get("text") or ""
-
-    assert "尺寸表" in text and "问题清单" in text, (
-        "the persona must name the reading result: a dimension ledger plus a question list")
-    assert "ask_user_question" in text, "the reading result must be submitted with ask_user_question"
-    assert "一律提问" in text, "an uncertain value must always be asked"
-    assert "候选" in text, "a candidate reading may be offered, but only as a candidate"
-    assert "浏览器" in text and "测量像素" in text, (
-        "the persona must forbid measuring pixels with a browser, a script or any other tool")
-    assert "用户回答前不写 Feature Graph" in text, (
-        "no Feature Graph before the user has answered")
+def test_persona_merges_reading_plan_and_all_missing_dimensions_once():
+    path = os.path.join(REPO_ROOT, "dsh-integration", "presets", "solidworks-cad", "agent.cordis.yml")
+    persona = next(row for row in _composition_rows(path) if row.get("id") == "persona")
+    text = persona["config"]["text"]
+    flat = "".join(text.split())  # pins survive the block scalar's line wrapping
+    for token in ("EXPLICIT", "DERIVED", "USER", "UNKNOWN", "直接看原图", "OCR与裁图按需", "全部真正缺失的尺寸", "只问一次ask_user_question", "答案引出新矛盾", "不设题数上限", "禁止按像素比例", "接受/继续", "小圆角"):
+        assert token in flat, token
+    # 2026-10-31 approve-then-build: preparation before the question, submission right after it.
+    for token in ("同一步里并行发出", "必须在提问之前", "下一个调用必须是submit_feature_graph(fresh_document=true)", "不读参考资料", "不重写计划或todo", "不再次确认", "不结束本轮", "新建零件不需要批量确认", "不许提供“示意模型", "按整个视图框选", "不要用网格单元格", "按工程图惯例直接采用", "写出你的解读作为推荐", "看图后先定难度", "“简单图/复杂图”就按用户的", "边内部任意一点", "PLANNED_FEATURES_MISSING", "拆出去的每个节点都必须补回", "save_or_export(save)另存为工作目录下的新文件", "计划里写出预期包络和体积", "不问用户、不结束本轮", "紧接着调用confirm_action", "不要在聊天里让用户打字确认", "上一个建错的新零件留着不动"):
+        assert token in flat, token
+    assert "最多再补一次" not in text and "同一区域已读过再读会被拒绝" not in text
+    assert "在回复中重新给出计划" not in text
 
 
 def _server_tool_names():
@@ -262,7 +253,7 @@ def _policy_tool_names():
     return {name for name in names if not name.startswith("mcp__")}
 
 
-def test_ten_tool_surface_is_registered_and_allowlisted():
+def test_twelve_tool_surface_is_registered_and_allowlisted():
     registered = _server_tool_names()
     allowlisted = _policy_tool_names()
     assert registered == allowlisted, (
@@ -297,8 +288,9 @@ def test_skill_names_every_generated_reference_topic():
         # the stale page-size / page-count wording must be gone
         assert "about 15" not in skill, f"{root}/SKILL.md still says the schema is ~15 pages"
         assert "40\nlines" not in skill and "at most 40 lines" not in skill
-        # and it must point at the quickref as the default reading
-        assert "feature_graph_quickref` (1-2" in skill or "feature_graph_quickref`" in skill
+        # and it must put the card + mapping reads before the question, next to start_job
+        assert "BEFORE the one question, in ONE parallel step: `start_job`, feature_graph_part_card" in skill
+        assert "After approval the NEXT call is `submit_feature_graph(..., fresh_document=true)`" in skill
 
 
 def test_quickref_covers_every_node_type_in_the_schema():
@@ -397,13 +389,14 @@ POLICY_MANIFEST = os.path.join(POLICY_DIR, "package.json")
 # What a SolidWorks CAD session may use besides the twelve CAD tools. The desktop (tauri) profile
 # has no modlens package, so that entry is inert there; it stays because SKILL.md and README.md
 # document it as approved for the CLI profile, where whole-sheet reading has no other route.
+# list_mcp_resources was removed 2026-10-31: SKILL.md links every reference URI, and its one call
+# in a measured session cost a 135 s model step. The desktop therefore sees exactly 16 tools.
 POLICY_SUPPORT_TOOLS = {
     "ask_user_question",
     "todo_write",
     "skill",
     "modlens_read_image",
     "read_mcp_resource",
-    "list_mcp_resources",
 }
 
 

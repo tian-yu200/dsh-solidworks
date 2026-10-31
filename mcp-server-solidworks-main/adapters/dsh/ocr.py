@@ -1,10 +1,7 @@
 """Windows built-in OCR (Windows.Media.Ocr) for drawing text — no installs.
 
-WHY THIS EXISTS. The reading model cannot read 2 mm dimension text reliably, so it re-zooms and
-never converges (measured: four sessions, none produced a plan). Deterministic-first extraction is
-the documented fix (eDOCr/eDOCr2; Khan et al. 2026): OCR every text on the sheet WITH ITS POSITION
-once, hand the model that table, and let it only MAP values to features. One call replaces a dozen
-crops.
+Optional aid for small dimension text. Directly view the original drawing first;
+OCR is a candidate table, not an obligatory first pass or verified geometry.
 
 ENGINE CHOICE. Windows.Media.Ocr ships with Windows 10/11, so there is no pip/npm package and
 nothing to install. It is a WinRT API, and the access route matters:
@@ -32,6 +29,8 @@ import uuid
 from pathlib import Path
 
 from PIL import Image
+
+from intake import _open_source
 
 # The helper is kept as text (not a separate file) so the adapter stays a single deployable tree
 # and the exact engine calls are reviewable next to the Python that parses them.
@@ -203,14 +202,12 @@ def read_text(image_path, rotations=(0, 90, 270)):
     than one rotation is merged (the 0-degree read wins; a rotation only contributes texts the
     upright pass did not already cover in the same place).
     """
-    path = Path(image_path)
-    if not path.is_file():
-        raise RuntimeError("MISSING_PARAMETER: image_path does not name a readable file: %s" % path)
+    path, validated_image = _open_source(image_path)
+    src_size = validated_image.size
+    validated_image.close()
     started = time.time()
     workdir = tempfile.mkdtemp(prefix="ocr_")
     try:
-        with Image.open(path) as probe:
-            src_size = probe.size
         merged = []
         lang = None
         for rotate in rotations:
@@ -343,9 +340,9 @@ def result_payload(image_path):
              "confidence": t["confidence"]}
             for t in texts
         ],
-        "read_next": ("This is step 1 of reading: a CANDIDATE table of every text on the sheet. "
-                      "Map the values to features; check anything that matters against a crop "
-                      "(read_drawing_region) before using it. Anything still uncertain is "
-                      "UNKNOWN: ask the user, never guess."),
+        "read_next": ("Optional CANDIDATE table: verify against the original image. Use EXPLICIT / "
+                      "DERIVED (formula and constraints) / USER / UNKNOWN. Combine genuinely "
+                      "missing dimensions and compact plan approval in one question round. "
+                      "Tool failures are technical failures, not missing dimensions."),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

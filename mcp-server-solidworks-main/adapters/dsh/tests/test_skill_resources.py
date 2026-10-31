@@ -87,8 +87,10 @@ def test_titles_and_descriptions_come_from_the_document():
 def test_the_policy_still_allows_the_resource_tools():
     """A resource the preset cannot call is not a fix.
 
-    solidworks-policy allowlists by name, so `read_mcp_resource` / `list_mcp_resources` must be in
-    SUPPORT_TOOLS or the guard would refuse the very call SKILL.md tells the model to make.
+    solidworks-policy allowlists by name, so `read_mcp_resource` must be in SUPPORT_TOOLS or the
+    guard would refuse the very call SKILL.md tells the model to make. The roster tool is
+    deliberately off the list (2026-10-31: its one call cost a 135 s step), so no message or skill
+    text may send the model to it.
     """
     source = (
         REPO_ROOT / "dsh-integration" / "plugins" / "solidworks-policy" / "index.js"
@@ -96,8 +98,15 @@ def test_the_policy_still_allows_the_resource_tools():
     match = re.search(r"const SUPPORT_TOOLS = \[(.*?)\];", source, re.S)
     assert match, "SUPPORT_TOOLS array not found in solidworks-policy/index.js"
     allowed = set(re.findall(r'"([a-z_]+)"', match.group(1)))
-    assert {"read_mcp_resource", "list_mcp_resources"} <= allowed, (
-        "the policy must keep the read-only resource tools allowed: %s" % sorted(allowed))
+    assert "read_mcp_resource" in allowed, (
+        "the policy must keep the read-only resource tool allowed: %s" % sorted(allowed))
+    assert "list_mcp_resources" not in allowed
+    # Model-visible text only: error messages, tool descriptions and the skill.
+    errors = (Path(__file__).resolve().parents[1] / "skill_resources.py").read_text(encoding="utf-8")
+    assert "list_mcp_resources on server" not in errors
+    for path in (Path(__file__).resolve().parents[1] / "server.py",
+                 REPO_ROOT / ".dsh" / "skills" / "solidworks-cad" / "SKILL.md"):
+        assert "list_mcp_resources" not in path.read_text(encoding="utf-8"), path
 
 
 def test_the_template_is_advertised_once(adapter):

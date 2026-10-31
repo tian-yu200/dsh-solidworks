@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$DshHome = "$HOME\.dsh",
     [string]$DshRoot = "D:\deepseek-harness",
@@ -30,10 +30,10 @@ function Read-PackageVersion([string]$PackagePath) {
 
 function Redact-Config([string]$Raw) {
     return $Raw `
-        -replace '(?im)(api[_-]?key\s*[:=]\s*)\S+', '$1<redacted>' `
-        -replace '(?im)(authorization\s*[:=]\s*)\S+', '$1<redacted>' `
+        -replace '(?im)(api[_-]?key\s*[:=]\s*).*$', '$1<redacted>' `
+        -replace '(?im)(authorization\s*[:=]\s*).*$', '$1<redacted>' `
         -replace '(?im)(bearer\s+)[A-Za-z0-9._~+/-]+=*', '$1<redacted>' `
-        -replace '(?im)(token\s*[:=]\s*)\S+', '$1<redacted>'
+        -replace '(?im)(token\s*[:=]\s*).*$', '$1<redacted>'
 }
 
 $Dsh = Join-Path $DshRoot "node_modules\.bin\dsh.CMD"
@@ -50,21 +50,11 @@ $WebProfileTemplate = Join-Path $ProjectRoot "dsh-integration\profiles\web\cordi
 $ProfileTemplate = Join-Path $ProjectRoot "dsh-integration\profiles\solidworks\cordis.patch.yml"
 $PresetTemplate = Join-Path $ProjectRoot "dsh-integration\presets\solidworks-cad\agent.cordis.yml"
 $Policy = Join-Path $DshHome "plugins\solidworks-policy\index.js"
+$PolicyTemplate = Join-Path $ProjectRoot "dsh-integration/plugins/solidworks-policy/index.js"
+$ResolvedPolicy = Join-Path $ProfileRoot "node_modules/@dsh-solidworks/policy/index.js"
 $PolicyPackage = Join-Path $DshHome "plugins\solidworks-policy\package.json"
 $ModLensPackage = Join-Path $ProfileRoot "node_modules\@liustack\modlens\package.json"
 $DumpPath = Join-Path $ProjectRoot "state\solidworks-profile.dump.txt"
-
-function Convert-ToYamlPath([string]$Path) {
-    return ($Path -replace '\\', '/')
-}
-
-function Render-ProfileTemplate([string]$TemplatePath) {
-    $AdapterPath = Join-Path $ProjectRoot "mcp-server-solidworks-main\adapters\dsh"
-    $Source = Get-Content -Raw -LiteralPath $TemplatePath
-    $Source = $Source.Replace('__PYTHON__', (Convert-ToYamlPath $Python))
-    $Source = $Source.Replace('__DSH_SERVER__', (Convert-ToYamlPath (Join-Path $AdapterPath "server.py")))
-    return $Source.Replace('__DSH_ADAPTER_DIR__', (Convert-ToYamlPath $AdapterPath))
-}
 
 $DshVersion = Read-PackageVersion $DshPackage
 $DshDetail = if ($DshVersion) { "version $DshVersion" } else { $DshPackage }
@@ -105,13 +95,18 @@ Add-Check "SolidWorks profile MCP client" (Test-SolidWorksMcpConfig $ProfileSour
 $PresetHasNoMcp = -not $PresetSource.Contains("@deepseek-ai/dsh-mcp-client")
 Add-Check "Preset has no duplicate MCP" $PresetHasNoMcp "solidworks-cad agent.cordis.yml"
 
-$WebProfileSynchronized = (Test-Path -LiteralPath $WebProfile) -and (Test-Path -LiteralPath $WebProfileTemplate) -and
-    ((Get-Content -Raw -LiteralPath $WebProfile) -eq (Render-ProfileTemplate $WebProfileTemplate))
-Add-Check "Installed web profile synchronized" $WebProfileSynchronized $WebProfileTemplate
-
-$ProfileSynchronized = (Test-Path -LiteralPath $Profile) -and (Test-Path -LiteralPath $ProfileTemplate) -and
-    ((Get-Content -Raw -LiteralPath $Profile) -eq (Render-ProfileTemplate $ProfileTemplate))
-Add-Check "Installed solidworks profile synchronized" $ProfileSynchronized $ProfileTemplate
+# User patches also carry model/provider settings and other MCPs. Compare only managed fields.
+$ProfilePatchScript = Join-Path $PSScriptRoot "SolidWorksProfilePatch.mjs"
+foreach ($Patch in @(
+    @{ Name = "web"; Source = $WebProfile; Template = $WebProfileTemplate },
+    @{ Name = "solidworks"; Source = $Profile; Template = $ProfileTemplate }
+)) {
+    $PatchOutput = & node $ProfilePatchScript --mode check --dsh-root $DshRoot `
+        --template $Patch.Template --source $Patch.Source --python $Python `
+        --server $Server --adapter-dir $AdapterDir 2>&1 | Out-String
+    $PatchExitCode = $LASTEXITCODE
+    Add-Check "Installed $($Patch.Name) profile synchronized" ($PatchExitCode -eq 0) $PatchOutput.Trim()
+}
 
 $PresetSynchronized = (
     (Test-Path -LiteralPath $Preset) -and
@@ -120,6 +115,29 @@ $PresetSynchronized = (
         (Get-FileHash -Algorithm SHA256 -LiteralPath $PresetTemplate).Hash)
 )
 Add-Check "Installed preset synchronized" $PresetSynchronized $PresetTemplate
+
+$TauriPatch = Join-Path $DshHome "profiles/tauri/cordis.patch.yml"
+if (Test-Path -LiteralPath $TauriPatch) {
+    $TauriOutput = & node $ProfilePatchScript --mode check-tauri --dsh-root $DshRoot `
+        --source $TauriPatch --preset $PresetTemplate 2>&1 | Out-String
+    $TauriExitCode = $LASTEXITCODE
+    Add-Check "Tauri embedded persona synchronized" ($TauriExitCode -eq 0) $TauriOutput.Trim()
+}
+
+# The desktop core loads the policy from its own profile's node_modules, not from plugins/.
+$TauriPolicyDir = Join-Path $DshHome "profiles/tauri/node_modules/@dsh-solidworks/policy"
+if (Test-Path -LiteralPath (Join-Path $DshHome "profiles/tauri")) {
+    $RepoPolicyDir = Join-Path $PSScriptRoot "..\plugins\solidworks-policy"
+    $StalePolicyFiles = @(foreach ($File in "index.js", "intake-progress.js", "package.json", "cordis.patch.yml") {
+        $Installed = Join-Path $TauriPolicyDir $File
+        if (-not (Test-Path -LiteralPath $Installed) -or
+            (Get-FileHash -LiteralPath $Installed).Hash -ne (Get-FileHash -LiteralPath (Join-Path $RepoPolicyDir $File)).Hash) {
+            $File
+        }
+    })
+    Add-Check "Desktop policy plugin synchronized" ($StalePolicyFiles.Count -eq 0) `
+        $(if ($StalePolicyFiles.Count) { "stale: " + ($StalePolicyFiles -join ", ") } else { $TauriPolicyDir })
+}
 
 # --- single source of truth: the skill content is LINKED, never copied -------------------------
 # Measured 2026-10-28: the installed SKILL.md was a two-month-old copy (20385 B against the repo's
@@ -209,22 +227,53 @@ $ModLensVersion = Read-PackageVersion $ModLensPackage
 $ModLensDetail = if ($ModLensVersion) { "version $ModLensVersion" } else { $ModLensPackage }
 Add-Check "ModLens" ($null -ne $ModLensVersion) $ModLensDetail
 
+$PolicySynchronized = Test-Path -LiteralPath $PolicyTemplate
+if ($PolicySynchronized) {
+    $ExpectedPolicyHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PolicyTemplate).Hash
+    foreach ($Entry in @($Policy, $ResolvedPolicy)) {
+        if (-not (Test-Path -LiteralPath $Entry) -or
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $Entry).Hash -ne $ExpectedPolicyHash) {
+            $PolicySynchronized = $false
+        }
+    }
+}
+foreach ($Module in @("intake-progress.js", "package.json")) {
+    $ExpectedModule = Join-Path (Split-Path -Parent $PolicyTemplate) $Module
+    foreach ($Entry in @($Policy, $ResolvedPolicy)) {
+        $InstalledModule = Join-Path (Split-Path -Parent $Entry) $Module
+        if (-not (Test-Path -LiteralPath $ExpectedModule) -or
+            -not (Test-Path -LiteralPath $InstalledModule) -or
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $InstalledModule).Hash -ne
+                (Get-FileHash -Algorithm SHA256 -LiteralPath $ExpectedModule).Hash) {
+            $PolicySynchronized = $false
+        }
+    }
+}
+Add-Check "Installed policy synchronized" $PolicySynchronized "user plugin and resolved profile dependency"
+
 if (Test-Path -LiteralPath $Python) {
     & $Python -c "import mcp,httpx,pydantic; print('ok')" *> $null
     Add-Check "Python dependencies" ($LASTEXITCODE -eq 0) "mcp, httpx, pydantic"
 
     Push-Location $AdapterDir
     try {
-        & $Python -c "import asyncio,server; assert len(asyncio.run(server.mcp.list_tools())) == 11" *> $null
+        & $Python -c "import asyncio,server; assert len(asyncio.run(server.mcp.list_tools())) == 12" *> $null
         Add-Check "MCP import / 12 tools" ($LASTEXITCODE -eq 0) $Server
     } finally {
         Pop-Location
     }
 }
 
+$DumpOk = $false
 if (Test-Path -LiteralPath $Dsh) {
-    $RawDump = & $Dsh --profile solidworks --dump-config 2>&1 | Out-String
-    $DumpOk = $LASTEXITCODE -eq 0
+    $PreviousDshHome = $env:DSH_HOME
+    try {
+        $env:DSH_HOME = $DshHome
+        $RawDump = & $Dsh --profile solidworks --dump-config 2>&1 | Out-String
+        $DumpOk = $LASTEXITCODE -eq 0
+    } finally {
+        $env:DSH_HOME = $PreviousDshHome
+    }
     if ($RawDump) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DumpPath) | Out-Null
         Redact-Config $RawDump | Set-Content -LiteralPath $DumpPath -Encoding utf8
@@ -235,14 +284,18 @@ if (Test-Path -LiteralPath $Dsh) {
 }
 
 $ImageCapabilityScript = Join-Path $PSScriptRoot "Check-ModelImageCapability.mjs"
-if ((Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $ImageCapabilityScript)) {
+if ($DumpOk -and (Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $ImageCapabilityScript)) {
     $CapabilityOutput = & node $ImageCapabilityScript `
-        --settings (Join-Path $DshHome "settings.yaml") `
+        --profile-dump $DumpPath `
         --profiles (Join-Path $DshHome "profiles") 2>&1 | Out-String
+    $CapabilityExitCode = $LASTEXITCODE
     $CapabilityLines = $CapabilityOutput -split "`n" |
-        Where-Object { $_ -match "default model|FAIL" } |
+        Where-Object { $_ -match "default model|FAIL|ERROR:|image capability:" } |
         ForEach-Object { $_.Trim() }
-    Add-Check "Model image capability" ($LASTEXITCODE -eq 0) ($CapabilityLines -join " | ")
+    if (-not $CapabilityLines) { $CapabilityLines = @("Image checker returned exit $CapabilityExitCode without a capability report") }
+    Add-Check "Model image capability" ($CapabilityExitCode -eq 0) ($CapabilityLines -join " | ")
+} else {
+    Add-Check "Model image capability" $false "fresh profile dump or image checker unavailable"
 }
 
 $Process = Get-Process -Name SLDWORKS -ErrorAction SilentlyContinue

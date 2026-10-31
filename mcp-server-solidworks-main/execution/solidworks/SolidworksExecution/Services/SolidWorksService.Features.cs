@@ -90,6 +90,8 @@ namespace SolidworksExecution.Services
                 // (needed e.g. for a cut sketched on a part FACE, where "into the body" is the opposite
                 // side from a cut sketched on a boundary plane). through = through-all (depth ignored).
                 bool reverse = p?.Value<bool?>("reverse") ?? false;
+                bool strictDirection = p?.Value<bool?>("strict_direction") ?? false;
+                bool directionFlipped = false;
                 int endCond = upToSurface
                     ? (int)swEndConditions_e.swEndCondUpToSurface
                     : midPlane
@@ -347,20 +349,16 @@ namespace SolidworksExecution.Services
                             "FACE_NOT_FOUND",
                             $"up_to_face_index {upToFaceIndex} could not be selected. Call analyze_model(faces) for valid indices.");
 
-                    // Dir (3rd arg) controls cut direction. Default true = INTO the body (opposite the
-                    // sketch plane's outward normal) — correct for a cut on a boundary plane. For a cut
-                    // sketched on a part FACE the material is on the other side, so pass reverse=true to
-                    // flip it (Dir=false). through ⇒ swEndCondThroughAll (depth ignored).
-                    // SHEET METAL (flatPat != null): a plain cut returns null — it needs the "Normal Cut"
-                    // option (normalCut=true, 18th arg, cut perpendicular to the sheet faces) AND the
-                    // OPPOSITE default direction (the sketch sits on a sheet FACE, like ADR-019's face cut),
-                    // i.e. dir = reverse instead of !reverse. We then add a flipped-direction retry so the
-                    // through-all works regardless of which face the profile was sketched on.
+                    // Vendor FeatureCut4 remarks: default cut direction is opposite the sketch
+                    // normal; Dir=true reverses it. The graph contract is shared with boss:
+                    // reverse=false means +sketch normal, hence cut Dir=!reverse.
+                    // Strict directed extrusions must never silently reverse on a null result.
+                    // Preserve legacy sheet-metal/through-all behavior outside that contract.
                     bool isSheetMetal = (flatPat != null);
                     bool normalCut = isSheetMetal;
-                    bool dir = isSheetMetal ? reverse : !reverse;
+                    bool dir = isSheetMetal && !strictDirection ? reverse : !reverse;
                     feature = FeatureCutOnce(featureMgr, dir, endCond, depthVal, normalCut);
-                    if (feature == null)
+                    if (feature == null && !strictDirection)
                     {
                         // A null cut is most often the WRONG direction: the default Dir sent the cut AWAY
                         // from material so nothing was removed. This happens whenever the sketch sits on a
@@ -379,6 +377,7 @@ namespace SolidworksExecution.Services
                                 "FACE_NOT_FOUND",
                                 $"up_to_face_index {upToFaceIndex} could not be re-selected for the flipped-direction retry.");
                         feature = FeatureCutOnce(featureMgr, !dir, endCond, depthVal, normalCut);
+                        directionFlipped = feature != null;
                         ExecLog.Write($"cut: flipped-direction retry (sheetMetal={isSheetMetal}) → feature={(feature != null)}");
                     }
 
@@ -490,6 +489,11 @@ namespace SolidworksExecution.Services
                 }
 
                 var geom = BuildBodySummary(modelDoc);
+                if (directionFlipped)
+                {
+                    if (geom == null) geom = new JObject();
+                    geom["direction_flipped"] = true;
+                }
                 if (sweepCutReport != null)
                 {
                     if (geom == null) geom = new JObject();

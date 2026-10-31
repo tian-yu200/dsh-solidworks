@@ -606,6 +606,7 @@ namespace SolidworksExecution.Services
                         Features = new List<string>(),
                         Dimensions = new List<string>()
                     },
+                    ResultGeometry = new { created_document_id = StableDocumentId(modelDoc) },
                     Error = null
                 };
 

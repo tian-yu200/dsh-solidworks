@@ -681,40 +681,140 @@ def _is_num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _point3(value):
+    return isinstance(value, list) and len(value) >= 3 and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in value[:3])
+
+
+def _edge_distance(near, edge):
+    """Distance from an anchor to the edge curve itself, as far as the readback describes it.
+
+    A closed circle carries center/normal/radius: the distance combines the offset along its axis
+    with the radial miss. An open edge carries start/end: the distance to that segment is exact for
+    a line (for an arc it is the chord, so arcs still resolve best through their midpoint).
+    Returns None when the readback has no usable curve description.
+    """
+    if edge.get("kind") == "circle" and _point3(edge.get("center")) and _point3(edge.get("normal")) \
+            and isinstance(edge.get("radius"), (int, float)):
+        c, n, r = edge["center"], edge["normal"], float(edge["radius"])
+        length = math.sqrt(sum(v * v for v in n[:3]))
+        if length > 0:
+            v = [near[i] - c[i] for i in range(3)]
+            axial = sum(v[i] * n[i] for i in range(3)) / length
+            radial = math.sqrt(max(sum(x * x for x in v) - axial * axial, 0.0))
+            return math.hypot(axial, radial - r)
+    a, b = edge.get("start"), edge.get("end")
+    if _point3(a) and _point3(b):
+        ab = [b[i] - a[i] for i in range(3)]
+        span = sum(x * x for x in ab)
+        if span > 1e-18:
+            t = max(0.0, min(1.0, sum((near[i] - a[i]) * ab[i] for i in range(3)) / span))
+            return _dist3(near, [a[i] + t * ab[i] for i in range(3)])
+    return None
+
+
+def _on_edge_distances(port, state_version, points, node_id, step):
+    """Exact point->edge distances from the execution layer for points the cheap rules could not
+    place. Returns [(edge_index, [d_or_None per point])] for edges that report on_dist; an older
+    layer without the opt-in `points` reports none, which leaves those anchors unresolved."""
+    params = {"analysis_type": "edges", "name": "",
+              "points": json.dumps([[float(v) for v in p[:3]] for p in points])}
+    resp = port.execute("analyze_model", params, state_version)
+    if resp.get("status") != "COMPLETED":
+        err = resp.get("error") or {}
+        raise FeatureError("analyze_model(edges, points) failed: %s" % err.get("message"),
+                           code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+    rows = []
+    for feat in (resp.get("cadState") or {}).get("features") or []:
+        try:
+            payload = json.loads(feat) if isinstance(feat, str) else feat
+        except ValueError:
+            continue
+        for e in (payload or {}).get("edges") or []:
+            dist = e.get("on_dist")
+            if isinstance(dist, list) and len(dist) == len(points):
+                rows.append((int(e.get("i", -1)),
+                             [d if isinstance(d, (int, float)) and not isinstance(d, bool) else None
+                              for d in dist]))
+    return rows
+
+
 def resolve_edges_by_anchor(port, state_version, anchors, node_id=None):
     """Edge anchors -> edge indices (for add_edge_feature edge_indices).
 
-    ONE analyze_model(edges) read serves all anchors. Per anchor: edges whose MID lies within
-    the _EDGE_TOL ball around 'near' — exactly one => matched; zero => REFERENCE_UNRESOLVED;
-    more than one => REFERENCE_AMBIGUOUS. Two anchors matching the SAME edge is an error too
-    (duplicate anchor). anchors: iterable of {near: [x,y,z], hint?: str} (hint is never read)."""
+    ONE analyze_model(edges) read serves all anchors. Per anchor, first the original rule: edges
+    whose MID lies within the _EDGE_TOL ball around 'near' — exactly one => matched; more than one
+    => REFERENCE_AMBIGUOUS. Only when NO midpoint is in the ball does the anchor fall back to lying
+    ON an edge (_edge_distance): a full circle's reported midpoint is an arbitrary point of it, and
+    a boolean union splits straight edges and moves their midpoints, so a model can only know a
+    point on the edge, not SolidWorks' midpoint (measured 2026-10-31: a C1 chamfer anchored at the
+    rim's +X point failed with the reported mid 26.6 mm away). On-edge matches: one => matched;
+    several (an anchor at a shared vertex) => REFERENCE_AMBIGUOUS; none => REFERENCE_UNRESOLVED.
+    Two anchors matching the SAME edge is an error too (duplicate anchor).
+    anchors: iterable of {near: [x,y,z], hint?: str} (hint is never read)."""
     step = "resolve_edges_by_anchor"
     data = _analyze_payload(port, state_version, "edges", node_id, step)
 
     mids = []  # (edge_index, mid)
+    edges = []  # (edge_index, readback row)
     for e in data.get("edges") or []:
         m = e.get("mid")
         if isinstance(m, list) and len(m) >= 3:
             mids.append((int(e.get("i", -1)), m))
+        edges.append((int(e.get("i", -1)), e))
     if not mids:
         raise FeatureError("analyze_model(edges) reported no edge midpoints",
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
 
-    resolved = []
-    taken = {}
+    def on_edge_ambiguous(k, near, count):
+        return FeatureError("edge anchor %d %s lies on %d edges within %g m — ambiguous; "
+                            "anchor an interior point of one edge, not a shared vertex"
+                            % (k, list(near), count, _EDGE_TOL),
+                            code="REFERENCE_AMBIGUOUS", node_id=node_id, step=step)
+
+    hits = {}      # anchor index -> edge index
+    pending = []   # anchor indices no midpoint, segment or full circle could place
     for k, anchor in enumerate(anchors):
         near = anchor["near"]
         in_ball = [(d, i) for (i, m) in mids for d in (_dist3(near, m),) if d <= _EDGE_TOL]
-        if not in_ball:
-            nearest = min(_dist3(near, m) for (_i, m) in mids)
-            raise FeatureError("edge anchor %d %s matched no edge midpoint within %g m "
-                               "(nearest was %.6f m away)" % (k, list(near), _EDGE_TOL, nearest),
-                               code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
         if len(in_ball) > 1:
             raise FeatureError("edge anchor %d %s matched %d edge midpoints within %g m — ambiguous"
                                % (k, list(near), len(in_ball), _EDGE_TOL),
                                code="REFERENCE_AMBIGUOUS", node_id=node_id, step=step)
-        idx = in_ball[0][1]
+        if not in_ball:
+            in_ball = [(d, i) for (i, e) in edges for d in (_edge_distance(near, e),)
+                       if d is not None and d <= _EDGE_TOL]
+            if len(in_ball) > 1:
+                raise on_edge_ambiguous(k, near, len(in_ball))
+        if in_ball:
+            hits[k] = in_ball[0][1]
+        else:
+            pending.append(k)
+
+    if pending:
+        # Points on open arcs, splines or intersection curves: ask SolidWorks for the exact distance
+        # (opt-in `points`; a layer without it simply returns no on_dist and the anchor stays unplaced).
+        exact = _on_edge_distances(port, state_version, [anchors[k]["near"] for k in pending],
+                                   node_id, step)
+        for j, k in enumerate(pending):
+            near = anchors[k]["near"]
+            on_edge = [(row[j], i) for (i, row) in exact if row[j] is not None and row[j] <= _EDGE_TOL]
+            if len(on_edge) > 1:
+                raise on_edge_ambiguous(k, near, len(on_edge))
+            if not on_edge:
+                distances = [_dist3(near, m) for (_i, m) in mids]
+                distances += [d for (_i, e) in edges for d in (_edge_distance(near, e),) if d is not None]
+                distances += [row[j] for (_i, row) in exact if row[j] is not None]
+                raise FeatureError("edge anchor %d %s lies on no edge and matched no edge midpoint "
+                                   "within %g m (nearest was %.6f m away)"
+                                   % (k, list(near), _EDGE_TOL, min(distances)),
+                                   code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
+            hits[k] = on_edge[0][1]
+
+    resolved = []
+    taken = {}
+    for k in range(len(anchors)):
+        idx = hits[k]
         if idx < 0:
             raise FeatureError("edge anchor %d resolved to an edge with no valid index" % k,
                                code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)

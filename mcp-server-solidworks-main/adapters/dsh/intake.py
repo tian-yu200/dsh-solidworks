@@ -6,12 +6,11 @@ workflow had no other way to get — the SolidWorks preset forbids shell, and mo
 no crop. It is READ-ONLY, touches no CAD, and needs no job: it returns one PNG plus the
 source-pixel box it came from, so a crop is evidence and not a guess.
 
-Local files only. A drawing that still has to be downloaded is the user's step, not this tool's.
+Local paths and current-instance sha256 attachment IDs share the same resolver.
 """
 import hashlib
 import json
 import math
-import os
 import re
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 from mcp.server.mcpserver import Image as MCPImage
 
 from settings import INTAKE_ROOT
+from image_source import resolve_image_path
 
 
 # DSH downsamples any image over its per-request budget, and that rescale is exactly what turns a
@@ -45,116 +45,15 @@ MAX_SOURCE_BYTES = 64_000_000
 MAX_SOURCE_PIXELS = 60_000_000
 MIN_CROP_AREA = 64            # px² — below this there is no content to read, only noise
 
-# --- reading budget ----------------------------------------------------------------------------
-# A wall-clock limit is not a rule the model can follow, because it has no clock; a COUNT is. Crops
-# are tallied per source drawing (by its SHA-256) for the life of this server process. The OVERVIEW
-# is exempt on purpose: it is the single call that produces the crop plan the budget pays for, and
-# charging it would punish exactly the behaviour the workflow asks for first.
-CROP_LIMIT_DEFAULT = 15
-CROP_LIMIT_ENV = "DSH_SOLIDWORKS_INTAKE_CROP_LIMIT"
-_CROPS_USED = {}              # source sha256 -> crops already served for that drawing
-# Every CROP box served per drawing, so a re-read can be recognised: sha256 -> [
-#   {"box": (x0,y0,x1,y1), "zoom": z, "label": "B2"|None}, ...]. The overview is NOT
-# recorded: it is the free planning call and must stay repeatable.
-_CROP_MEMORY = {}
-# A new crop counts as a REPEAT of an earlier one when this much of its area lies inside it.
-REPEAT_CONTAINMENT = 0.70
-# One call may carry a whole reading round. 12 keeps a single step inside the host's image
-# budget while covering every cluster of a normal drawing.
+# Resource cap per call; no global image/session reading counters.
 MAX_BATCH_REGIONS = 12
 
-
-def crop_limit():
-    """The crop budget for one drawing, read per call so the environment can retune it."""
-    raw = os.getenv(CROP_LIMIT_ENV)
-    if raw is None:
-        return CROP_LIMIT_DEFAULT
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        # A malformed override must not disable the budget — that is the failure it exists to stop.
-        return CROP_LIMIT_DEFAULT
-    return value if value > 0 else CROP_LIMIT_DEFAULT
-
-
-def crops_used(source_sha):
-    return _CROPS_USED.get(source_sha, 0)
-
-
-def reset_crops(source_sha):
-    """Zero one drawing's counter. Reached only through an explicit reset_budget request."""
-    previous = _CROPS_USED.pop(source_sha, 0)
-    return previous
-
-
-def reset_crop_memory(source_sha):
-    """Forget every crop box read from one drawing (part of an explicit reset_budget)."""
-    _CROP_MEMORY.pop(source_sha, None)
-
-
-def crops_read(source_sha):
-    """The crop boxes already served for this drawing, oldest first (for messages/tests)."""
-    return list(_CROP_MEMORY.get(source_sha) or ())
-
-
-def _area(box):
-    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
-
-
-def _overlap_area(a, b):
-    width = min(a[2], b[2]) - max(a[0], b[0])
-    height = min(a[3], b[3]) - max(a[1], b[1])
-    if width <= 0 or height <= 0:
-        return 0.0
-    return width * height
-
-
-def _describe_box(box):
-    return "box %g,%g,%g,%g" % (box[0], box[1], box[2], box[3])
-
-
-def find_repeat(source_sha, box, zoom):
-    """The earlier crop this request would RE-READ, or None when the box is new ground.
-
-    A repeat is a crop whose area lies at least REPEAT_CONTAINMENT inside ONE earlier crop of the
-    same drawing. ONE repeat of an area is allowed, and only at a STRICTLY higher zoom — that is
-    the legitimate "this text is still too small" move. A second attempt at the same area, or one
-    that does not actually zoom in, is refused: at that point more pixels cannot help, and the
-    honest answer is UNKNOWN plus a question.
-    """
-    area = _area(box)
-    if area <= 0:
-        return None
-    covering = []
-    for earlier in _CROP_MEMORY.get(source_sha) or ():
-        overlap = _overlap_area(box, earlier["box"])
-        if overlap / area >= REPEAT_CONTAINMENT:
-            covering.append(earlier)
-    if not covering:
-        return None
-    # The closest ancestor decides: if any earlier crop already covers this box at a zoom >= the
-    # requested one, more pixels are not being bought, so it is refused.
-    best = max(covering, key=lambda e: _overlap_area(box, e["box"]))
-    if zoom > best["zoom"]:
-        # A higher-zoom re-read is allowed ONCE per area. Count the ones already at/above this zoom
-        # over the same ground: a second identical-higher-zoom attempt is a repeat too.
-        for earlier in covering:
-            if earlier["zoom"] >= zoom:
-                return earlier
-        return None
-    return best
-
-
-def remember_crop(source_sha, box, zoom, label=None):
-    _CROP_MEMORY.setdefault(source_sha, []).append(
-        {"box": tuple(float(v) for v in box), "zoom": int(zoom), "label": label})
 
 _CELL_RE = re.compile(r"^([A-Ha-h])([1-9][0-9]?)$")
 # A leading minus is parsed on purpose: a negative coordinate is a well-formed box that lies
 # outside the image, and that answer (REGION_OUT_OF_IMAGE) is more useful than "not a box".
 _BOX_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*"
                      r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
-_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 
 def _fail(code, message):
@@ -164,22 +63,7 @@ def _fail(code, message):
 
 def _open_source(image_path):
     """(Path, RGB image) for a LOCAL drawing file, with the decode bounded."""
-    text = (image_path or "").strip()
-    if not text:
-        _fail("MISSING_PARAMETER", "image_path is required (a local image file path).")
-    if _SCHEME_RE.match(text) or text.lower().startswith("file:"):
-        _fail("LOCAL_PATH_REQUIRED",
-              "image_path must be a local file path; URLs (http://, https://, file://) are not "
-              "readable here. Save the drawing locally and pass that path.")
-    path = Path(text).expanduser()
-    if not path.is_absolute():
-        # A relative path has no knowable base from the model's side, so it resolves against the
-        # workspace — which makes a typo fail the existence check instead of reading other content.
-        path = _workspace_relative(text)
-    if not path.exists():
-        _fail("FILE_NOT_FOUND", f"no such file: {path}")
-    if not path.is_file():
-        _fail("NOT_A_FILE", f"not a file: {path}")
+    path = resolve_image_path(image_path, INTAKE_ROOT.parent.parent)
     try:
         size_bytes = path.stat().st_size
     except OSError as exc:
@@ -203,11 +87,6 @@ def _open_source(image_path):
     except Exception as exc:  # noqa: BLE001
         _fail("IMAGE_UNREADABLE", f"{path}: {type(exc).__name__}: {exc}")
     return path, image.convert("RGB")
-
-
-def _workspace_relative(relative):
-    """Resolve a relative path against the workspace root (the one holding state/ and backups/)."""
-    return (INTAKE_ROOT.parent.parent / relative).resolve()
 
 
 def grid_geometry(width, height):
@@ -356,40 +235,15 @@ def _output_name(source_sha, kind, region, zoom):
     return f"{source_sha[:16]}_{kind}_{safe}_z{zoom}.png"
 
 
-def read_region(image_path, region="", zoom=DEFAULT_ZOOM, reset_budget=False):
-    """Crop/zoom one region of a drawing, or return the labelled overview grid.
+def _read_region_from_source(path, image, source_sha, region="", zoom=DEFAULT_ZOOM):
+    """Read one region from an already opened source image.
 
-    Crops are charged against a per-drawing budget; the overview is free. `reset_budget` zeroes the
-    counter for this drawing before the call and is for use only when the user has asked for more
-    reading.
+    Batch reads call this helper so the source file is decoded and hashed once per MCP call rather
+    than once per requested region. The old loop reopened a large drawing for every crop, which
+    made the advertised batch path slower than twelve single reads in practice.
     """
-    if isinstance(zoom, bool) or not isinstance(zoom, int) or not MIN_ZOOM <= zoom <= MAX_ZOOM:
-        _fail("INVALID_ZOOM", f"zoom must be an integer {MIN_ZOOM}–{MAX_ZOOM} (got {zoom!r}).")
-    path, image = _open_source(image_path)
     width, height = image.size
-    source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
     box, kind, label = parse_region(region, width, height)
-
-    limit = crop_limit()
-    if reset_budget:
-        reset_crops(source_sha)
-        reset_crop_memory(source_sha)
-    if kind != "overview" and crops_used(source_sha) >= limit:
-        _fail("INTAKE_BUDGET_EXHAUSTED",
-              f"crop budget for this drawing is used up ({limit} crops); write PLAN.md v1 now, "
-              "list unread values as UNKNOWN and ask the user. Re-read only after the user "
-              "explicitly asks for it, by passing reset_budget=true.")
-
-    if kind != "overview":
-        earlier = find_repeat(source_sha, box, zoom)
-        if earlier is not None:
-            # Hard stop, in code, because advisory text did not work: the model kept re-zooming the
-            # same area with slightly different boxes instead of writing down a question. Naming the
-            # earlier crop makes the state visible; the UNKNOWN sentence says what to do instead.
-            _fail("REGION_ALREADY_READ",
-                  "this box was already read as %s at zoom %d. What is still unreadable there is "
-                  "UNKNOWN: write it in the ledger as UNKNOWN and ask the user — do not crop the "
-                  "same area again." % (_describe_box(earlier["box"]), earlier["zoom"]))
 
     if kind == "overview":
         fitted, data, scale, mode = _fit_budget(draw_grid(image.copy()), 1)
@@ -410,11 +264,6 @@ def read_region(image_path, region="", zoom=DEFAULT_ZOOM, reset_budget=False):
     directory.mkdir(parents=True, exist_ok=True)
     out_path = directory / _output_name(source_sha, kind, region, zoom)
     out_path.write_bytes(data)
-    if kind != "overview":
-        # charged only once the crop exists: a rejected or failed region must not eat the budget
-        _CROPS_USED[source_sha] = crops_used(source_sha) + 1
-        remember_crop(source_sha, box, zoom, label)
-
     meta = {
         "status": "completed",
         "risk": "read",
@@ -431,91 +280,73 @@ def read_region(image_path, region="", zoom=DEFAULT_ZOOM, reset_budget=False):
         "zoom": 1 if kind == "overview" else zoom,
         "region": region_out,
         "grid": grid_geometry(width, height),
-        "budget": {"max_pixels": MAX_OUTPUT_PIXELS, "max_bytes": MAX_OUTPUT_BYTES,
-                   "crops_used": crops_used(source_sha), "crop_limit": limit},
-        "read_next": "Read the returned path. If a dimension is still not legible, zoom that cell "
-                     "(zoom 3 or 4) rather than guessing; anything still illegible is UNKNOWN and "
-                     "goes to the user — never an invented value.",
+        "budget": {"max_pixels": MAX_OUTPUT_PIXELS, "max_bytes": MAX_OUTPUT_BYTES},
+        "read_next": "Use visible evidence; OCR/crops are optional. Separate EXPLICIT, DERIVED, "
+                     "USER and UNKNOWN. Ask once for genuinely missing dimensions with the compact "
+                     "plan; report tool failures as failures, not missing dimensions.",
     }
     return data, meta
 
 
-def read_regions(image_path, regions, zoom=DEFAULT_ZOOM, reset_budget=False):
-    """Read SEVERAL regions of one drawing in ONE call: [(image bytes, meta), ...].
-
-    This exists because of a measured failure, not a preference: with 45-90 s per step the model
-    requested only 2 crops per step, so a 15-crop budget took 6-10 minutes and reading never
-    converged. One call per BATCH is the fix; the budget and the repeat rule still apply PER
-    REGION, so batching cannot be used to read more than a drawing allows.
-
-    A refused region does NOT abort the batch: its error is reported in the JSON (`regions[i]
-    .error`) and the other regions still return. That is what lets one step answer "which of these
-    12 clusters can I read, and which are UNKNOWN".
-    """
-    if not isinstance(regions, (list, tuple)) or not regions:
-        _fail("INVALID_REGIONS", "regions must be a non-empty list of cell labels or boxes.")
-    if len(regions) > MAX_BATCH_REGIONS:
-        _fail("INVALID_REGIONS",
-              f"{len(regions)} regions were requested; the limit is {MAX_BATCH_REGIONS} per call. "
-              "Send them in one batch of at most that many.")
+def read_region(image_path, region="", zoom=DEFAULT_ZOOM):
+    """Crop one region or return the labelled overview; no per-image reading state."""
     if isinstance(zoom, bool) or not isinstance(zoom, int) or not MIN_ZOOM <= zoom <= MAX_ZOOM:
         _fail("INVALID_ZOOM", f"zoom must be an integer {MIN_ZOOM}-{MAX_ZOOM} (got {zoom!r}).")
-
-    results = []
-    for index, region in enumerate(regions):
-        try:
-            data, meta = read_region(image_path, region, zoom,
-                                     reset_budget if index == 0 else False)
-            results.append({"data": data, "meta": meta, "error": None})
-        except RuntimeError as exc:
-            # A typed refusal ("REGION_ALREADY_READ: ...") belongs to THIS region only.
-            text = str(exc)
-            code, _sep, message = text.partition(": ")
-            results.append({"data": None, "error": {"code": code, "message": message},
-                            "region": region})
-    return results
+    path, image = _open_source(image_path)
+    try:
+        source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        return _read_region_from_source(path, image, source_sha, region, zoom)
+    finally:
+        image.close()
 
 
-def result_payload(image_path, region="", zoom=DEFAULT_ZOOM, reset_budget=False):
-    """(image content block, one-line JSON) — what the MCP tool returns."""
-    data, meta = read_region(image_path, region, zoom, reset_budget)
-    return (MCPImage(data=data, format="png"),
-            json.dumps(meta, ensure_ascii=False, separators=(",", ":")))
+def read_regions(image_path, regions, zoom=DEFAULT_ZOOM):
+    """Decode/hash once; a malformed region does not discard valid siblings."""
+    if not isinstance(regions, (list, tuple)) or not regions or len(regions) > MAX_BATCH_REGIONS:
+        _fail("INVALID_REGIONS", f"regions must contain 1-{MAX_BATCH_REGIONS} cell labels or boxes.")
+    if isinstance(zoom, bool) or not isinstance(zoom, int) or not MIN_ZOOM <= zoom <= MAX_ZOOM:
+        _fail("INVALID_ZOOM", f"zoom must be an integer {MIN_ZOOM}-{MAX_ZOOM} (got {zoom!r}).")
+    path, image = _open_source(image_path)
+    try:
+        source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        results = []
+        for region in regions:
+            try:
+                data, meta = _read_region_from_source(path, image, source_sha, region, zoom)
+                results.append({"data": data, "meta": meta, "error": None})
+            except RuntimeError as exc:
+                code, _sep, message = str(exc).partition(": ")
+                results.append({"data": None, "region": region,
+                                "error": {"code": code, "message": message}})
+        return results
+    finally:
+        image.close()
 
 
-def result_batch(image_path, regions, zoom=DEFAULT_ZOOM, reset_budget=False):
-    """([image content blocks], one-line JSON listing every region) — the batched tool return.
+def result_payload(image_path, region="", zoom=DEFAULT_ZOOM):
+    """(Image content block, one-line JSON) for a single optional crop."""
+    data, meta = read_region(image_path, region, zoom)
+    return MCPImage(data=data, format="png"), json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
 
-    One block per region that was served, in request order; refused regions contribute no block but
-    DO appear in the JSON with their typed error, so a single step can report "these 9 read, these
-    3 are UNKNOWN and need a question".
-    """
-    results = read_regions(image_path, regions, zoom, reset_budget)
+
+def result_batch(image_path, regions, zoom=DEFAULT_ZOOM):
+    """Return images in request order, plus explicit per-region errors."""
+    results = read_regions(image_path, regions, zoom)
     blocks = [MCPImage(data=r["data"], format="png") for r in results if r["data"] is not None]
     listed = []
-    for index, r in enumerate(results):
-        if r["data"] is None:
-            listed.append({"index": index, "region": r.get("region"),
-                           "status": "refused", "error": r["error"]})
+    for index, result in enumerate(results):
+        if result["data"] is None:
+            listed.append({"index": index, "region": result["region"],
+                           "status": "refused", "error": result["error"]})
         else:
-            meta = r["meta"]
-            listed.append({"index": index, "region": meta.get("region"),
-                           "status": "completed",
-                           "output_path": meta.get("output_path"),
-                           "zoom": meta.get("zoom"),
-                           "budget": meta.get("budget")})
-    payload = {
-        "status": "completed",
-        "risk": "read",
-        "action": "batch",
-        "image_path": str(image_path),
-        "requested": len(regions),
-        "returned": len(blocks),
-        "regions": listed,
-        "budget": results[-1]["meta"]["budget"] if results and results[-1]["data"] is not None
-        else (results[0]["meta"]["budget"] if results and results[0]["data"] is not None else None),
-        "read_next": "Read the returned images. Anything still illegible after this batch is "
-                     "UNKNOWN: put it in the ledger as UNKNOWN and ask the user — do not crop "
-                     "the same area again.",
-    }
+            meta = result["meta"]
+            listed.append({"index": index, "region": meta["region"], "status": "completed",
+                           "output_path": meta["output_path"], "zoom": meta["zoom"],
+                           "budget": meta["budget"]})
+    payload = {"status": "completed" if len(blocks) == len(regions) else ("partial" if blocks else "failed"),
+               "risk": "read", "action": "batch", "image_path": str(image_path),
+               "requested": len(regions), "returned": len(blocks), "regions": listed,
+               "budget": {"max_pixels": MAX_OUTPUT_PIXELS, "max_bytes": MAX_OUTPUT_BYTES},
+               "read_next": "Use returned evidence. Tool errors are not missing dimensions; "
+                            "combine genuine UNKNOWN dimensions and plan approval in one question round."}
     return blocks, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

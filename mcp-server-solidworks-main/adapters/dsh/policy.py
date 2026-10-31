@@ -944,7 +944,15 @@ def expected_output_paths(payload, state):
     return []
 
 
-def graph_risk(graph):
+def graph_risk(graph, fresh_document=False):
+    """A graph that builds into its own new document needs no batch confirmation.
+
+    It cannot overwrite or edit anything the user already has, and the user approved its plan
+    in the one question round (user decision 2026-10-31: plan approval authorizes the build).
+    A graph into an existing document keeps the over-ten-nodes confirmation.
+    """
+    if fresh_document:
+        return "write"
     count = len(graph.get("nodes") or [])
     return "batch" if count > BATCH_NODE_THRESHOLD else "write"
 

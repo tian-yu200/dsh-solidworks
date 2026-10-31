@@ -1,129 +1,71 @@
-# Drawing Intake — reading an engineering drawing before any CAD call
+# Drawing Intake — original image first
 
-Use this for every drawing / 三视图 / 零件图 / 工程图 image the user supplies, before writing a plan
-or a Feature Graph. Its purpose is measured, not ceremonial: a whole sheet inside the model's image
-budget renders small dimension text as a few pixels, and guessed dimensions are the failure this
-workflow must never produce.
+Directly inspect the attached original drawing before calling aids. OCR and crop
+reads are OPTIONAL, chosen only for unreadable or conflicting evidence. Avoid
+serial round trips: independent regions can share one batch (1–12); a single
+region is equally valid. There is no per-image crop quota, fixed round count or
+model-controlled reset. Keep file/pixel/decode/output, coordinate and zoom limits.
 
-`read_drawing_region` is a read-only MCP tool. It touches no CAD document, needs no `job_id`, and
-does not start SolidWorks, so it runs before `start_job`. Like `modlens_read_image` it accepts a
-**local image file path only** — URLs (`http://`, `https://`, `ftp://`, `file://`) are rejected, and
-it is not restricted to a folder: any local file the session can name is readable.
+## Evidence and dimension ledger
 
-## 0. The reading protocol — three rounds, then the reading result
+Record each parameter as EXPLICIT / DERIVED / USER / UNKNOWN, with units, view,
+feature and source location. EXPLICIT is visibly stated; OCR is a candidate until
+checked against the image. DERIVED is a unique geometric result: retain the
+formula, EXPLICIT/USER inputs and evidenced constraints. USER is a specific
+user-supplied value/relation. UNKNOWN is still underconstrained or contradictory.
 
-Reading must CONVERGE FAST. Each step costs 45-90 s, so the number of STEPS matters as much as the
-number of crops: batching is the point, not politeness. Follow these rounds exactly.
+Examples:
+- Overall 90 and two equal margins 10 determine span 70: DERIVED = 90−2×10.
+- A concentric hole needs no separate center coordinate when both axes are evidenced.
+- R10 tangent to two resolved perpendicular lines has a derived center; do not ask for it.
+- A slot offset lacking any datum, symmetry or dimension chain is UNKNOWN: ask for its offset.
+- A visible small fillet without a readable radius is still a required feature; ask for
+  the radius when it cannot be derived. Never drop it to make the graph smaller.
 
-- **Round 0 — one OCR pass (do this FIRST).** `read_drawing_text(image_path)` OCRs the whole
-  sheet with Windows' built-in engine and returns every text with its box and grid cell. It costs
-  ~3 s and is not charged to the crop budget. Treat its list as a CANDIDATE table: it is
-  deterministic and often right, but it misreads small symbols, so anything that matters is
-  confirmed by a crop below. It usually removes most of the crops you would otherwise need.
-- **Round 1 — one overview.** `read_drawing_region(image_path)` with an empty `region`: the gridded
-  overview, which is FREE (never charged to the budget). From it, write down every view, the
-  projection system, the scale and title block, and **the complete list of dimension clusters to
-  read**, each with its cell (`C4`) or source-pixel box (`x0,y0,x1,y1`) and the zoom it needs.
-- **Round 2 — ONE call, every cluster.** Pass them all at once:
-  `read_drawing_region(image_path, regions=["B2","C4","D3",...], zoom=3)` — up to 12 regions in one
-  call, sharing one zoom. One call, not one call per cluster. The response is one image per region
-  plus one JSON line listing each region's box, output path and budget.
-- **Round 3 — at most one more call.** Only for values still illegible after round 2 (a tighter
-  box, or `zoom=4`). Anything still ambiguous after this round is `UNKNOWN`.
-- **Then send the READING RESULT and stop.** The first deliverable is NOT the full plan: it is
-  - the **dimension ledger** — id, value, kind, view, grid cell or box, `legible: yes|no`;
-  - a **question list** for every uncertain or undimensioned item.
-  Send both with `ask_user_question`. A candidate reading may be offered ("looks like 26 — confirm?")
-  but never enters the ledger as a fact. The full PLAN.md and the Feature Graph come only after the
-  user answers. **Do not zoom again before then.**
+Check every supplied view, section, hole/thread/depth callout, dimension chain,
+symmetry, equality, concentricity, tangency, radius and small corner detail.
+Do not turn every absent label into a missing dimension. NEVER estimate dimensions
+from pixel proportions, image scale or shape appearance, even after plan approval.
 
-**No re-reading — enforced by the tool.** Every crop box is remembered per drawing (by SHA-256). A
-new crop whose area lies at least 70% inside ONE earlier crop is a REPEAT. ONE repeat of an area is
-allowed, and only at a **strictly higher zoom** (the legitimate "this is still too small" move). Any
-further repeat is refused with `REGION_ALREADY_READ`, naming the earlier crop; what is still
-unreadable there is `UNKNOWN` and is asked. The overview is exempt, and `reset_budget` clears the
-memory too.
+## Defaults and one question round
 
-The tool also enforces a **crop budget per drawing**: every response carries
-`budget: {crops_used, crop_limit}`. The default is **15 crops**; the overview is free; the count is
-per source image for the life of the server process. Each region of a batch is charged
-individually, and a refused region does not stop the others. At the limit further crops are
-refused with `INTAKE_BUDGET_EXHAUSTED` — that means **send the reading result now**, list the unread
-values as `UNKNOWN` and ask the user; it is not a reason to retry. `reset_budget=true` zeroes this
-drawing's counter and read memory before the call and may be used **ONLY after the user has
-explicitly asked for more reading** — never on your own initiative.
+Use mm by default; an explicit drawing unit overrides it. Do not set a material
+that was not specified. Save a new, non-overwriting file in the working directory.
+Use projection symbols, labels, aligned views and topology to resolve projection;
+ask only if unresolved alternatives create different parts.
 
-**No escape hatch.** Never measure pixels, open a browser, run a script, or use any other tool to
-estimate a size. A value the drawing does not state is `UNKNOWN` and is ASKED, not estimated.
+Combine the reading conclusion, compact PLAN.md-style plan (including feature
+completeness, milestones, outputs and validation), and ALL genuine missing dimensions
+in ONE ask_user_question. Include plan approval in that same round; no hard limit
+of three questions. A fully resolved drawing only needs that compact plan approval,
+not invented dimension questions. A previously approved matching plan needs no repeat.
+After the answer, build directly; ask again only if the answer introduces a NEW
+contradiction. “接受/继续” supplies approval, not an absent numeric value. If required
+numbers remain absent, report BLOCKED without guessing or re-asking the same question.
 
-## 1. Overview first
+## Optional tool use and attachment IDs
 
-Call `read_drawing_region(image_path="<local path>")` with no `region`. The result is the full sheet
-with a labelled grid — columns `A`..`H` left to right, rows `1`..`6` top to bottom — plus JSON with
-`output_path`, `source_pixels`, and the `cell_pixels` that define every label.
+Both read_drawing_text and read_drawing_region accept a local image path OR
+sha256:<64 hexadecimal characters>. The current instance resolves an attachment
+under DSH_HOME/attachments/v1/objects/<first two hex>/<hash> (default home ~/.dsh).
+An invalid ID or absent object produces one clear error; do not guess paths.
+URLs including file:// are refused. modlens_read_image remains local-path-only.
 
-From the overview, record before measuring anything:
+Read with ONE batch of whole-view boxes at zoom 2, e.g.
+regions=["45,45,430,610","65,610,635,905","690,80,1050,525"] (front, bottom, view A):
+a dimension must stay with its dimension line and the feature it points to. Grid cells
+("C4") and zoom 3–4 are only for one unreadable number, boxed with its feature. An empty
+region returns the optional A–H × 1–6 gridded overview. Boxes use source pixel
+coordinates to locate evidence, never to measure physical dimensions.
+Keep crop paths as citations; malformed regions fail explicitly without clipping.
 
-- every view and what it shows (main / top / side / isometric / section / detail / removed section);
-- the projection system, proved by the layout and the projection symbol, not assumed;
-- the scale named in the title block (and per-view scales);
-- the title block: part name/number, material, weight, finish, revision;
-- which cells contain the dimension clusters and the title block;
-- **the complete list of dimension clusters to read** — every one, with its cell or source-pixel box
-  and zoom. This list IS the round-2 batch.
+read_drawing_text returns optional OCR candidates (raw text, positions, rotation,
+nullable confidence). A tool failure is a technical failure, not a missing dimension.
+The policy detects three consecutive redundant/failed image reads within one
+host Agent/turn; it blocks the repeated attempt and logs the count. A materially
+new successful evidence read restores progress; only host task changes discard
+state. Report a stalled evidence/tool chain once; do not ask the user repeatedly
+for image paths or disguise infrastructure failures as dimension questions.
 
-If the drawing is still unreadable as a whole (a very large sheet, or `output_mode` reported `P`
-because the RGB encode bust the byte budget), work only from crops from here on.
-
-## 2. Zoom every dimension cluster — in one batch
-
-For each cluster in the round-1 list: `read_drawing_region(image_path, region="C4", zoom=3)` — a
-cell label, or a source-pixel box `x0,y0,x1,y1` when a cluster straddles cells. Use `zoom=4` for
-thread callouts, tolerance stacks, and radii. Crops are drawn without the grid overlay, so the
-pixels the tool returns are exactly the drawing's.
-
-Pass the whole list as ONE call: `read_drawing_region(image_path, regions=[...], zoom=3)`. A
-second, final call is allowed for whatever is still illegible; after that the ledger is closed and
-the reading result is sent.
-
-Fill one row of the ledger per dimension. Values are what the drawing STATES, in millimetres:
-
-| id | value | kind | view | cell/crop | legible |
-| --- | --- | --- | --- | --- | --- |
-| L1 | 90 | linear | A (top view) | B2 | yes |
-| D1 | Ø20H7 | diameter + tolerance | main | D3 (zoom 4) | yes |
-| R3 | R100 | radius, centre not dimensioned | main | C4 | yes |
-| T1 | M6-6H 深12 | thread | detail | A5 | no → UNKNOWN |
-
-`kind` ∈ linear, angle, Ø, R, thread, tolerance/GD&T, finish, note, count (e.g. "4× Ø10").
-`legible` is `yes` only when the digits are unambiguous at the returned crop; `no` otherwise.
-Keep the crop path with the row — it is the evidence a later question refers to.
-
-## 3. Never guess: ask, then record the answer
-
-Anything illegible after `zoom=4`, absent from the drawing, or ambiguous between views is
-`UNKNOWN`, and `ASSUMED` is only ever a labelled assumption the user has seen. Ask with
-`ask_user_question`, one question per blocking value, and cite the crop path so the user can look at
-the same pixels. A missing overall dimension on an exercise drawing (a dimensioned-looking view
-with no numbers) is a question, not a pixel measurement.
-
-Reading geometry off pixels to estimate a number the drawing does not state is forbidden: an
-estimated dimension is an invented one, and it silently becomes the model's truth.
-
-## 4. Only then plan and build
-
-Write the inline PLAN.md-style plan (see
-[reconstruction reasoning](solidworks://skill/references/reconstruction-reasoning.md), read with
-`read_mcp_resource` on server `solidworks`) with the ledger's UNKNOWNs listed as open
-questions, get approval for that plan version, and only then compose the Feature Graph. Every
-graph value must be traceable to a `legible: yes` ledger row or to a user answer.
-
-The READING RESULT (ledger + questions) goes to the user at the end of the reading rounds (§0),
-before they answer. The full PLAN.md is written from the confirmed ledger once they have answered;
-approval of that plan is what unblocks building.
-
-## 5. Forbidden during intake
-
-- `pip`, `uv`, `conda`, npm or any other install, and any new virtual environment.
-- Any other CAD kernel or geometry library: build123d, CadQuery, OpenSCAD, pythonocc, FreeCAD,
-  STEP/OBJ scripting. The route to a SolidWorks part is `submit_feature_graph`, nothing else.
+No package installation, alternate CAD kernels, shell/COM, macros or pixel-based
+size estimation during intake. Continue through the approved SolidWorks tools.

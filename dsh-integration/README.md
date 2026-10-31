@@ -62,7 +62,7 @@ web UI's new-session screen, `AgentPresetSeat`) or global (`Set as default`, whi
 `SolidWorks CAD` in that chip before sending the first message, or launch the dedicated profile
 (`--profile solidworks`), which selects it and adds the policy plugin.
 
-## Ten-Tool Surface
+## Twelve-Tool Surface
 
 The dedicated MCP exposes exactly:
 
@@ -74,13 +74,24 @@ The dedicated MCP exposes exactly:
 6. `save_or_export`
 7. `request_confirmation`
 8. `confirm_action`
-9. `finish_job`
-10. `read_drawing_text`
-11. `read_drawing_region`
+9. `cancel_action`
+10. `finish_job`
+11. `read_drawing_text`
+12. `read_drawing_region`
 
-`read_drawing_region` is the drawing-intake zoom: a local image path plus a grid cell or a
-source-pixel box, returning a crop that stays inside the model's image budget. It is read-only,
-needs no job, and touches no CAD, so it runs before `start_job`.
+Read the original drawing first. `read_drawing_text` (OCR candidates) and
+`read_drawing_region` (crop/zoom) are optional aids; both accept local paths or
+`sha256:<64 hex>` IDs from the current instance's attachment store. URL forms are
+refused. Crops may use a single `region` or a 1–12-item `regions` batch at zoom 1–4.
+Resource limits remain, but there is no image-global crop quota or fixed round cap.
+Task-scoped policy detects three consecutive failed/redundant image reads and
+blocks the repeated attempt; a useful new evidence read can recover. There is no
+model reset parameter. Tool failures are reported as failures, not missing dimensions.
+
+Use EXPLICIT / DERIVED / USER / UNKNOWN sources. Combine the reading conclusion,
+compact plan approval and all genuinely missing dimensions into one question round.
+Default pre-build references: `feature_graph_part_card` + the matching mapping;
+full schema remains paged and is consulted only when needed.
 
 The policy plugin denies other `mcp__solidworks__*` calls.
 
@@ -107,6 +118,9 @@ The policy plugin denies other `mcp__solidworks__*` calls.
 The installer backs up affected DSH configuration to the repository's
 `config-backups\<timestamp>` directory. It does not modify provider
 settings, API keys, or permission presets.
+Both profile patches retain custom providers, the chosen model, and unrelated MCP servers.
+The installer prepares and validates the merged patches before replacing installed files;
+it updates only the managed SolidWorks connection and the dedicated preset default.
 
 ## Start
 
@@ -138,6 +152,15 @@ C:\path\to\deepseek-harness\node_modules\.bin\dsh.CMD --profile solidworks
 
 The exported config is redacted for common key, authorization, bearer, and token
 forms. Review it before publishing.
+Doctor checks managed profile fields without rejecting custom plugins, verifies both installed
+policy entrypoints, and resolves model input capabilities from the profile plus live settings.
+This verifies configuration, without sending an image to the model provider.
+
+Regression checks from the repository root:
+
+```powershell
+node --test dsh-integration/plugins/solidworks-policy/test/policy.test.mjs dsh-integration/scripts/test/*.test.mjs
+```
 
 ## Restore
 
@@ -155,3 +178,12 @@ forms. Review it before publishing.
 - MCP cannot cryptographically prove a human supplied approval. The preset and
   skill require a fresh explicit user message before using the one-time token.
 - A user document switch invalidates the job target and blocks the next write.
+
+### Offline GPT image-input check
+
+The installer preserves user providers and explicitly declares image input only
+for the three known models under provider `gpt` (gpt-5.6-sol, gpt-6-sol,
+gpt-6.1-sol), including the optional tauri patch. It backs up that patch first.
+Use `Check-ModelImageCapability.mjs --profile-dump <patch-or-resolved-dump> --provider gpt`
+for a scoped offline audit; omit `--provider` to audit every route. Scoped success
+is not a claim that unrelated providers accept images. Credentials are never printed.

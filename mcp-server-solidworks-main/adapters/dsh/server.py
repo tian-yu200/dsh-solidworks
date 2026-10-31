@@ -148,6 +148,7 @@ def inspect_state(
         "coverage",
         "feature_graph_schema",
         "feature_graph_quickref",
+        "feature_graph_part_card",
         "feature_graph_changelog",
     ] = "contract",
     reference_offset: int = 0,
@@ -161,11 +162,9 @@ def inspect_state(
     defaults; a larger value is clamped). The page reports total_lines/total_chars, has_more
     and next_offset, and for feature_graph_schema an index of its sections and node kinds.
 
-    PRE-BUILD READING: start with `feature_graph_quickref` (generated from the schema — every
-    node type with its required/optional fields, units and a one-line meaning, 1-2 pages), then
-    read only the schema sections you need by jumping with `page.index.sections[].line`. The
-    full `feature_graph_schema` is 9 pages and no longer carries the changelog prose, which is
-    its own topic (`feature_graph_changelog`) and is NOT needed to build.
+    PRE-BUILD READING: read feature_graph_part_card (one compact page) and the mapping
+    matching the target. Read quickref or indexed schema sections only for constructs not
+    covered by the card; full schema and changelog are not a mandatory pre-build sequence.
     Deep document scopes require job credentials.
     Assembly faces/edges additionally require component.
     """
@@ -188,21 +187,38 @@ def submit_feature_graph(
     job_token: str,
     graph_json: str,
     fresh_document: bool = True,
+    repair_evidence_json: str = "{}",
 ) -> str:
     """Compile and execute a complete Feature Graph using SolidPilot's existing compiler.
 
-    IR distances are meters and angles are radians. Large graphs return
-    pending_confirmation instead of executing immediately. While a graph is pending,
+    IR distances are meters and angles are radians. A fresh_document=true graph executes
+    immediately at any size: the approved plan authorizes it and it creates its own document.
+    A graph over 10 nodes into an existing document returns pending_confirmation. While a graph is pending,
     document writes are refused with GRAPH_PENDING_CONFIRMATION until it is confirmed
     or cancelled with cancel_action.
 
-    A completed result may carry `warnings`: a non-fatal finding (today MATERIAL_NOT_FOUND)
-    on work that is committed and verified — do NOT resubmit the graph or roll it back;
-    fix the property afterwards with apply_document_edits.
+    A failed fresh graph may be rebuilt automatically only after recovery_status=discarded: the owned
+    document is absent, earlier documents are unchanged and the job is unbound. Report
+    operation_target separately from active_document_after_recovery. Never edit the latter.
+    L4 permits at most two repair executions after the initial attempt, persisted across jobs.
+    Resubmit the full graph with repair_evidence_json (error_code matching last failure,
+    cause, readback, change); second repair needs new evidence, never identical replay.
+    Lock node count/ordered (type,operation), material name/library, all non-placement
+    dimensions/specs/end types and intrinsic sketch shape (1e-9 m tolerance). Placement anchors, reversed,
+    ref/datum/face/signed offset, frame and whole-sketch rigid motion/mirror may change.
+    Inadmissible, exhausted, context-changed, in_flight or unverified recovery requests user
+    confirmation; approval archives closed_by=user_override and starts a new first attempt
+    at count 0, as one prompt. It does not close residual documents.
+    recovery_unverified / rollback_failed prohibits AUTOMATIC retry. Undo is not yet verified.
+
+    A completed result may carry non-fatal warnings. DIRECTION_FLIPPED means a null cut
+    succeeded after opposite-direction retry: inspect that feature's location, depth and
+    direction by readback AND front/top/side verification. MATERIAL_NOT_FOUND can be fixed
+    later with apply_document_edits. Neither warning alone calls for graph replay/rollback.
     """
     return _json_result(
         lambda: orchestrator.feature_graph(
-            job_id, job_token, graph_json, fresh_document
+            job_id, job_token, graph_json, fresh_document, repair_evidence_json
         )
     )
 
@@ -219,6 +235,10 @@ def apply_document_edits(
     modify_dimension, edit_feature, set_part_material, add_edge_feature, create_pattern,
     add_reference_geometry, add_sketch_constraint, insert_toolbox_component, and
     create_exploded_view. Deletes and large batches require explicit confirmation.
+    A failure reports recovery_status=recovery_unverified even if Undo returns COMPLETED.
+    Automatic retries are prohibited; explicit continuation uses user confirmation. Blocks
+    use normalized saved path or unsaved document_id, expire when absent, and can be released
+    by that confirmation. Approval does not verify Undo or automatically close residual docs.
     """
     return _json_result(
         lambda: orchestrator.document_edits(
@@ -261,10 +281,11 @@ def save_or_export(
     """Save, export, batch-export, or close through the CAD safety policy.
 
     Existing-file overwrite, batch export, close-all, and discarding dirty changes return
-    pending_confirmation. A save that names a path for an untitled document — including one
-    this job just created — or a different path for a saved document is a Save As that renames
-    the open document in memory and also returns pending_confirmation (risk save_as; the
-    action_summary names the document and the target path). file_path is the full target for
+    pending_confirmation. The FIRST save of the part this job created (proved by its stable
+    document_id) to a path that does not exist runs at once. Any other save that names a path
+    is a Save As that renames the open document and returns pending_confirmation (risk save_as,
+    summary names document and target): call request_confirmation, then confirm_action at once
+    — DSH asks the user; never end the turn to ask in chat. file_path is the full target for
     save/export and the extensionless base path for batch_export.
 
     A queued Feature Graph blocks this and other writes until confirm_action or cancel_action.
@@ -356,88 +377,46 @@ def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
 
 @mcp.tool(structured_output=False)
 def read_drawing_text(image_path: str) -> str:
-    """STEP 1 OF READING A DRAWING: OCR every text on the sheet, with its position.
+    """Optional OCR aid after directly viewing the original drawing; not a required first step.
 
-    Read-only and standalone: no CAD document, no job, no SolidWorks, no crop budget. It uses
-    Windows' built-in OCR (Windows.Media.Ocr) — nothing to install — and reads the sheet at three
-    rotations so vertical dimension text is caught too.
-
-    Call this FIRST, before any `read_drawing_region` crop. A whole sheet inside the image budget
-    renders 3 mm digits as a few pixels; OCR reads them at full resolution and returns ONE table
-    instead of a dozen zoom round trips (each of which costs 45-90 s).
-
-    image_path: LOCAL image file path only, same rules as `read_drawing_region`.
-
-    Returns one JSON object: `texts` is a list of {text, raw, box:[x0,y0,x1,y1] in SOURCE pixels,
-    grid_cell (A-H x 1-6, same grid as the overview), rotation, confidence}. `raw` is what the
-    engine returned and `text` is the symbol-normalised form (look-alikes mapped to D/R/x/+-/deg
-    and thread classes). Text found in more than one rotation is merged.
-
-    THIS IS A CANDIDATE TABLE, NOT TRUTH. OCR misreads small text. Map its values to features, and
-    verify anything that matters against a crop before using it in a graph. Anything still
-    uncertain is UNKNOWN: ask the user, never guess.
-
-    Windows OCR reports no per-text confidence, so `confidence` is null rather than invented.
+    image_path accepts a local file path or sha256:<64 hex> in the current DSH home.
+    URLs are refused. Malformed/missing attachment objects fail once; do not guess paths.
+    Returns candidate text, raw text, source-pixel boxes, grid cells, rotation and nullable
+    confidence. Check OCR candidates visually before using them as EXPLICIT evidence.
+    Use EXPLICIT / DERIVED (formula + source facts) / USER / UNKNOWN. Only genuinely missing
+    constraints become questions; combine every missing dimension, reading conclusion and
+    compact plan approval in ONE ask_user_question round. User answers unblock building;
+    do not ask again about the same matter unless those answers introduce a new contradiction.
+    Tool failures are infrastructure failures, not missing dimensions.
     """
     return _json_result(lambda: ocr.result_payload(image_path))
 
 
 @mcp.tool(structured_output=False)
 def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
-                        regions: list[str] | None = None,
-                        reset_budget: bool = False):
-    """Crop and enlarge part of an engineering drawing so small dimension text can be READ.
+                        regions: list[str] | None = None):
+    """Optional crop/zoom aid after directly viewing the original drawing.
 
-    Read-only: it touches no CAD document, needs no job, and never starts SolidWorks. It exists
-    because a whole sheet inside the model's image budget renders 3 mm dimension digits as a few
-    pixels, and no other approved tool can zoom.
-
-    image_path: LOCAL image file path only (URLs including file:// are rejected).
-    region: '' for the OVERVIEW — the full sheet with a labelled grid (columns A left → H right,
-        rows 1 top → 6 bottom) drawn on it, so a feature can be named by cell instead of by
-        guessed pixels; or a cell label like 'B2'; or a source-pixel box 'x0,y0,x1,y1'.
-    zoom: integer 1–4, applied to a crop (the overview is fitted to the image budget). Use 3–4 for
-        dimension text, and re-ask with a bigger zoom before calling anything illegible.
-    regions: optional LIST of cell labels or boxes (up to 12), all at the shared `zoom`. ONE call
-        returns one image per region plus a JSON line listing them; a refused region is reported
-        in that JSON and the others still return. Use this for the whole reading round.
-
-    Returns the cropped image and one line of JSON: output path, output pixels/bytes, the exact
-    source-pixel box, and the grid map. Crops accumulate under artifacts/intake/<image-hash>/ for
-    the session to cite. A region outside the image is rejected, never clipped: a silently clipped
-    crop hides what it left out. Whatever stays illegible after zooming is UNKNOWN and goes to the
-    user — do not invent a dimension, tolerance, material or standard-part value.
-
-    READING PROTOCOL (follow it exactly; the per-step cost is what makes it matter):
-    0. call read_drawing_text FIRST: one OCR pass gives you every text and its grid cell;
-    1. call ONCE with region='' for the gridded overview, and list EVERY dimension cluster you
-       must read with its cell or pixel box;
-    2. request EVERY needed crop in ONE call: pass regions=['B2','C4','D3',...] (up to 12, one
-       shared zoom). One call, not one call per region — each step costs 45-90 s;
-    3. at most ONE more call, only for values still illegible (a tighter box or zoom=4). A box
-       that was already read is REFUSED with REGION_ALREADY_READ;
-    4. then send the READING RESULT and stop: the dimension ledger (id, value, kind, view, cell or
-       box, legible yes/no) PLUS a question list for every uncertain or undimensioned item, both
-       through ask_user_question. A candidate reading may be offered ("looks like 26 - confirm?")
-       but never enters the ledger as a fact. The full PLAN.md and the Feature Graph come only
-       after the user answers. Do not zoom again before then.
-
-    Never measure pixels, open a browser, run a script, or use any other tool to estimate a size:
-    a value the drawing does not state is UNKNOWN and is ASKED, not estimated.
-
-    Crops are charged against a per-drawing budget (default 15, env DSH_SOLIDWORKS_INTAKE_CROP_LIMIT)
-    reported in every response as budget {crops_used, crop_limit}; the overview is free. At the limit
-    further crops are refused with INTAKE_BUDGET_EXHAUSTED: write PLAN.md v1 then, list unread values
-    as UNKNOWN and ask the user. reset_budget=true zeroes this drawing's counter before the call and
-    may be used ONLY after the user has explicitly asked for more reading.
+    image_path: local image path OR sha256:<64 hex> in the current DSH home; URLs refused.
+    region: empty for a gridded overview, A1-H6 cell, or source-pixel x0,y0,x1,y1 box.
+    zoom: integer 1-4. regions: optional 1-12 labels/boxes sharing the zoom; returns one
+    image per successful region and explicit per-region errors. Read with ONE batch of
+    whole-view pixel boxes at zoom 2 (front, top/side, sections, lettered views, notes):
+    a dimension must stay with its dimension line and feature. Cells and zoom 3-4 are only
+    for one unreadable number, boxed together with its feature.
+    Input bytes/pixels, decode, output bytes/pixels, coordinates and batch size stay bounded.
+    No crop quota, round cap, already-read refusal or reset argument. Host task-scoped
+    no-progress detection handles repeated failed/redundant attempts without image-global state.
+    Use EXPLICIT / DERIVED (formula + source constraints) / USER / UNKNOWN; never estimate
+    dimensions from pixel proportions. OCR/crops are optional, not mandatory first stages.
+    Combine reading conclusion, compact plan approval and ALL truly missing dimensions in
+    ONE ask_user_question round. Build after the answer; ask again only for a new contradiction
+    introduced by that answer. “接受/继续” is not a missing numeric value. Tool errors are
+    technical failures, not missing dimensions. No CAD document or job is touched here.
     """
-    if regions:
-        return _image_result(
-            lambda: intake.result_batch(image_path, regions, zoom, reset_budget)
-        )
-    return _image_result(
-        lambda: intake.result_payload(image_path, region, zoom, reset_budget)
-    )
+    if regions is not None:
+        return _image_result(lambda: intake.result_batch(image_path, regions, zoom))
+    return _image_result(lambda: intake.result_payload(image_path, region, zoom))
 
 
 def read_skill_reference(name: str) -> str:
@@ -449,9 +428,9 @@ def read_skill_reference(name: str) -> str:
     file with SKILL_RESOURCE_NOT_FOUND. The bytes come from the skill directory, which is a
     junction to the repository, so this is the same file SKILL.md links.
 
-    list_mcp_resources on server "solidworks" is the authoritative roster: it carries a title and a
-    one-line description per reference. A reference added after this server started is readable
-    through this URI immediately but appears in the listing only after a restart.
+    SKILL.md links every reference by its exact URI; the SolidWorks preset does not expose the
+    roster tool, so read only those URIs. A reference added after this server started is readable
+    through this URI immediately.
     """
     return skill_resources.refuse_as_resource_error(skill_resources.read, name)
 

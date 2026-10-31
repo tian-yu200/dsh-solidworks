@@ -11,5 +11,7 @@
         args:
           - __DSH_SERVER__
         cwd: __DSH_ADAPTER_DIR__
+        env:
+          DSH_HOME: __DSH_HOME__
         toolCallTimeoutMs: 300000
         failOnStartupError: true

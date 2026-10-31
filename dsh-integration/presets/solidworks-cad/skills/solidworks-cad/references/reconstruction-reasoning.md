@@ -14,37 +14,38 @@ Apply evidence by scope instead of forcing one source to control everything:
    arrangement, and front/rear placement. It does not provide true-size values.
 3. A section controls material, voids, and internal transitions on its cut plane.
 4. Orthographic views cross-check visible, hidden, and axial evidence.
-5. Pixel measurement, scan scale, and visual proportion are lowest-confidence
-   evidence and never override an explicit value.
+5. Visual shape supports topology only. pixel proportions and scan scales NEVER
+   supply modeled coordinates or dimensions, including when a plan is approved.
 
-Log conflicts and apply the highest-ranked evidence for the disputed scope. If
-the winning evidence is damaged or semantically unresolved, preserve that fact
-instead of inventing geometry.
+Log conflicts by scope. Use the following four source classes for every parameter:
+
+- EXPLICIT: a legible dimension, callout or note, with its view/location.
+- DERIVED: a unique result from EXPLICIT/USER facts plus evidenced geometry;
+  retain the formula, input IDs and constraint (dimension chain, symmetry,
+  concentricity, tangency, equality, hole pitch). Do not ask to confirm unique derivations.
+- USER: the user's explicit numeric answer or specified relation, linked to the question.
+- UNKNOWN: still underconstrained, illegible or conflicting after those checks.
 
 ## Missing Dimension Gate
 
-Pixel or proportional estimates are shape evidence, never coordinate sources.
-A placement or size coordinate may be derived from image proportion ONLY when
-the plan states that fallback explicitly and the user approves it; otherwise:
+Collect ALL genuine UNKNOWN modeling constraints in ONE ask_user_question with
+reading conclusions and the compact plan; that answer also approves the plan.
+No three-question limit. Build after the answer; another question is allowed only
+if the answer itself introduces a new contradiction. “接受/继续” is approval, not
+a numerical value. If a required value remains unanswered, report BLOCKED rather
+than fabricate it or loop on the same question. Missing tool/image input is a
+technical failure, not an UNKNOWN drawing dimension.
 
-1. Record the missing value as `unresolved` in the dimension ledger, with the
-   views that should have carried it.
-2. Ask one focused question when the answer changes topology, feature
-   presence, or any modeled dimension.
-3. Set `RECONSTRUCTION_STATUS: BLOCKED` when the user cannot supply it and the
-   feature cannot be modeled without it.
-
-Do not silently scale unreadable dimensions to fit (observed failure: a rebuild
-that filled missing outline positions by visual proportion produced a
-plausible-looking but wrong part). A model that omits an `unresolved` feature
-and says so is more correct than a complete-looking model with invented
-numbers.
+Use mm unless the drawing explicitly names another unit. Leave material unset
+when unspecified. Save a new file under the working directory, without overwriting.
+Keep every evidenced feature, including small fillets; no silent simplification.
 
 ## Projection And Coordinates
 
 Determine first-angle or third-angle projection from the projection symbol,
 title block, labels, and view alignment before interpreting sheet placement.
-Sheet placement alone does not redefine the canonical model frame:
+Ask about projection only when evidence cannot resolve it AND alternatives create
+different parts. Sheet placement alone does not redefine the canonical model frame:
 
 ```text
 +X = model right
@@ -184,3 +185,18 @@ finishing a reconstruction job, close the loop against the source drawing:
 A deliberately partial model (a feature recorded as `CAPABILITY_GAP` or an
 `unresolved` dimension) must be reported as partial. Never let a clean
 verification pass present an incomplete part as complete.
+
+## Execution recovery and L4
+
+Datum/offset sketches without frame declare the canonical datum axes above; selecting an
+existing face never changes their model position. Recorded CAD sketches retain measured
+explicit frames. The compiler checks finite orthonormal frames and coincident planes, then
+maps coordinates and signed blind direction; null cannot authorize a blind reversal.
+Only a verified `discarded` attempt permits a complete fresh rebuild. Report failure target
+separately from the active old document. The job stays unbound after discard. Use existing
+L4: initial execution plus at most 2 repair executions, persisted across jobs; no reset,
+renumbering, identical replay, changed design or feature omission. Submit specific
+`repair_evidence_json` (error_code, cause, readback, change). A new finding is required for
+the second repair. Every resubmission over 10 nodes needs a fresh action/user confirmation;
+never split graphs to avoid it. Existing-document recovery is `recovery_unverified` even
+when Undo says COMPLETED; stop automatic retries. Uncertain recovery/context also stops.

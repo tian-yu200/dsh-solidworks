@@ -122,9 +122,9 @@ def lower_sketch(node, face_index=None):
          face — matches original authoring, no scaffolding plane;
       2. else create a reference plane; its runtime name flows via FROM_PREV_FEATURE
          (localization-independent — 'Düzlem1'/'Plane1').
-    Either way, coordinate correctness does NOT depend on the support: when the node carries the
-    ORIGINAL sketch's `frame`, the compiler transforms every 2D coordinate into the frame
-    create_sketch MEASURES on the rebuild.
+    Coordinate correctness never depends on support: explicit frames are retained; datum/offset
+    without frame declares the canonical datum frame. The compiler maps into the measured frame,
+    including the extrude's signed normal. lower_sketch must not rewrite the profile for a face.
 
     Contour welding (v0.7.3): chain endpoints within CONTOUR_WELD_TOL are snapped onto the first
     matching earlier anchor before the entities are emitted — validation already rejected

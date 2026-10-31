@@ -133,7 +133,17 @@ class FakePort(ExecutionPort):
         cad = {"features": feats}
         if tool == "create_sketch" and self._sketch_names:
             cad["activeSketch"] = self._sketch_names.pop(0)
-        return {"status": "COMPLETED", "stateVersion": self._sv, "cadState": cad}
+        response = {"status": "COMPLETED", "stateVersion": self._sv, "cadState": cad}
+        if tool == "create_sketch":
+            from pycompiler.ir_schema import canonical_sketch_frame
+            if params.get("on_face"):
+                face = next(f for f in json.loads(self._faces)["faces"] if f["i"] == params["face_index"])
+                axis = max(range(3), key=lambda i: abs(face["normal"][i]))
+                ref = {"datum": ["right", "top", "front"][axis], "offset": face["point"][axis]}
+            else:
+                ref = {"datum": params.get("plane", "Front Plane").split()[0].lower()}
+            response["result_geometry"] = {"frame": canonical_sketch_frame(ref)}
+        return response
 
 
 def _cut_op(port):

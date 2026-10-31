@@ -11,6 +11,7 @@
   },
   "files": [
     "index.js",
+    "intake-progress.js",
     "cordis.patch.yml"
   ],
   "dsh": {

@@ -2,13 +2,13 @@
 
 本文说明 `dsh-solidwork` 的两层工具边界：
 
-1. 模型可见的 11 个高层工具。
+1. 模型可见的 12 个高层工具。
 2. 仅由编排器使用的低层 SolidPilot 与 C# 执行命令。
 
 模型能力的事实源是：
 `mcp-server-solidworks-main/adapters/dsh/server.py`。
 
-## 1. 模型可见的 11 个工具
+## 1. 模型可见的 12 个工具
 
 调用前缀为 `mcp__solidworks__`。
 
@@ -24,18 +24,19 @@
 | `confirm_action` | 对应原动作 | 用户明确批准精确摘要后执行一个待办动作。 |
 | `cancel_action` | 取消待办 | 取消待确认动作，不执行其 payload。 |
 | `finish_job` | 验证 | 运行最终客观验证并结束任务。 |
-| `read_drawing_text` | 只读 | 用 Windows 内置 OCR 一次读出图上所有文字及其位置和网格格；读图第一步，不需要任务，不接触 CAD。 |
+| `read_drawing_text` | 只读 | 用 Windows 内置 OCR 一次读出图上所有文字及其位置和网格格；可选辅助，默认先直接看原图，不需要任务，不接触 CAD。 |
 | `read_drawing_region` | 只读 | 放大工程图局部，读取小尺寸文字；不需要任务，不接触 CAD。 |
 
-专用 profile 的策略插件只允许这 11 个 SolidWorks 工具，外加下方 4 个支撑工具。
+专用 profile 的策略插件只允许这 12 个 SolidWorks 工具，外加下方 6 个支撑工具。
 任何其他 `mcp__solidworks__*` 工具都不属于模型可调用接口。
 
-`read_drawing_region(image_path, region="", zoom=2)`：`image_path` 只接受本地图片文件路径
+`read_drawing_region(image_path, region="", zoom=2)`：`image_path` 接受本地图片文件路径或当前 DSH 实例的 `sha256:<64位十六进制>` 附件 ID
 （`http://`、`https://`、`ftp://`、`file://` 一律拒绝）；`region` 为空返回带字母数字网格的
 全图（列 A–H 从左到右，行 1–6 从上到下），也可传网格标签如 `B2`，或源图像素框 `x0,y0,x1,y1`；
 `zoom` 为 1–4 的整数。输出 PNG 写入 `artifacts\intake\<图片哈希>\`，并同时返回图片与一行 JSON
 （输出路径、像素、字节、源像素框、网格定义）。超出图片范围的框会被拒绝而不是裁剪，因为被裁掉的
 部分正是模型看不到的证据。
+可选 `regions=[...]` 一次读取 1–12 个区域，单区与批量均可；保留资源限制，移除每图次数、两轮和重复区域闸门及模型 reset。策略按宿主 Agent/turn 检测连续 3 次无新证据/失败的读图，拦截重复尝试；新证据可恢复。读图结论、紧凑计划批准与全部真正缺尺寸合并一轮问答，答后直接建，工具故障不当作缺尺寸。
 
 支撑工具没有 `mcp__solidworks__` 前缀，由同一个策略插件放行：
 
@@ -45,8 +46,9 @@
 | `todo_write` | 维护任务待办清单。 |
 | `skill` | 加载并读取技能。 |
 | `modlens_read_image` | 读取图片证据；仅接受本地图片文件路径，`http://`、`https://`、`ftp://`、`file://` 等 URL 形式一律拒绝。 |
-| `list_mcp_resources` | 列出 `solidworks` 服务器开放的只读资源（技能参考文档清单，含标题与一行描述）。 |
-| `read_mcp_resource` | 按 URI 读取一份技能参考文档，形如 `solidworks://skill/references/<file>.md`；带路径或 `..` 的 URI 以 `SKILL_RESOURCE_TRAVERSAL_REFUSED` 拒绝，不在清单内的名字以 `SKILL_RESOURCE_NOT_FOUND` 拒绝。本预设没有本地文件工具，这是读取参考文档的唯一入口。 |
+| `read_mcp_resource` | 按 URI 读取一份技能参考文档，形如 `solidworks://skill/references/<file>.md`；带路径或 `..` 的 URI 以 `SKILL_RESOURCE_TRAVERSAL_REFUSED` 拒绝，未知名字以 `SKILL_RESOURCE_NOT_FOUND` 拒绝；只读 SKILL.md 链接的 URI。本预设没有本地文件工具，这是读取参考文档的唯一入口。 |
+
+SolidWorks 预设只向模型暴露上表的支持工具和 12 个 SolidWorks 工具（桌面版没有 modlens，共 16 个）；其余全局 MCP 工具由 solidworks-policy 插件在预设作用域内屏蔽，既不发送定义，也不允许调用。`list_mcp_resources` 自 2026-10-31 起不再开放。
 
 ## 2. `start_job`
 
@@ -259,7 +261,7 @@ action_summary
 | 输出 | `save_document`、`export_document`、`batch_export`、`close_document` |
 | 事务 | `begin_undo_scope`、`commit_undo_scope`、`rollback_undo_scope` |
 
-这些名字不是 DSH 模型接口。模型需要的能力必须通过 11 个高层工具表达。
+这些名字不是 DSH 模型接口。模型需要的能力必须通过 12 个高层工具表达。
 
 ## 12. 事实来源
 

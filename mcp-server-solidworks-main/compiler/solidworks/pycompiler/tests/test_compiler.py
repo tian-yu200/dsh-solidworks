@@ -7,6 +7,7 @@ Run two ways:
   - standalone:  python compiler/solidworks/pycompiler/tests/test_compiler.py
   - pytest:      pytest compiler/solidworks/pycompiler/tests/test_compiler.py
 """
+import copy
 import json
 import os
 import sys
@@ -65,13 +66,14 @@ class FakePort(ExecutionPort):
     UNAPPLICABLE = frozenset({"Refused Material"})
     DEFAULT_LIBRARY = "SolidWorks Materials"
 
-    def __init__(self, faces=_BOX_FACES, edges=None, fail_on=None, sketch_frame=None,
+    def __init__(self, faces=_BOX_FACES, edges=None, fail_on=None, sketch_frame="auto",
                  asm_faces=None, asm_edges=None, material=None, material_library=None):
         self._sv = 0
         self._faces = faces
         self._edges = edges
         self._fail_on = fail_on
         self._sketch_frame = sketch_frame  # echoed by create_sketch (the MEASURED rebuild frame)
+        self._offset_frame = None
         self._asm_faces = asm_faces or {}  # component Name2 -> faces JSON payload
         self._asm_edges = asm_edges or {}  # component Name2 -> edges JSON payload
         self._insert_counts = {}           # part basename -> instance counter (Name2 numbering)
@@ -102,6 +104,9 @@ class FakePort(ExecutionPort):
         return self._sv
 
     def execute(self, tool, params, state_version):
+        if tool == "add_reference_geometry" and params.get("type") == "plane":
+            from pycompiler.ir_schema import canonical_sketch_frame
+            self._offset_frame = canonical_sketch_frame({"datum": params["ref_plane_name"].split()[0].lower(), "offset": params["offset"]})
         self.calls.append((tool, dict(params)))
         self._counts[tool] = self._counts.get(tool, 0) + 1
         if self._fail_on and self._fail_on[0] == tool and self._counts[tool] == self._fail_on[1]:
@@ -164,7 +169,19 @@ class FakePort(ExecutionPort):
             # the compiler can reference it later by name (a loft's profiles) — localization-proof.
             resp["cadState"]["activeSketch"] = "Çizim%d" % self._sv
             if self._sketch_frame is not None:
-                resp["result_geometry"] = {"frame": self._sketch_frame}  # snake_case wire (ADR-023)
+                frame = self._sketch_frame
+                if frame == "auto":
+                    from pycompiler.ir_schema import canonical_sketch_frame
+                    if params.get("on_face"):
+                        faces = json.loads(self._faces)["faces"]
+                        face = next(f for f in faces if f["i"] == params["face_index"])
+                        axis = max(range(3), key=lambda i: abs(face["normal"][i]))
+                        frame = canonical_sketch_frame({"datum": ["right", "top", "front"][axis], "offset": face["point"][axis]})
+                    elif params.get("plane") == "Düzlem1":
+                        frame = self._offset_frame
+                    else:
+                        frame = canonical_sketch_frame({"datum": params.get("plane", "Top Plane").split()[0].lower()})
+                resp["result_geometry"] = {"frame": frame}  # snake_case wire (ADR-023)
         elif tool == "sheet_metal_feature" and params.get("feature_type") == "edge_flange_sketch":
             # The generated edge-flange profile sketch: no feature created yet (mirrors the live
             # layer), active sketch name + the MEASURED frame echoed like create_sketch.
@@ -761,7 +778,7 @@ def test_extrude_up_to_surface_resolves_face_anchor():
     assert _tools(port) == ["analyze_model", "create_sketch", "add_sketch_entity",
                             "analyze_model", "extrude_feature"]
     assert port.calls[1][1] == {"on_face": True, "face_index": 6}
-    assert port.calls[4][1] == {"feature_type": "cut", "up_to_face_index": 0}
+    assert port.calls[4][1] == {"feature_type": "cut", "up_to_face_index": 0, "reverse": False}
 
 
 def test_face_anchor_unresolved():
@@ -821,6 +838,113 @@ def test_fillet_anchor_ambiguous_and_unresolved_and_duplicate():
     r = compile_and_run(FakePort(edges=_EDGES), g)
     assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
     assert "SAME edge" in r.error["message"]
+
+
+# 2026-10-31 live failure: SolidWorks reports a full circle's "mid" at an arbitrary point of it
+# (here 90 degrees round from where the model anchored), and a union splits straight edges.
+_RIM_EDGES = json.dumps({"edge_count": 3, "edges": [
+    {"i": 0, "start": [0.074, 0.076, 0.03], "end": [0.074, 0.076, 0.03], "mid": [0.074, 0.114, 0.03],
+     "kind": "circle", "center": [0.074, 0.095, 0.03], "normal": [0, 0, 1], "radius": 0.019},
+    {"i": 1, "start": [0.074, 0.076, -0.03], "end": [0.074, 0.076, -0.03], "mid": [0.074, 0.114, -0.03],
+     "kind": "circle", "center": [0.074, 0.095, -0.03], "normal": [0, 0, -1], "radius": 0.019},
+    {"i": 2, "start": [0.074, 0.085, 0.03], "end": [0.074, 0.085, 0.03], "mid": [0.074, 0.105, 0.03],
+     "kind": "circle", "center": [0.074, 0.095, 0.03], "normal": [0, 0, 1], "radius": 0.01},
+]})
+_SPLIT_EDGES = json.dumps({"edge_count": 2, "edges": [
+    {"i": 0, "start": [0.0, 0.0, 0.0], "end": [0.02, 0.0, 0.0], "mid": [0.01, 0.0, 0.0]},
+    {"i": 1, "start": [0.02, 0.0, 0.0], "end": [0.05, 0.0, 0.0], "mid": [0.035, 0.0, 0.0]},
+]})
+
+
+def _edge_graph(kind, anchors):
+    node = ({"id": "c1", "type": "chamfer", "distance": 0.001, "angle": 0.7853981633974483}
+            if kind == "chamfer" else {"id": "f1", "type": "fillet", "radius": 0.003})
+    node["edges"] = [{"near": a} for a in anchors]
+    return {"schema_version": "0.5.0-draft", "units": "meters",
+            "nodes": [{"id": "b1", "type": "box", "width": 0.05, "depth": 0.05, "height": 0.05}, node]}
+
+
+def test_rim_anchor_resolves_anywhere_on_the_circle():
+    port = FakePort(edges=_RIM_EDGES)
+    r = compile_and_run(port, _edge_graph("chamfer", [[0.093, 0.095, 0.03], [0.093, 0.095, -0.03]]))
+    assert r.status == "COMPLETED", r.to_dict()
+    assert port.calls[-1][1]["edge_indices"] == "[0,1]"
+
+
+def test_rim_anchor_still_tells_the_bore_from_the_outer_rim():
+    # The bore mouth (r=10) is concentric with the rim (r=19); a point on the rim is 9 mm off it.
+    port = FakePort(edges=_RIM_EDGES)
+    r = compile_and_run(port, _edge_graph("chamfer", [[0.084, 0.095, 0.03]]))
+    assert r.status == "COMPLETED", r.to_dict()
+    assert port.calls[-1][1]["edge_indices"] == "[2]"
+
+
+def test_split_straight_edge_resolves_from_any_interior_point():
+    port = FakePort(edges=_SPLIT_EDGES)
+    r = compile_and_run(port, _edge_graph("fillet", [[0.03, 0.0, 0.0], [0.004, 0.0, 0.0]]))
+    assert r.status == "COMPLETED", r.to_dict()
+    assert port.calls[-1][1]["edge_indices"] == "[0,1]"
+
+
+def test_anchor_on_a_shared_vertex_is_ambiguous_and_off_edge_is_unresolved():
+    r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.02, 0.0, 0.0]]))
+    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
+    assert "shared vertex" in r.error["message"]
+    r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.03, 0.002, 0.0]]))
+    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
+    assert "nearest was 0.002000" in r.error["message"]
+
+
+# An R10 rounded-rectangle corner: an OPEN arc, so the readback carries only start/end and the
+# chord midpoint; the model anchors the true arc midpoint, 2.929 mm off that chord.
+_CORNER_EDGES = {"edge_count": 2, "edges": [
+    {"i": 0, "start": [0.0, 0.04, 0.035], "end": [0.0, 0.03, 0.045], "mid": [0.0, 0.035, 0.04]},
+    {"i": 1, "start": [0.0, 0.04, -0.035], "end": [0.0, 0.04, 0.035], "mid": [0.0, 0.04, 0.0]},
+]}
+
+
+class ExactEdgePort(FakePort):
+    """Execution layer with the opt-in `points` query: on_dist only for the corner arc."""
+
+    def __init__(self, on_dist):
+        super().__init__(edges=json.dumps(_CORNER_EDGES))
+        self.on_dist = on_dist
+        self.point_queries = []
+
+    def execute(self, tool, params, state_version):
+        if tool == "analyze_model" and params.get("points"):
+            points = json.loads(params["points"])
+            self.point_queries.append(points)
+            payload = copy.deepcopy(_CORNER_EDGES)
+            for edge in payload["edges"]:
+                row = self.on_dist.get(edge["i"])
+                if row is not None:
+                    edge["on_dist"] = row[:len(points)]
+            self._sv += 1
+            return {"status": "COMPLETED", "stateVersion": self._sv,
+                    "cadState": {"features": [json.dumps(payload)]}}
+        return super().execute(tool, params, state_version)
+
+
+def test_arc_anchor_resolves_through_the_exact_point_query():
+    port = ExactEdgePort({0: [0.0], 1: [0.007]})
+    r = compile_and_run(port, _edge_graph("fillet", [[0.0, 0.037071067812, 0.042071067812],
+                                                     [0.0, 0.04, 0.01]]))
+    assert r.status == "COMPLETED", r.to_dict()
+    assert port.calls[-1][1]["edge_indices"] == "[0,1]"
+    # Only the anchor the cheap rules could not place is sent, once.
+    assert port.point_queries == [[[0.0, 0.037071067812, 0.042071067812]]]
+
+
+def test_exact_point_query_keeps_ambiguity_and_old_layers_stay_unresolved():
+    r = compile_and_run(ExactEdgePort({0: [0.0], 1: [0.00005]}),
+                        _edge_graph("fillet", [[0.0, 0.037071067812, 0.042071067812]]))
+    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
+    # A layer without `points` support returns no on_dist: the anchor reports the chord miss.
+    r = compile_and_run(FakePort(edges=json.dumps(_CORNER_EDGES)),
+                        _edge_graph("fillet", [[0.0, 0.037071067812, 0.042071067812]]))
+    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
+    assert "nearest was 0.002929" in r.error["message"]
 
 
 def test_chamfer_distance_angle_lowering():
@@ -1127,7 +1251,7 @@ def test_extrude_reversed_flag_maps_to_reverse_param():
     port = FakePort()
     r = compile_and_run(port, g)
     assert r.status == "COMPLETED", r.to_dict()
-    assert port.calls[-1][1] == {"feature_type": "boss", "depth": 0.003, "reverse": True}
+    assert port.calls[-1][1] == {"feature_type": "boss", "depth": 0.003, "reverse": True, "strict_direction": True}
 
 
 def test_v05_validation_rejections():

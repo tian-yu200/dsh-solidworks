@@ -9,7 +9,7 @@
 // unless the resolved list includes "image").
 
 // Usage:
-//   node Check-ModelImageCapability.mjs [--settings <settings.yaml>] [--profiles <dsh profiles dir>]
+//   node Check-ModelImageCapability.mjs [--settings <settings.yaml>] [--profile-dump <dsh dump>] [--profiles <dsh profiles dir>]
 //
 // Exit codes: 0 = pass, 1 = validation failed, 2 = environment/setup error.
 
@@ -19,7 +19,7 @@ import os from "node:os";
 import { pathToFileURL } from "node:url";
 
 function fail(message) {
-    console.error(message);
+    console.error(`ERROR: ${message}`);
     process.exit(2);
 }
 
@@ -30,6 +30,9 @@ function readArg(name, fallback) {
 }
 
 const settingsPath = path.resolve(readArg("--settings", path.join(os.homedir(), ".dsh", "settings.yaml")));
+const profileDumpArg = readArg("--profile-dump", "");
+const profileDumpPath = profileDumpArg ? path.resolve(profileDumpArg) : "";
+const configPath = profileDumpPath || settingsPath;
 const profilesDir = path.resolve(readArg("--profiles", path.join(os.homedir(), ".dsh", "profiles")));
 const nodeModules = path.join(profilesDir, "node_modules");
 
@@ -43,22 +46,68 @@ const { default: yaml } = await importFromNodeModules(path.join("js-yaml", "dist
 const piAiProviders = await importFromNodeModules(path.join("@earendil-works", "pi-ai", "dist", "providers", "all.js"));
 const llmPiAi = await importFromNodeModules(path.join("@deepseek-ai", "dsh-llm-pi-ai", "lib", "index.js"));
 
-let raw;
-try {
-    raw = yaml.load(fs.readFileSync(settingsPath, "utf8"));
-} catch (error) {
-    fail(`settings.yaml is not valid YAML: ${error.message}`);
+function loadConfig(file) {
+  try {
+    // DSH's --dump-config includes lazy !!js values in unrelated plugins. Keep those as inert
+    // strings; only the already-resolved llm-pi-ai and default-model plugin configs are inspected.
+    const schema = yaml.DEFAULT_SCHEMA.extend([
+        new yaml.Type("tag:yaml.org,2002:js", { kind: "scalar", construct: (value) => value }),
+    ]);
+    return yaml.load(fs.readFileSync(file, "utf8"), { schema });
+  } catch (error) {
+    // Parser messages/marks can include the full source and provider credentials.
+    const location = error.mark ? ` at line ${error.mark.line + 1}, column ${error.mark.column + 1}` : "";
+    fail(`configuration could not be parsed${location}${error.code ? ` (${error.code})` : ""}`);
+  }
 }
-if (!raw || typeof raw !== "object") fail(`settings file is empty or not a mapping: ${settingsPath}`);
+const raw = loadConfig(configPath);
+if (!raw || typeof raw !== "object") fail(`configuration is empty or invalid: ${configPath}`);
+
+// Same layering as dsh-settings: plain objects merge; arrays/scalars replace.
+function mergeSettings(base, override) {
+    if (override === undefined) return base;
+    const isMap = value => value && typeof value === "object" && !Array.isArray(value);
+    if (!isMap(base) || !isMap(override)) return override;
+    const result = { ...base };
+    for (const [key, value] of Object.entries(override)) result[key] = mergeSettings(result[key], value);
+    return result;
+}
+
+let adapterConfig;
+let defaultModel;
+if (profileDumpPath) {
+    if (!Array.isArray(raw)) fail(`profile dump is not a DSH plugin list: ${configPath}`);
+    adapterConfig = raw.find((plugin) => plugin?.id === "llm-pi-ai")?.config;
+    defaultModel = raw.find((plugin) => plugin?.id === "agent-default-model")?.config;
+    const settingsPlugin = raw.find((plugin) => plugin?.id === "settings");
+    const explicitSettings = process.argv.includes("--settings");
+    const overlayPath = explicitSettings ? settingsPath : path.resolve(
+        settingsPlugin?.config?.path ?? path.join(
+            settingsPlugin?.config?.dshHome ?? path.dirname(profilesDir), "settings.yaml"));
+    if ((explicitSettings || settingsPlugin?.name === "@deepseek-ai/dsh-settings-file") && fs.existsSync(overlayPath)) {
+        const settings = loadConfig(overlayPath);
+        if (settings && (typeof settings !== "object" || Array.isArray(settings))) fail("runtime settings must be a namespace mapping");
+        adapterConfig = mergeSettings(adapterConfig, settings?.["llm-pi-ai"]);
+        defaultModel = mergeSettings(defaultModel, settings?.["agent-default-model"]);
+    }
+    if (!adapterConfig || !defaultModel) {
+        fail("profile dump is missing llm-pi-ai or agent-default-model configuration");
+    }
+} else {
+    adapterConfig = raw["llm-pi-ai"];
+    defaultModel = raw["agent-default-model"];
+}
 
 let section;
 try {
-    section = llmPiAi.Config(raw["llm-pi-ai"]);
+    section = llmPiAi.Config(adapterConfig);
 } catch (error) {
-    fail(`llm-pi-ai settings section rejected by the installed adapter schema: ${error.message}`);
+    fail("llm-pi-ai configuration rejected by the installed adapter schema");
 }
 
 const providers = section.providers ?? {};
+const selectedProvider = readArg("--provider", "");
+if (selectedProvider && !providers[selectedProvider]) fail("selected provider is not configured");
 const catalogRoutes = new Set(piAiProviders.getBuiltinProviders());
 
 // declaredInput semantics: the config schema materializes an absent `input`
@@ -77,19 +126,21 @@ const problems = [];
 const report = [];
 
 for (const [name, provider] of Object.entries(providers)) {
+    if (selectedProvider && name !== selectedProvider) continue;
     const isCatalog = catalogRoutes.has(name);
-    const explicitDefault = raw["llm-pi-ai"]?.providers?.[name]?.defaultInput !== undefined;
-    if (!isCatalog && !explicitDefault) {
-        problems.push(
-            `provider "${name}" is a custom route with no declared defaultInput; ` +
-            `models without an explicit input list resolve to text-only, so image attachments will be refused ` +
-            `(add "defaultInput: [ text, image ]" under the provider, or "[ text ]" to opt out deliberately)`
-        );
-    }
+    const explicitDefault = adapterConfig?.providers?.[name]?.defaultInput !== undefined;
     const entries = [
         ...(provider.models ?? []).map((m) => [m.id, m]),
         ...Object.entries(provider.modelOverrides ?? {}).map(([id, o]) => [id, o]),
     ];
+    if (!isCatalog && !explicitDefault &&
+        (entries.length === 0 || entries.some(([, entry]) => !declaredInput(entry)))) {
+        problems.push(
+            `provider "${name}" has models without an explicit input list and no defaultInput; ` +
+            `those models resolve to text-only, so image attachments will be refused ` +
+            `(add "defaultInput: [ text, image ]" under the provider, or "[ text ]" to opt out deliberately)`
+        );
+    }
     if (entries.length === 0 && isCatalog) {
         report.push(`  ${name}: catalog route (${piAiProviders.getBuiltinModels(name).length} models, per-model input from the installed catalog)`);
         continue;
@@ -100,8 +151,9 @@ for (const [name, provider] of Object.entries(providers)) {
     }
 }
 
-const defaultModel = raw["agent-default-model"];
-if (!defaultModel?.provider || !defaultModel?.model) {
+if (selectedProvider && defaultModel?.provider !== selectedProvider) {
+    report.push("  default model is outside selected provider scope");
+} else if (!defaultModel?.provider || !defaultModel?.model) {
     problems.push("agent-default-model is not set; DSH will fall back to a built-in default that may not accept images");
 } else if (!providers[defaultModel.provider]) {
     problems.push(
@@ -119,7 +171,12 @@ if (!defaultModel?.provider || !defaultModel?.model) {
     } else if (!entry && catalogRoutes.has(defaultModel.provider)) {
         const catalog = piAiProviders.getBuiltinModels(defaultModel.provider).find((m) => m.id === defaultModel.model);
         if (!catalog) problems.push(`agent-default-model names model "${defaultModel.model}", which the "${defaultModel.provider}" catalog does not list`);
-        else report.push(`  default model ${defaultModel.provider}/${defaultModel.model}: effective input = ${JSON.stringify(catalog.input)}`);
+        else {
+            report.push(`  default model ${defaultModel.provider}/${defaultModel.model}: effective input = ${JSON.stringify(catalog.input)}`);
+            if (!catalog.input.includes("image")) {
+                problems.push(`default model ${defaultModel.provider}/${defaultModel.model} resolves to input ${JSON.stringify(catalog.input)} without "image"; the CAD reference-image workflow cannot run`);
+            }
+        }
     }
     if (entry) {
         const effective = effectiveInput(defaultModel.provider, defaultModel.model, entry);
@@ -130,10 +187,10 @@ if (!defaultModel?.provider || !defaultModel?.model) {
     }
 }
 
-console.log(`settings: ${settingsPath}`);
+console.log(`${profileDumpPath ? "profile config" : "settings"}: ${configPath}`);
 if (report.length > 0) console.log(report.join("\n"));
 if (problems.length > 0) {
     console.error(problems.map((line) => `FAIL: ${line}`).join("\n"));
     process.exit(1);
 }
-console.log("image capability: OK");
+console.log(`image capability: OK${selectedProvider ? ` (provider ${selectedProvider})` : ""}`);

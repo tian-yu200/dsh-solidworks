@@ -170,7 +170,8 @@ namespace SolidworksExecution.Services
                     double[] near = ParseVec3(p?.Value<string>("near"));
                     double[] axis = ParseVec3(p?.Value<string>("axis"));
                     int k = p?.Value<int?>("k") ?? 0;
-                    JObject edgeAnalysis = ReadEdges(partDoc, near, k, axis);
+                    double[][] points = ParsePoints(p?.Value<string>("points"));
+                    JObject edgeAnalysis = ReadEdges(partDoc, near, k, axis, points);
                     results.Add(edgeAnalysis.ToString(Newtonsoft.Json.Formatting.None));
                 }
                 else if (analysisType == "faces")
@@ -1670,7 +1671,8 @@ namespace SolidworksExecution.Services
             if (pt != null) fj["point"] = new JArray { R6(pt[0]), R6(pt[1]), R6(pt[2]) };
         }
 
-        private JObject ReadEdges(IPartDoc partDoc, double[] near = null, int k = 0, double[] axis = null)
+        private JObject ReadEdges(IPartDoc partDoc, double[] near = null, int k = 0, double[] axis = null,
+            double[][] points = null)
         {
             var root = new JObject();
             var rankArr = new JArray();
@@ -1696,7 +1698,9 @@ namespace SolidworksExecution.Services
                         if (edge == null) continue;
                         if (!filtering)
                         {
-                            rankArr.Add(BuildEdgeJson(edge, idx));
+                            var ej = BuildEdgeJson(edge, idx);
+                            if (points != null) AddOnEdgeDistances(edge, ej, points);
+                            rankArr.Add(ej);
                             idx++;
                             continue;
                         }
@@ -1744,6 +1748,67 @@ namespace SolidworksExecution.Services
             if (axis != null) root["axis"] = new JArray { R6(axis[0]), R6(axis[1]), R6(axis[2]) };
             root["edges"] = edgesOut;
             return root;
+        }
+
+        // Opt-in `points` (a JSON array of [x,y,z], meters): the caller's edge anchors that no midpoint,
+        // straight segment or full circle could place — points ON open arcs, splines or intersection
+        // curves, which the open-edge path deliberately reads no curve for. For each such point the
+        // edge gets on_dist[j] = the exact distance from SolidWorks' own closest-point query, or null
+        // when the chord pre-filter rules the edge out, so the COM call runs only for nearby edges.
+        // Absent `points`, nothing here runs and the dump is byte-for-byte the historical one.
+        private static void AddOnEdgeDistances(IEdge edge, JObject ej, double[][] points)
+        {
+            double[] a = Vec3(ej["start"]), b = Vec3(ej["end"]), mid = Vec3(ej["mid"]);
+            if (a == null || b == null) return;
+            double chord = Dist3(a, b);
+            // An arc of up to 180 degrees lies within half a chord plus its sagitta of the chord
+            // midpoint; twice the chord also covers ordinary major arcs. Closed edges have no chord.
+            double reach = chord > 1e-9 ? Math.Max(2.0 * chord, 0.02) : 0.2;
+            var dist = new JArray();
+            bool any = false;
+            foreach (var pt in points)
+            {
+                double gap = Math.Min(Dist3(pt, a), Math.Min(Dist3(pt, b), mid != null ? Dist3(pt, mid) : double.MaxValue));
+                double? d = null;
+                if (gap <= reach)
+                {
+                    try
+                    {
+                        var r = edge.GetClosestPointOn(pt[0], pt[1], pt[2]) as double[];
+                        if (r != null && r.Length >= 3) d = R6(Dist3(pt, r));
+                    }
+                    catch { }
+                }
+                if (d.HasValue) { dist.Add(d.Value); any = true; } else dist.Add(JValue.CreateNull());
+            }
+            if (any) ej["on_dist"] = dist;
+        }
+
+        private static double[] Vec3(JToken token)
+        {
+            var arr = token as JArray;
+            if (arr == null || arr.Count < 3) return null;
+            return new[] { arr[0].Value<double>(), arr[1].Value<double>(), arr[2].Value<double>() };
+        }
+
+        private static double Dist3(double[] p, double[] q)
+        {
+            double dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+            return Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        private static double[][] ParsePoints(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            var parsed = JArray.Parse(json);
+            if (parsed.Count == 0 || parsed.Count > 64) throw new ArgumentException("points must hold 1-64 [x,y,z] entries.");
+            var points = new double[parsed.Count][];
+            for (int i = 0; i < parsed.Count; i++)
+            {
+                points[i] = Vec3(parsed[i]);
+                if (points[i] == null) throw new ArgumentException("points[" + i + "] must be [x,y,z].");
+            }
+            return points;
         }
 
         // Face list with a stable index — the twin of ReadEdges (ADR-027). The `i` matches the same

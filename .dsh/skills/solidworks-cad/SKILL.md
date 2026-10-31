@@ -2,20 +2,17 @@
 name: solidworks-cad
 description: "Use for SolidWorks work AND for reading engineering drawings — a 三视图 / 零件图 / 工程图 / pictorial / sectional drawing image that must be modelled or rebuilt as a SolidWorks 3D part, plus inspection, creation, editing, saving, exporting and objective verification through the dedicated mcp__solidworks__ tools. Takes precedence over generic CAD skills (build123d, CadQuery, OpenSCAD, STEP scripting) whenever the target is SolidWorks — never install packages or drive another kernel — the SolidWorks MCP tools and the Feature Graph are the only route."
 ---
-
 # SolidWorks CAD
-
 Operate SolidWorks only through these twelve high-level `mcp__solidworks__` tools.
 Approved support tools for workflow assistance: `ask_user_question`, `todo_write`,
 `skill`, `modlens_read_image` (local image file paths only; URL forms such as
-`http://` are rejected), `list_mcp_resources` and `read_mcp_resource` — the only way to open a
+`http://` are rejected) and `read_mcp_resource` — the only way to open a
 skill reference, since this preset has no file tool.
 The runtime tool schemas and returned payloads are the authoritative contract.
 Parse each tool's JSON string before acting on its envelope status. Every tool
 result is compact single-line JSON. `start_job` returns `job_id` and
 `job_token` first; bulky readiness and state detail is read with
 `inspect_state(scope="state")`.
-
 ## Tool Boundary
 
 | Tool | Use |
@@ -30,7 +27,7 @@ result is compact single-line JSON. `start_job` returns `job_id` and
 | `confirm_action` | Execute exactly one action after fresh, explicit user approval. |
 | `cancel_action` | Cancel a queued confirmation action without executing it; use this to release a pending Feature Graph. |
 | `finish_job` | Run final objective verification and close the authenticated job. |
-| `read_drawing_text` | OCR every text on a drawing image with its position and grid cell; step 1 of reading, read-only. |
+| `read_drawing_text` | Optional OCR candidate table with positions; directly view the original drawing first. |
 | `read_drawing_region` | Zoom part of a drawing image (grid cell or pixel box) so small dimensions can be read; read-only, needs no job and touches no CAD. |
 
 There is no model-visible low-level fallback. Do not use SolidWorks COM, Shell,
@@ -70,7 +67,7 @@ Two job-scoped write rules:
 6. Use the smallest matching high-level mutation tool.
 7. Inspect every response before continuing. A successful transport call is not
    proof that the CAD result is correct.
-8. Save or export only to the requested paths, then call `finish_job`.
+8. Use requested paths; otherwise save a new file in the working directory, never overwrite; then call `finish_job`.
 
 `start_job` locks the expected active-document identity. Every later job-scoped
 call verifies that identity. If the user switches documents, stop and begin a new
@@ -90,10 +87,9 @@ job binds only through its own document-creating call,
 
 A `solidworks://skill/references/<file>.md` link is a read-only MCP resource, never a file path:
 this preset ships no file tool, so a path cannot be opened. Read it with `read_mcp_resource`,
-server `solidworks`, that exact URI. `list_mcp_resources` (same server) is the current roster with
-one title and one-line description each. A URI carrying a path or a `..` segment is refused with
-`SKILL_RESOURCE_TRAVERSAL_REFUSED`, a name that is not on the roster with
-`SKILL_RESOURCE_NOT_FOUND`; read the roster instead of guessing a file name.
+server `solidworks`, that exact URI as this skill links it. A URI carrying a path or a `..`
+segment is refused with `SKILL_RESOURCE_TRAVERSAL_REFUSED`, an unknown name with
+`SKILL_RESOURCE_NOT_FOUND`; use only the URIs linked here instead of guessing a file name.
 
 ## Drawing Reconstruction Flow
 
@@ -102,17 +98,20 @@ At node A, start a job only when deep inspection of an active CAD document is
 needed; this is not modeling, and node F reuses that job. Attached images can be
 analyzed before any job exists.
 
-Node A reads the drawing through `read_drawing_region`, not by eye alone: one
-overview with the labelled grid, then EVERY cluster in ONE call
-(`regions=[...]`, up to 12), then at most one more call for what is still illegible.
-Each step costs 45-90 s, so batch instead of one cluster per step. Then send the
-READING RESULT and stop: dimension ledger (id, value, kind, view, cell/box, legible)
-plus a question list, via `ask_user_question`; a candidate never becomes a fact
-until confirmed. No pixel measuring, no browser, no scripts, no zooming before the
-user answers; PLAN.md and the graph come after. Re-reading is refused
-(`REGION_ALREADY_READ`); budget 15/drawing (overview free), and
-`INTAKE_BUDGET_EXHAUSTED` means send the reading result now. Follow
-[drawing intake](solidworks://skill/references/drawing-intake.md) before the ledger is considered done.
+Node A directly views the original drawing first. OCR and crops are OPTIONAL aids.
+Crop WHOLE VIEWS as source-pixel boxes at zoom 2 in one batch (front, top/side, sections,
+lettered views, notes); never grid cells or zoom 3-4 fragments, which cut a dimension off
+its dimension line and feature. Classify dimensions as EXPLICIT / DERIVED / USER / UNKNOWN.
+DERIVED includes its formula and evidence; an absent numeric label is not necessarily
+an absent constraint. Never infer dimensions from pixel proportions, even with approval.
+Use mm unless the drawing states another unit; omit unspecified material; save a new
+file in the working directory without overwriting existing files. Infer projection from
+drawing evidence; ask only if unresolved projection would produce different parts.
+Present the reading conclusion, compact plan and ALL genuinely missing dimensions in
+ONE ask_user_question call, with plan approval included; no three-question cap.
+After the answer, build directly. Ask again only if that answer introduces a new
+contradiction. “接受/继续” approves the plan but supplies no missing numeric value.
+Read [drawing intake](solidworks://skill/references/drawing-intake.md) for the evidence contract.
 
 ```mermaid
 flowchart TD
@@ -124,15 +123,15 @@ flowchart TD
     P --> S["Classify section views and infer cut geometry"]
     S --> O["Identify views and lock orientation contract"]
     O --> C["Match edges and corners across views"]
-    C --> D["Present compact plan inline with milestone todos"]
-    D --> E{"Current plan ready and approved?"}
-    E -- "No: L2" --> D
-    E -- "Yes" --> F["Start or reuse job; execute next MCP milestone"]
+    C --> D["One ask_user_question: reading + compact plan + all missing dimensions"]
+    D --> E{"Required values supplied and plan approved?"}
+    E -- "New answer contradiction/user revision: L2" --> D
+    E -- "Yes" --> F["Next call: submit the complete prepared graph"]
     F --> G["Inspect response and objective model state"]
     G --> H{"Milestone matches the plan?"}
     H -- "No: L4" --> X["Set REPLAN_REQUIRED and revise the plan"]
     X --> E
-    H -- "Yes" --> I["Check todo and re-present the plan"]
+    H -- "Yes" --> I["Tick todo briefly; no plan re-print"]
     I --> J{"More modeling milestones?"}
     J -- "Yes: L3" --> F
     J -- "No" --> K["Validate projections and supplied sections"]
@@ -148,7 +147,7 @@ equal the loop rank: exactly these five rows.
 | ID | Controlled back edge | Maximum traversal count |
 | --- | --- | --- |
 | L1 | reduced evidence read -> view analysis | 1 |
-| L2 | plan not ready/approved -> PLAN revision | 3 |
+| L2 | plan not ready/approved -> PLAN revision | Only a user-requested revision or a new contradiction in the answer; no repeated same-matter approval |
 | L3 | more milestones -> next milestone | `max(N-1,0)` for `N` modeling todos in the approved plan |
 | L4 | milestone mismatch -> replan | 2 per stable modeling todo |
 | L5 | directional/sectional mismatch -> replan | 3 per target |
@@ -158,15 +157,14 @@ then traverse. Counts survive tool changes, hypotheses, and plan versions; reset
 only for a changed target or explicit user reset. Keep `L3` by approved
 `PLAN_VERSION`, `L4` by todo ID, and copy pre-PLAN `L1` into PLAN.
 
-`L2` includes `BLOCKED` resolution, incomplete plans, user-requested revision, and
-withheld approval. Waiting for input does not increment it; a new PLAN revision
-does. Do not add another automatic retry path. Confirmation pauses are not retries.
+`L2` never splits missing dimensions and plan approval into separate questions.
+Batch all genuine UNKNOWNs with the compact plan; an answer permits building.
+Waiting for input does not increment it; user-requested revisions do. Do not add another automatic retry path. Confirmation pauses are not retries.
 If a flow edit adds or removes a back edge, recompute the graph and table.
 
-Every dimension the drawing evidence cannot read stays `unresolved` in the plan.
-Never fill placement or size coordinates from pixel proportions without explicit
-user approval in the plan (the Missing Dimension Gate in
-[reconstruction-reasoning.md](solidworks://skill/references/reconstruction-reasoning.md)).
+Every unresolved modeling constraint is UNKNOWN after checking explicit dimensions,
+geometry, symmetry, concentricity, tangency, equalities and dimension chains. A unique
+DERIVED result needs no user confirmation. Never estimate a dimension from pixels.
 
 At exhaustion, stop mutation:
 
@@ -195,7 +193,7 @@ face/edge indexes may no longer identify the same geometry.
 
 Reference topics are `contract`, `canonicalization`, `forward`, `mapping`,
 `mapping_part`, `mapping_sheet_metal`, `mapping_assembly`, `verification`,
-`reverse`, `coverage`, `feature_graph_quickref`, `feature_graph_schema`, and
+`reverse`, `coverage`, `feature_graph_part_card`, `feature_graph_quickref`, `feature_graph_schema`, and
 `feature_graph_changelog`. A reference comes back one page at a time inside
 `verification` as `topic`, `content`, and `page` (`offset`, `limit`,
 `returned_lines`, `total_lines`, `total_chars`, `has_more`, `next_offset`,
@@ -215,25 +213,22 @@ do not invent unsupported flags. On another failure emit `RETRY_EXHAUSTED`.
 
 For a new part or assembly:
 
-1. Default pre-build reading is THREE calls plus paging:
-   `feature_graph_quickref` (1-3 pages, generated from the schema — every node
-   type with its required and optional fields, units, and a one-line meaning),
-   `forward`, and the one mapping topic that matches the target
-   (`mapping_part`, `mapping_sheet_metal`, or `mapping_assembly`). Read
-   `verification` when the build will be judged on objective evidence.
-2. `feature_graph_quickref` is enough to write a graph. Read
-   `feature_graph_schema` ONLY for a construct the quickref cannot settle —
-   an end condition, a grammar rule, or a worked example — and then jump
-   straight to that section with `reference_offset =
-   page.index.sections[].line` instead of walking its pages (it is about 9
-   pages in full). `feature_graph_changelog` is revision history; do not read
-   it to build.
-3. Build one complete graph in feature-tree dependency order.
-4. Use meters for all Feature Graph distances and radians for all Feature Graph
-   angles.
-5. Call `submit_feature_graph(..., fresh_document=true)`.
-6. Check compiler node results, rebuilt CAD state, topology, dimensions, bounds,
-   and physical properties available in `partial_state` and `verification`.
+See the [common part card](solidworks://skill/references/feature-graph-part-card.md).
+
+1. BEFORE the one question, in ONE parallel step: `start_job`, feature_graph_part_card
+   (common part grammar + complete example), the matching mapping_part,
+   mapping_sheet_metal or mapping_assembly, and the drawing reads. Read
+   feature_graph_quickref or indexed schema sections only for constructs the card
+   cannot settle, also before the question; never walk full schema pages. Grade the
+   drawing simple or complex (the user's 简单图/复杂图 wins); simple reads nothing extra.
+2. After approval the NEXT call is `submit_feature_graph(..., fresh_document=true)`
+   with ONE complete graph in feature-tree dependency order, fillets and chamfers
+   included. Between approval and submission: no reference reads, no plan or todo
+   rewrite, no second confirmation, no turn end. A fresh-document graph needs no
+   batch confirmation. Meters for distances, radians for angles.
+3. Verify from the submit result first, then ONE parallel step of compact geometry,
+   bodies and features reads (edges/faces only to locate a problem). Save a new file, then
+   finish_job; act on its PLANNED_FEATURES_MISSING and CREATED_DOCUMENT_UNSAVED warnings.
 
 A graph-level `material` that the library positively does not contain is reported in
 `warnings` as `MATERIAL_NOT_FOUND` while the status stays `completed`: the geometry is kept, and
@@ -286,7 +281,7 @@ this allowlist: `modify_dimension`, `edit_feature`, `set_part_material`,
 `add_sketch_constraint`, `insert_toolbox_component`, and
 `create_exploded_view`. Use current feature names and inspected geometry
 references; reinspect after topology changes. Read the relevant reference before
-unfamiliar parameters. Deletion and large batches enter confirmation.
+unfamiliar parameters. Deletion and large batches on existing documents enter confirmation.
 
 ## Drawing Workflow
 
@@ -304,11 +299,11 @@ For `status="pending_confirmation"`, stop mutation and call
 `confirm_action` with the returned action ID/token, exact `confirmation_text` as
 `user_confirmation`, and exact summary.
 
-Saving always confirms when it names a path: the first save of an untitled document
-(including one this job just created) and any save to a different path than the document's
-existing one are Save As operations that rename the open document in memory. Expect
-`risk="save_as"` with an action_summary naming the document and the target path; a save
-without `file_path` keeps the existing-file overwrite rule.
+The FIRST save of the part this job created (proved by its stable document_id) to a path
+that does not exist runs at once. Any other save naming a path (another untitled document,
+a saved document to a new path) is a Save As that renames the open document: expect
+`risk="save_as"` naming document and target. Overwrites confirm. On pending_confirmation call
+request_confirmation then confirm_action at once (DSH asks the user); never end the turn.
 
 Do not infer approval from the original request. Do not reuse an old or consumed
 confirmation token. If risk or summary changes, present the new summary and wait
@@ -330,10 +325,9 @@ Handle response status as follows:
 | `partial` | Stop; some state may remain. Report `completed_steps`, `partial_state`, backup, and recovery result. |
 | `verification_failed` | Stop; execution occurred but objective verification did not pass. |
 
-Treat `recovery_status="rolled_back"` as a failed operation restored by undo.
-Treat `rollback_failed` as a potentially modified document requiring immediate
-human review. A backup is recovery evidence, not proof that the active document
-was restored.
+Only `discarded` permits automatic rebuilding. Existing-document Undo is unverified.
+`rollback_failed` or `recovery_unverified` requires user confirmation before continuing.
+A backup is evidence, not proof of restored geometry. Confirmation never closes residual docs.
 
 ## Verification And Trust
 
@@ -357,13 +351,13 @@ Use the returned trust level accurately:
 
 For a model reconstructed from images, PDF pages, orthographic views, or sections:
 
-Read [reconstruction reasoning](solidworks://skill/references/reconstruction-reasoning.md) in full
-before analysis. Also read [part drawing evidence](solidworks://skill/references/part-drawing-evidence.md)
-when any dimension, title block, hole/thread callout, bolt, screw, stud, nut,
-washer, fastener, BOM, tolerance, datum, roughness, material, finish, revision,
-or technical note appears, and [assembly reconstruction](solidworks://skill/references/assembly-reconstruction.md)
-when the evidence describes a multi-part assembly. These local references add
-reasoning rules; they do not replace runtime MCP schema/reference topics.
+Default pre-read: `feature_graph_part_card` plus the corresponding `mapping_part`,
+`mapping_sheet_metal` or `mapping_assembly`. For a specific reasoning, annotation,
+standard-feature or assembly question, read only the relevant section of
+[reconstruction reasoning](solidworks://skill/references/reconstruction-reasoning.md),
+[part drawing evidence](solidworks://skill/references/part-drawing-evidence.md) or
+[assembly reconstruction](solidworks://skill/references/assembly-reconstruction.md).
+No full-reference prerequisite and no reading-count gate.
 
 Before PLAN, identify the projection convention; scan for a pictorial view;
 classify every orthographic, section, detail, and auxiliary view; and lock the
@@ -375,7 +369,7 @@ Use explicit dimensions and annotations for values and standard feature meaning.
 Use a pictorial view first for topology, handedness, and spatial placement; use a
 section first for material/void evidence on its cut plane. Cross-check ordinary
 views by visible outline, hidden line, then centerline. Pixel measurement is only
-schematic evidence. Log every conflict and unresolved item.
+topological evidence, NEVER a source of modeled dimensions. Log conflicts and UNKNOWNs.
 
 Resolve the envelope, normal surfaces, internal features, inclined/oblique
 surfaces, then curved/cylindrical features. Assign `F##` faces, `E##` edges,
@@ -388,12 +382,9 @@ evidence, set `RECONSTRUCTION_STATUS: BLOCKED` rather than guessing.
 
 ### PLAN.md
 
-Before the first mutation, present one complete plan inline in your reply and
-reuse it as this task's long-term memory. The reply is the plan of record: this
-profile has no file-writing tool, so never block on creating a file. Keep the
-plan under 70 lines and 4 KB, track its progress with `todo_write`, and write
-the same content to a workspace `PLAN.md` file only when a file-writing tool is
-actually available.
+Before the first mutation, present one plan inline: the reply is the plan of record (no
+file tool here; write PLAN.md only if one exists). Simple drawing: about 10 lines of key
+fields. Complex drawing: the template below, under 70 lines and 4 KB.
 
 ```markdown
 # CAD Reconstruction Plan
@@ -451,9 +442,10 @@ LAST_CHECKPOINT: none
 REPLAN_LOG: none
 ```
 
-Use `exact` mode for dimensioned/fabrication work. Use `schematic` for
-dimensionless projection exercises; preserve available proportions or record one
-normalization, and state depth/handedness assumptions.
+Use `exact` mode for dimensioned work; never offer a schematic alternative for a
+dimensioned drawing, and check every whole view showing a feature before marking it UNKNOWN.
+A schematic exercise (only when the user asks) needs USER normalization; never
+turn pixel proportions into graph coordinates. Unresolved values remain UNKNOWN.
 
 Set `PLAN_STATUS: READY` only when view roles, axis signs, topology, handedness,
 missing views, section/auxiliary conventions, dimensions or normalization,
@@ -461,21 +453,21 @@ missing views, section/auxiliary conventions, dimensions or normalization,
 sources, standard-part identity, thread semantics, and measurable checks are
 coherent. Every nonconstruction detail must be `resolved`, `explained`, or
 explicitly `unresolved`. Keep reconstruction and manufacturing completeness as
-separate statuses. While writing modeling todos, check the
-[capability map](solidworks://skill/references/feature-graph-capability-map.md); plan only features
-the vocabulary can express and record the rest as `CAPABILITY_GAP`.
+separate statuses. Consult the
+[capability map](solidworks://skill/references/feature-graph-capability-map.md) only when a feature's
+expressibility is unclear; record inexpressible features as `CAPABILITY_GAP`.
 
-If one decision can change topology or handedness, set `BLOCKED` and ask one
-focused question. Waiting does not consume `L2`; revising the plan after new
-input does. Present the compact plan inline and obtain explicit approval of its
-current version.
+If any required constraint remains UNKNOWN, collect it with ALL other missing
+constraints and the compact plan in ONE ask_user_question, including approval.
+Waiting does not consume L2. The source/default/one-round rules here govern any
+older reference prose; do not split the same matter into another approval round.
 Only then set `APPROVED` and check its approval todo. Any changed topology,
 orientation, dimension, direction, or feature order creates a new version.
 
 ### Execute, Checkpoint, And Validate
 
-Reread the approved plan in full immediately before mutation. Start or reuse the job,
-read only the required Feature Graph references, then prefer one complete
+The approved plan is already in context: do not reread or re-present it. The job
+and references were prepared before the question, so submit at once: one complete
 `submit_feature_graph(..., fresh_document=true)` for a new model. Do not split a
 complete graph merely to create checkpoints.
 
@@ -499,10 +491,18 @@ hole, mirror, pattern, and offset direction through the Orientation Contract and
 
 After each milestone, use `inspect_state` with the smallest relevant scopes.
 Compare feature results, bounds, topology, dimensions, directions, and evidence
-IDs with the plan. On match, check only covered todos, update `LAST_CHECKPOINT`
-and loop counts, then re-present the updated plan. On mismatch, stop mutation,
+IDs with the plan. On match, tick covered todos with short status lines; do not
+re-present the plan. On mismatch, stop mutation,
 use `L4`, set `REPLAN_REQUIRED`, log the smallest mismatch and root cause, revise
-the plan/version, re-present it, and obtain approval before repair.
+the plan/version and report the repair under the approved scope.
+After `discarded`, L4 permits at most 2 complete repair executions, persisted across jobs.
+See feature_graph_part_card recovery/L4: lock all dimensions/end types, ordered feature
+sequence, materials and intrinsic sketch shape; placement/reversed/frame may change.
+No identical replay, reset, renumbering or splitting; supply specific new repair evidence.
+If inadmissible, uncertain, context-changed or exhausted, request user confirmation;
+archive the old chain as user_override and restart at 0 only after approval. Merge batch approval.
+Check every `direction_flipped` feature in readback AND three views. Fix VALIDATION_FAILED at once.
+Do not repeat plan approval unless the user answer introduced a new contradiction.
 
 Validate independently:
 
@@ -527,7 +527,7 @@ returned evidence must support comparison.
 
 On any directional or sectional `FAIL`, stop final save/export, traverse `L5`,
 reinspect the pictorial view first when one was found, update PLAN before repair,
-and obtain approval again. If a direction or section is `UNAVAILABLE`, do not loop
+and repair within the approved scope. If a direction or section is `UNAVAILABLE`, do not loop
 or invent a pass; finish only if MCP final verification can complete, then report
 `built_unverified` and name the gap.
 

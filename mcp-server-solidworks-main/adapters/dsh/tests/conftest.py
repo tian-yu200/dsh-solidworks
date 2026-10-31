@@ -42,6 +42,18 @@ class FakeBackend:
         self.identity_endpoint_down = False
         self._document_stack = []
         self._undo_state = None
+        self._next_document_id = 1
+        if self.state:
+            self.state["documentId"] = "existing-0"
+
+    def documents(self):
+        rows = [s for s in [*self._document_stack, self.state] if s and s.get("activeDocument")]
+        docs = [{"document_id": s.get("documentId", "existing-0"),
+                 "title": s.get("activeDocument"), "path": s.get("activeDocumentPath") or "",
+                 "type": s.get("documentType"), "isDirty": bool(s.get("isDirty")),
+                 "updateStamp": s.get("updateStamp", 0)} for s in rows]
+        return {"documents": docs, "active_document": docs[-1] if docs else None,
+                "undo_scope_active": self._undo_state is not None}
 
     def _material_failure_code(self, name, library):
         """None when the fake applies it, else the code the live layer would answer with."""
@@ -189,6 +201,7 @@ class FakeBackend:
                 "create_drawing": "Drawing1",
             }[tool]
             self.state = {
+                "documentId": "created-%s" % self._next_document_id,
                 "stateVersion": (
                     (self.state or {}).get("stateVersion", 1) + 1
                 ),
@@ -200,6 +213,7 @@ class FakeBackend:
                 "dimensions": [],
                 "isDirty": False,
             }
+            self._next_document_id += 1
         elif tool == "close_document":
             expected_path = params.get("expected_path", "")
             expected_title = params.get("expected_title", "")
@@ -236,6 +250,7 @@ class FakeBackend:
                 if self._document_stack
                 else None
             )
+            self._undo_state = None
         elif tool == "save_document" and self.state is not None:
             file_path = params.get("file_path") or self.state.get(
                 "activeDocumentPath", ""
@@ -250,6 +265,11 @@ class FakeBackend:
             "status": "COMPLETED",
             "stateVersion": (self.state or {}).get("stateVersion", 1),
             "cadState": copy.deepcopy(self.state),
+            "result_geometry": (
+                {"created_document_id": self.state.get("documentId")}
+                if tool in {"open_new_part", "open_new_assembly", "create_drawing"}
+                else None
+            ),
             "error": None,
         }
 

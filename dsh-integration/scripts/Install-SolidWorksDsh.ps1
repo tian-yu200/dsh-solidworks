@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$DshHome = "$HOME\.dsh",
     [string]$DshRoot = "D:\deepseek-harness",
@@ -32,9 +32,15 @@ New-Item -ItemType Directory -Force -Path `
     (Join-Path $ProjectRoot "config-backups") | Out-Null
 
 $WebPatch = Join-Path $ProfilesRoot "web\cordis.patch.yml"
+$TauriPatch = Join-Path $ProfilesRoot "tauri\cordis.patch.yml"
 $SolidworksProfile = Join-Path $ProfilesRoot "solidworks"
 $SolidworksPreset = Join-Path $PresetRoot "solidworks-cad"
 $SolidworksPolicy = Join-Path $PluginsRoot "solidworks-policy"
+# The desktop core resolves '@dsh-solidworks/policy' from the tauri profile's own node_modules,
+# never from $PluginsRoot. Measured 2026-10-31: that copy was two days stale (no intake-progress,
+# no read_drawing_text, the per-agent restriction that never applied) because nothing synced it.
+$TauriPolicy = Join-Path $ProfilesRoot "tauri\node_modules\@dsh-solidworks\policy"
+$PolicyRuntimeFiles = @("index.js", "intake-progress.js", "package.json", "cordis.patch.yml")
 # Single source of truth: the skill content lives in the repo and is LINKED, never copied, so a
 # session can never read a stale SKILL.md (measured 2026-10-28: the installed copy was two months
 # behind the repo, 20385 B against 26552 B).
@@ -104,7 +110,7 @@ $Preflight = @(
 foreach ($Entry in $Preflight) {
     $Ownership = Get-DshLinkOwnership -LinkPath $Entry.Path -TargetPath $Entry.Target `
         -OwnedTargets $OwnedLinkTargets
-    if ($Ownership -eq "foreign") {
+    if ($Ownership -eq "foreign" -and -not $TakeOverSkillLinks) {
         $ForeignTarget = Get-DshLinkTarget $Entry.Path
         throw ("'$($Entry.Path)' ($($Entry.Label)) is a link to '$ForeignTarget', which this " +
                "installer does not own. Nothing has been changed. Re-run with -TakeOverSkillLinks " +
@@ -141,56 +147,14 @@ $Python = [System.IO.Path]::GetFullPath($Python)
 $AdapterDir = Join-Path $ProjectRoot "mcp-server-solidworks-main\adapters\dsh"
 $Server = Join-Path $AdapterDir "server.py"
 
-function Convert-ToYamlPath([string]$Path) {
-    return ($Path -replace '\\', '/')
-}
-
-function Render-ProfileText([string]$TemplatePath) {
-    $Source = Get-Content -Raw -LiteralPath $TemplatePath
-    $Rendered = $Source.Replace('__PYTHON__', (Convert-ToYamlPath $Python))
-    $Rendered = $Rendered.Replace('__DSH_SERVER__', (Convert-ToYamlPath $Server))
-    return $Rendered.Replace('__DSH_ADAPTER_DIR__', (Convert-ToYamlPath $AdapterDir))
-}
-
-function Render-ProfileTemplate([string]$TemplatePath, [string]$DestinationPath) {
-    [System.IO.File]::WriteAllText(
-        $DestinationPath,
-        (Render-ProfileText $TemplatePath),
-        [System.Text.UTF8Encoding]::new($false)
-    )
-}
-
-function Install-SolidWorksWebPatch([string]$TemplatePath, [string]$DestinationPath) {
-    # The web profile patch belongs to the USER as much as to this integration: it also carries
-    # every other MCP server they mounted (10.8 KB today against this 625 B template). Overwriting
-    # it wholesale used to delete them. So: insert the SolidWorks row when it is missing, leave the
-    # file alone when it is present, and never rewrite anything else.
-    $Block = Render-ProfileText $TemplatePath
-    if (-not (Test-Path -LiteralPath $DestinationPath)) {
-        [System.IO.File]::WriteAllText(
-            $DestinationPath, $Block, [System.Text.UTF8Encoding]::new($false))
-        return "written"
-    }
-    $Existing = Get-Content -Raw -LiteralPath $DestinationPath
-    if ($Existing.Contains("id: mcp-solidworks-orchestrator")) {
-        return "present"
-    }
-    $FirstRow = ($Existing -split "`r?`n" | Where-Object { $_ -notmatch '^\s*(#|$)' } | Select-Object -First 1)
-    if ($FirstRow -notmatch '^- ') {
-        throw "web patch $DestinationPath is not a top-level YAML sequence; refusing to append the " +
-              "SolidWorks MCP row. Merge the rendered template in by hand (backup taken)."
-    }
-    [System.IO.File]::AppendAllText(
-        $DestinationPath, "`r`n" + $Block.TrimStart([char[]]@("`r", "`n")),
-        [System.Text.UTF8Encoding]::new($false))
-    return "appended"
-}
+$ProfilePatchScript = Join-Path $PSScriptRoot "SolidWorksProfilePatch.mjs"
 
 $Manifest = [ordered]@{
     createdAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     dshHome = $DshHome
     projectRoot = $ProjectRoot
     webPatchExisted = Test-Path -LiteralPath $WebPatch
+    tauriPatchExisted = Test-Path -LiteralPath $TauriPatch
     solidworksProfileExisted = Test-Path -LiteralPath $SolidworksProfile
     solidworksPresetExisted = Test-Path -LiteralPath $SolidworksPreset
     solidworksPolicyExisted = Test-Path -LiteralPath $SolidworksPolicy
@@ -204,6 +168,9 @@ $Manifest = [ordered]@{
     installManifestExisted = Test-Path -LiteralPath $InstallManifest
 }
 
+if ($Manifest.tauriPatchExisted) {
+    Copy-Item -LiteralPath $TauriPatch -Destination (Join-Path $BackupRoot "tauri.cordis.patch.yml")
+}
 if ($Manifest.webPatchExisted) {
     Copy-Item -LiteralPath $WebPatch -Destination (Join-Path $BackupRoot "web.cordis.patch.yml")
 }
@@ -242,27 +209,82 @@ if ($Manifest.solidworksPolicyExisted) {
         -Destination (Join-Path $BackupRoot "solidworks-policy")
     $Manifest.policyBackupLinks = @($PolicyLinks)
 }
+if (Test-Path -LiteralPath $TauriPolicy) {
+    if (Test-DshReparsePoint $TauriPolicy) {
+        throw "'$TauriPolicy' is a link; refusing to write the desktop policy through it."
+    }
+    Copy-DshTreeNoReparse -Source $TauriPolicy -Destination (Join-Path $BackupRoot "tauri-solidworks-policy") | Out-Null
+}
 if ($Manifest.installManifestExisted) {
     Copy-Item -LiteralPath $InstallManifest -Destination (Join-Path $BackupRoot "solidworks-dsh-install.json")
 }
 $Manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $BackupRoot "manifest.json") -Encoding utf8
 
-# Teardown through the guarded helper: the path must be one of the managed roots, no component of it
-# may be a reparse point, a reparse point AT the path is unlinked instead of deleted, and a nested
-# one is refused — except the links named here, which are this installer's own and are unlinked
-# (their targets untouched) before the tree goes. Foreign targets were refused in the pre-flight
-# above, so reaching New-DshOwnedLink only after teardown can no longer erase a user's junction.
+# Parse and merge both user-owned patches BEFORE removing any installed tree.
+# Only managed fields change; model/provider overrides and other MCPs survive.
+$PreparedWebPatch = Join-Path $BackupRoot "web.cordis.prepared.yml"
+$PreparedProfilePatch = Join-Path $BackupRoot "solidworks.cordis.prepared.yml"
+foreach ($Patch in @(
+    @{ Template = "profiles/web/cordis.patch.yml"; Source = $WebPatch; Output = $PreparedWebPatch },
+    @{ Template = "profiles/solidworks/cordis.patch.yml"; Source = (Join-Path $SolidworksProfile "cordis.patch.yml"); Output = $PreparedProfilePatch }
+)) {
+    & node $ProfilePatchScript --mode merge --dsh-root $DshRoot `
+        --template (Join-Path $IntegrationRoot $Patch.Template) --source $Patch.Source `
+        --destination $Patch.Output --python $Python --server $Server --adapter-dir $AdapterDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "Profile patch preparation failed. Installed trees have not been removed; backup: $BackupRoot"
+    }
+}
+$PreparedTauriPatch = Join-Path $BackupRoot "tauri.cordis.prepared.yml"
+if ($Manifest.tauriPatchExisted) {
+    & node $ProfilePatchScript --mode sync-tauri --dsh-root $DshRoot --source $TauriPatch `
+        --preset (Join-Path $RepoPresetSource "agent.cordis.yml") --destination $PreparedTauriPatch
+    if ($LASTEXITCODE -ne 0) { throw "Tauri persona/vision preparation failed; installed files are unchanged." }
+}
+$WebPatchState = "merged"
+$ProfilePatchState = "merged"
+
+# Teardown checks managed roots and rejects reparse ancestors. Nested links are refused except
+# verified pnpm links into this profile's own store and skill links checked in the preflight.
+# Only the links are removed; their targets remain intact.
+$ProfileManagedLinks = if (Test-Path -LiteralPath $SolidworksProfile) {
+    $ProfileModulesRoot = (Get-DshCanonicalPath (Join-Path $SolidworksProfile "node_modules")).TrimEnd('\') + '\'
+    $ProfilePnpmStoreRoot = (Get-DshCanonicalPath (Join-Path $SolidworksProfile "node_modules\.pnpm")).TrimEnd('\') + '\'
+    $Links = @()
+    foreach ($Link in (Get-DshNestedReparsePoints -Dir $SolidworksProfile)) {
+        $LinkPath = Get-DshCanonicalPath $Link
+        $LinkTarget = Get-DshLinkTarget $Link
+        if (-not $LinkPath.StartsWith($ProfileModulesRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $LinkTarget -or
+            -not $LinkTarget.StartsWith($ProfilePnpmStoreRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw ("Refusing to replace the SolidWorks profile: it contains an unmanaged link " +
+                   "'$LinkPath'. Only package links under node_modules that point into its .pnpm " +
+                   "store can be safely unlinked during reinstall.")
+        }
+        $Links += $LinkPath
+    }
+    $Links
+} else {
+    @()
+}
 foreach ($Target in @($SolidworksProfile, $SolidworksPreset, $SolidworksPolicy)) {
     Assert-UnderDshHome $Target | Out-Null
+    $ManagedLinksForTarget = if ($Target -eq $SolidworksProfile) {
+        $ProfileManagedLinks
+    } elseif ($Target -eq $SolidworksPreset) {
+        @($PresetSkillsLink)
+    } else {
+        @()
+    }
     Remove-DshManagedTree -Path $Target -AllowedRoots $ManagedRoots -GuardRoot $DshHome `
-        -Purpose "reinstall" -ManagedLinks @($PresetSkillsLink, $UserSkillLink) | Out-Null
+        -Purpose "reinstall" -ManagedLinks @($ManagedLinksForTarget) | Out-Null
 }
 New-Item -ItemType Directory -Force -Path `
     (Split-Path $WebPatch), `
     $SolidworksProfile, `
     $SolidworksPreset, `
     $SolidworksPolicy | Out-Null
-$WebPatchState = Install-SolidWorksWebPatch (Join-Path $IntegrationRoot "profiles\web\cordis.patch.yml") $WebPatch
+Copy-Item -LiteralPath $PreparedWebPatch -Destination $WebPatch -Force
 # Neither install copy follows a link either: the source is the repository, and a junction placed in
 # it (by an editor, a sync tool, a previous experiment) must not be resolved into the DSH tree.
 Copy-DshTreeNoReparse -Source (Join-Path $IntegrationRoot "profiles\solidworks") `
@@ -289,7 +311,17 @@ if ($UserSkillResult.State -eq "foreign") {
 }
 Copy-DshTreeNoReparse -Source (Join-Path $IntegrationRoot "plugins\solidworks-policy") `
     -Destination $SolidworksPolicy | Out-Null
-Render-ProfileTemplate (Join-Path $IntegrationRoot "profiles\solidworks\cordis.patch.yml") (Join-Path $SolidworksProfile "cordis.patch.yml")
+if (Test-Path -LiteralPath (Join-Path $ProfilesRoot "tauri")) {
+    New-Item -ItemType Directory -Force -Path $TauriPolicy | Out-Null
+    foreach ($File in $PolicyRuntimeFiles) {
+        Copy-Item -LiteralPath (Join-Path $IntegrationRoot "plugins\solidworks-policy\$File") `
+            -Destination (Join-Path $TauriPolicy $File) -Force
+    }
+}
+if ($Manifest.tauriPatchExisted) {
+    Copy-Item -LiteralPath $PreparedTauriPatch -Destination $TauriPatch -Force
+}
+Copy-Item -LiteralPath $PreparedProfilePatch -Destination (Join-Path $SolidworksProfile "cordis.patch.yml") -Force
 
 & $Pnpm install --prod --dir $SolidworksProfile
 if ($LASTEXITCODE -ne 0) {
@@ -332,6 +364,7 @@ $Installed = [ordered]@{
         }
     }
     webPatchState = $WebPatchState
+    profilePatchState = $ProfilePatchState
 }
 $Installed | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $InstallManifest -Encoding utf8
 

@@ -95,8 +95,8 @@ def name_for(uri):
     if not text.startswith(URI_PREFIX):
         raise SkillResourceError(
             NOT_FOUND,
-            "'%s' is not a solidworks skill reference URI. They look like %s<file>.md — run "
-            "list_mcp_resources on server solidworks for the current set." % (text, URI_PREFIX),
+            "'%s' is not a solidworks skill reference URI. They look like %s<file>.md — use "
+            "exactly a URI the solidworks-cad skill links." % (text, URI_PREFIX),
         )
     return text[len(URI_PREFIX):]
 
@@ -110,7 +110,7 @@ def _check_name(name, root):
         raise SkillResourceError(
             TRAVERSAL_REFUSED,
             "'%s' is refused: only a bare file name directly under %s can be read, never a path. "
-            "Run list_mcp_resources on server solidworks and use one of those URIs."
+            "Use exactly a URI the solidworks-cad skill links."
             % (name, root),
         )
     target = (root / name)
@@ -120,8 +120,8 @@ def _check_name(name, root):
     if resolved.parent != root or not resolved.is_file():
         raise SkillResourceError(
             NOT_FOUND,
-            "there is no skill reference named '%s'. Run list_mcp_resources on server solidworks "
-            "for the exact names." % name,
+            "there is no skill reference named '%s'. Use exactly a URI the solidworks-cad skill "
+            "links." % name,
         )
     return resolved
 

@@ -86,12 +86,12 @@ def test_grid_cell_uses_the_same_ahx16_grid():
 
 
 def test_missing_file_is_refused():
-    with pytest.raises(RuntimeError, match="MISSING_PARAMETER"):
+    with pytest.raises(RuntimeError, match="FILE_NOT_FOUND"):
         ocr.read_text("C:/definitely/not/here.png")
 
 
 def test_url_is_refused():
-    with pytest.raises(RuntimeError, match="MISSING_PARAMETER|URL"):
+    with pytest.raises(RuntimeError, match="LOCAL_PATH_REQUIRED"):
         ocr.read_text("https://example.com/drawing.png")
 
 

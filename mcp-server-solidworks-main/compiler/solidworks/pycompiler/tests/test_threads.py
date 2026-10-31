@@ -98,8 +98,13 @@ class FakePort(ExecutionPort):
         feats = ["Cut-Extrude1"] if tool == "extrude_feature" else (
             ["Boss1"] if tool == "box_feature" else
             (["CosmeticThread_M5x0.8"] if tool == "add_cosmetic_thread" else ["Feature1"]))
-        return {"status": "COMPLETED", "stateVersion": self._sv,
-                "cadState": {"features": feats, "activeSketch": "Sketch1"}}
+        response = {"status": "COMPLETED", "stateVersion": self._sv,
+                    "cadState": {"features": feats, "activeSketch": "Sketch1"}}
+        if tool == "create_sketch":
+            from pycompiler.ir_schema import canonical_sketch_frame
+            response["result_geometry"] = {"frame": canonical_sketch_frame({
+                "datum": params.get("plane", "Top Plane").split()[0].lower()})}
+        return response
 
 
 def _box():

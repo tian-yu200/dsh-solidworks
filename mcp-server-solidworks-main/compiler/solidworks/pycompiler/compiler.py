@@ -16,7 +16,7 @@ import math
 from . import lowering
 from . import resolver
 from .errors import FeatureError
-from .ir_schema import validate
+from .ir_schema import validate, frame_error, canonical_sketch_frame
 from .resolver import (resolve_center_on_face, resolve_component_entity_by_anchor,
                        resolve_edges_by_anchor, resolve_face_by_anchor, resolve_face_on_plane,
                        resolve_thread_edge, resolve_top_face)
@@ -115,6 +115,7 @@ def _compile_and_run(port, graph):
     # BATCH 10a: off-centre holes are also collected so two holes on the SAME face whose circles
     # overlap fail BEFORE any execution call (check_holes_do_not_overlap).
     node_features = {}
+    sketch_mirrors = {}
     hole_placements = []
     for node in nodes:
         nid = node.get("id")
@@ -136,6 +137,9 @@ def _compile_and_run(port, graph):
             last_resp = None
             frame_fn = None  # 2D coord transform for this node's entities (sketch frame fix)
             frame_mirror = False
+            declared_frame = node.get("frame")
+            if ntype == "sketch" and declared_frame is None:
+                declared_frame = canonical_sketch_frame(node.get("ref") or {})
             # BATCH 10a: an off-centre hole carries its MODEL point here until create_sketch
             # echoes the measured frame; placement_uv is the resulting sketch-2D centre. Both
             # are per-NODE (one hole), reset on each node so a later node never inherits them.
@@ -143,6 +147,12 @@ def _compile_and_run(port, graph):
             placement_uv = None
             for op in ops:
                 params = _fill_placeholders(op, last_resp, node_features, nid, ntype)
+                if ntype == "extrude" and node.get("sketch") in sketch_mirrors:
+                    params = dict(params)
+                    # reverse is relative to the DECLARED normal, not a face's arbitrary axes.
+                    params["reverse"] = bool(node.get("reversed")) ^ sketch_mirrors[node["sketch"]]
+                    if node.get("operation") != "cut" and not params.get("through") and not params.get("mid_plane"):
+                        params["strict_direction"] = True
                 if frame_fn is not None and op.tool == "add_sketch_entity":
                     params = _transform_entity_params(params, frame_fn, frame_mirror)
                 if op.tool == "add_sketch_entity" and placement_uv is not None:
@@ -187,7 +197,7 @@ def _compile_and_run(port, graph):
                     ask = (resp.get("cadState") or {}).get("activeSketch")
                     if nid and ask:
                         node_features[nid] = ask
-                if _echoes_frame(op) and node.get("frame"):
+                if _echoes_frame(op) and declared_frame is not None:
                     # The node records the ORIGINAL sketch's frame; the response carries the
                     # frame the op just MEASURED (create_sketch — or edge_flange_sketch, whose
                     # generated profile sketch has an UNPREDICTABLE frame). Coordinates are
@@ -202,7 +212,13 @@ def _compile_and_run(port, graph):
                             "echoed none (execution layer too old?)",
                             code="FRAME_UNAVAILABLE", node_id=nid, node_type=ntype,
                             step=op.tool)
-                    frame_fn, frame_mirror = _sketch_frame_transform(node["frame"], measured)
+                    frame_fn, frame_mirror = _sketch_frame_transform(declared_frame, measured)
+                    if ntype == "sketch":
+                        sketch_mirrors[nid] = frame_mirror
+                    rec.setdefault("resolved", []).append({
+                        "step": "sketch_frame", "declared": declared_frame,
+                        "measured": measured, "mirrored": frame_mirror,
+                    })
                 if op.tool == "create_sketch" and placement_at is not None \
                         and placement_uv is None:
                     # BATCH 10a — off-centre hole: the 3-D model point becomes 2-D HERE, once
@@ -233,7 +249,16 @@ def _compile_and_run(port, graph):
                         {"step": "hole_placement", "at": list(placement_at),
                          "sketch_uv": [round(u, 9), round(v, 9)],
                          "frame": measured})
-                rec["ops"].append({"tool": op.tool, "note": op.note, "state_version": sv})
+                op_record = {"tool": op.tool, "note": op.note, "state_version": sv}
+                if (resp.get("result_geometry") or {}).get("direction_flipped") is True:
+                    rec["direction_flipped"] = True
+                    op_record["direction_flipped"] = True
+                    result.warnings.append({
+                        "code": "DIRECTION_FLIPPED", "node_id": nid,
+                        "node_type": ntype, "step": op.tool,
+                        "message": "切空后翻向重试成功；必须在回读和三视图验证中专项核对切除位置和方向。",
+                    })
+                rec["ops"].append(op_record)
             rec["status"] = "COMPLETED"
             if node.get("type") == "hole":
                 # D2: EVERY hole joins the cross-hole overlap test, centred ones included
@@ -694,9 +719,18 @@ def _sketch_frame_transform(declared, measured):
     Sketch5 failure class) and origin shift in one affine map. Returns (fn(u,v)->(u',v'),
     mirrored) — fn is None when the frames already coincide; mirrored=True flips arc sweep
     senses (a mirror reverses CCW/CW)."""
+    for label, frame in (("declared", declared), ("measured", measured)):
+        problem = frame_error(frame)
+        if problem:
+            raise FeatureError("%s %s" % (label, problem), code="FRAME_INVALID")
     od, xd, yd = declared["origin"], declared["xdir"], declared["ydir"]
     om, xm, ym = measured["origin"], measured["xdir"], measured["ydir"]
     d_o = [od[i] - om[i] for i in range(3)]
+    nd = [xd[1]*yd[2]-xd[2]*yd[1], xd[2]*yd[0]-xd[0]*yd[2], xd[0]*yd[1]-xd[1]*yd[0]]
+    nm = [xm[1]*ym[2]-xm[2]*ym[1], xm[2]*ym[0]-xm[0]*ym[2], xm[0]*ym[1]-xm[1]*ym[0]]
+    if abs(abs(_dot3(nd, nm))-1) > 1e-6 or abs(_dot3(d_o, nm)) > 1e-6:
+        raise FeatureError("declared and measured sketch planes must coincide (tolerance 1e-6 m)",
+                           code="FRAME_PLANE_MISMATCH")
     tu, tv = _dot3(d_o, xm), _dot3(d_o, ym)
     a, b = _dot3(xd, xm), _dot3(yd, xm)
     c, d = _dot3(xd, ym), _dot3(yd, ym)

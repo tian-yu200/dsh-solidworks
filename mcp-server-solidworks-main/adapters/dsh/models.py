@@ -15,7 +15,9 @@ VERIFICATION_STATUSES = {
 }
 RECOVERY_STATUSES = {
     "not_needed",
-    "rolled_back",
+    "rolled_back",  # legacy records only; Undo is currently unverified
+    "discarded",
+    "recovery_unverified",
     "rollback_failed",
     "backup_only",
 }

@@ -1,7 +1,7 @@
 import json
 import re
 
-from settings import FEATURE_GRAPH_SCHEMA_PATH, RECIPE_PATH
+from settings import FEATURE_GRAPH_SCHEMA_PATH, RECIPE_PATH, SKILL_REFERENCES_DIR
 
 
 TOPICS = {
@@ -23,9 +23,11 @@ TOPICS = {
 SCHEMA_TOPIC = "feature_graph_schema"
 QUICKREF_TOPIC = "feature_graph_quickref"
 CHANGELOG_TOPIC = "feature_graph_changelog"
+PART_CARD_TOPIC = "feature_graph_part_card"
 GENERATED_TOPICS = (SCHEMA_TOPIC, QUICKREF_TOPIC, CHANGELOG_TOPIC)
+CARD_TOPICS = (PART_CARD_TOPIC,)
 
-ALL_TOPICS = tuple(sorted([*TOPICS, *GENERATED_TOPICS]))
+ALL_TOPICS = tuple(sorted([*TOPICS, *GENERATED_TOPICS, *CARD_TOPICS]))
 
 # Paging defaults for scope=reference. A reference is returned ONE PAGE AT A TIME so the
 # result always survives the host's tool-result elision rule (which cuts a result over a
@@ -462,6 +464,8 @@ def read_reference(topic):
     Kept as the single source of truth: `page_reference` slices its result, and the
     orchestrator's `reference` capability publishes it whole for programmatic callers.
     """
+    if topic in CARD_TOPICS:
+        return (SKILL_REFERENCES_DIR / "feature-graph-part-card.md").read_text(encoding="utf-8")
     if topic == SCHEMA_TOPIC:
         return _schema_without_changelog(_load_schema())
     if topic == QUICKREF_TOPIC:

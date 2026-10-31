@@ -26,6 +26,71 @@ namespace SolidworksExecution.Services
         private static bool _undoScopeActive;
         private static string _undoScopeDocumentTitle;
         private static string _undoScopeDocumentPath;
+        // Retain each open document's RCW while its ID is live, so a freed COM address cannot
+        // be reused as the identity of a different document between inventory snapshots.
+        private static readonly Dictionary<IntPtr, Tuple<IModelDoc2, string>> DocumentIds =
+            new Dictionary<IntPtr, Tuple<IModelDoc2, string>>();
+
+        private static IntPtr DocumentKey(IModelDoc2 doc)
+        {
+            IntPtr key = Marshal.GetIUnknownForObject(doc);
+            Marshal.Release(key);
+            return key;
+        }
+
+        private static string StableDocumentId(IModelDoc2 doc)
+        {
+            IntPtr key = DocumentKey(doc);
+            Tuple<IModelDoc2, string> entry;
+            if (!DocumentIds.TryGetValue(key, out entry))
+            {
+                entry = Tuple.Create(doc, Guid.NewGuid().ToString("N"));
+                DocumentIds[key] = entry;
+            }
+            return entry.Item2;
+        }
+
+        // Pure inventory: attach to an existing instance only, without visibility writes,
+        // activation, selection, rebuild or feature-tree traversal. Called on StaExecutor.
+        public Dictionary<string, object> GetOpenDocumentsInfo()
+        {
+            if (_solidWorks == null || !IsAlive(_solidWorks))
+                _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+            var documents = new List<Dictionary<string, object>>();
+            var live = new HashSet<IntPtr>();
+            var all = _solidWorks.GetDocuments() as object[] ?? new object[0];
+            var active = _solidWorks.IActiveDoc2 as IModelDoc2;
+            Dictionary<string, object> activeInfo = null;
+            foreach (object item in all)
+            {
+                var doc = item as IModelDoc2;
+                if (doc == null) throw new InvalidOperationException("Incomplete open-document inventory.");
+                IntPtr key = DocumentKey(doc);
+                live.Add(key);
+                var info = new Dictionary<string, object>
+                {
+                    ["document_id"] = StableDocumentId(doc),
+                    ["title"] = doc.GetTitle(),
+                    ["path"] = doc.GetPathName() ?? string.Empty,
+                    ["type"] = DocumentTypeName(doc),
+                    ["isDirty"] = doc.GetSaveFlag(),
+                    ["updateStamp"] = doc.GetUpdateStamp()
+                };
+                documents.Add(info);
+                if (active != null && DocumentKey(active) == key) activeInfo = info;
+            }
+            if (active != null && activeInfo == null)
+                throw new InvalidOperationException("Active document is missing from inventory.");
+            foreach (IntPtr key in DocumentIds.Keys.Where(k => !live.Contains(k)).ToList())
+                DocumentIds.Remove(key);
+            return new Dictionary<string, object>
+            {
+                ["stateVersion"] = _guard.GetCurrentStateVersion(),
+                ["documents"] = documents,
+                ["active_document"] = activeInfo,
+                ["undo_scope_active"] = _undoScopeActive
+            };
+        }
 
         public bool IsConnected { get; private set; }
 
@@ -611,6 +676,7 @@ namespace SolidworksExecution.Services
                         Features = new List<string>(),
                         Dimensions = new List<string>()
                     },
+                    ResultGeometry = new { created_document_id = StableDocumentId(modelDoc) },
                     Error = null
                 };
 
@@ -886,6 +952,7 @@ namespace SolidworksExecution.Services
                 var p = request.Params as JObject;
                 bool save = p != null && (p.Value<bool?>("save") ?? false);
                 bool closeAll = p != null && (p.Value<bool?>("close_all") ?? false);
+                string closingId = null;
 
                 if (closeAll)
                 {
@@ -909,7 +976,10 @@ namespace SolidworksExecution.Services
                     string activeTitle = modelDoc.GetTitle() ?? string.Empty;
                     string activePath = modelDoc.GetPathName() ?? string.Empty;
                     string activeType = DocumentTypeName(modelDoc);
+                    closingId = StableDocumentId(modelDoc);
+                    string expectedId = p?.Value<string>("expected_document_id") ?? string.Empty;
                     bool identityMismatch =
+                        (!string.IsNullOrEmpty(expectedId) && expectedId != closingId) ||
                         (!string.IsNullOrEmpty(expectedPath) &&
                          !string.Equals(expectedPath, activePath, StringComparison.OrdinalIgnoreCase)) ||
                         (string.IsNullOrEmpty(expectedPath) &&
@@ -945,11 +1015,18 @@ namespace SolidworksExecution.Services
                     _solidWorks.CloseDoc(docTitle);
                 }
 
+                var inventory = GetOpenDocumentsInfo();
+                var remaining = (List<Dictionary<string, object>>)inventory["documents"];
+                if (closeAll ? remaining.Count != 0 : remaining.Any(d => (string)d["document_id"] == closingId))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "CLOSE_NOT_CONFIRMED", "The requested document is still in the open-document inventory.");
+
                 var response = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
                     Verified = true,
+                    ResultGeometry = new { closed_document_id = closingId, close_confirmed = true },
                     StateVersion = _guard.GetCurrentStateVersion() + 1,
                     CadState = new CadState
                     {

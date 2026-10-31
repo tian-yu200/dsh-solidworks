@@ -19,6 +19,10 @@ creating reparse points on every suite run would make the suite depend on the ma
 """
 import os
 import re
+import shutil
+import subprocess
+
+import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPTS = os.path.join(REPO_ROOT, "dsh-integration", "scripts")
@@ -211,9 +215,16 @@ def test_the_preset_side_link_is_owned_before_the_parent_tree_is_deleted():
     teardown = install.index("Remove-DshManagedTree -Path $Target")
     assert preflight < teardown, "ownership must be checked before the teardown"
     assert install.count('$Ownership -eq "foreign"') >= 1
+    assert '$Ownership -eq "foreign" -and -not $TakeOverSkillLinks' in install, (
+        "the explicit takeover switch must be the only way past the foreign-link preflight")
     assert "-TakeOverSkillLinks" in install[install.index("foreach ($Entry in $Preflight)"):teardown]
-    # and the teardown declares which nested links are its own
-    assert "-ManagedLinks @($PresetSkillsLink, $UserSkillLink)" in install
+    assert "Get-DshNestedReparsePoints -Dir $SolidworksProfile" in install
+    assert "ProfilePnpmStoreRoot" in install and "StartsWith($ProfilePnpmStoreRoot" in install, (
+        "only package links targeting the profile's own pnpm store may be unlinked")
+    assert "-ManagedLinks @($ManagedLinksForTarget)" in install
+    assert "@($PresetSkillsLink)" in install
+    assert "-ManagedLinks @($PresetSkillsLink, $UserSkillLink)" not in install, (
+        "the user's previous skill target must remain present until New-DshOwnedLink records it")
     module = _read(MODULE)
     guarded = module[module.index("function Remove-DshManagedTree"):
                      module.index("function Copy-DshPresetBackup")]
@@ -247,3 +258,33 @@ def test_restore_relinks_to_the_recorded_target():
     # a tree backup may contain a real skills dir: unlink first or the copy writes through the link
     assert "Remove-DshLink -Path $SkillsLinkPath | Out-Null" in fn
     assert "backup predates the link" in fn
+
+
+def test_installer_prepares_user_preserving_patches_before_teardown():
+    source = _code_lines(_read(INSTALL))
+    assert source.index('--mode merge') < source.index('Remove-DshManagedTree -Path $Target')
+    assert 'Copy-Item -LiteralPath $PreparedProfilePatch' in source
+    assert 'Copy-Item -LiteralPath $PreparedWebPatch' in source
+    assert 'Render-ProfileTemplate' not in source
+    assert '$PatchExitCode = $LASTEXITCODE' in _read(DOCTOR)
+    assert '$CapabilityExitCode = $LASTEXITCODE' in _read(DOCTOR)
+
+
+@pytest.mark.parametrize('script_name', ['Doctor-SolidWorksDsh.ps1', 'Export-SolidWorksDshConfig.ps1'])
+def test_diagnostics_redact_the_entire_authorization_value(script_name):
+    powershell = shutil.which('pwsh') or shutil.which('powershell')
+    if not powershell:
+        pytest.skip('PowerShell is not installed')
+    source = _read(os.path.join(SCRIPTS, script_name))
+    fixture = 'Authorization: Bearer fixture-secret-auth' + chr(10) + 'apiKey: fixture-secret-key'
+    if script_name.startswith('Doctor'):
+        function = source[source.index('function Redact-Config'):source.index('$Dsh =')]
+        command = function + "\nRedact-Config @'\n" + fixture + "\n'@"
+    else:
+        redaction = source[source.index('$Redacted = $Raw'):source.index('$Directory =')]
+        command = "$Raw = @'\n" + fixture + "\n'@\n" + redaction + "\n$Redacted"
+    result = subprocess.run([powershell, '-NoProfile', '-NonInteractive', '-Command', command],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert 'fixture-secret' not in result.stdout
+    assert result.stdout.count('<redacted>') == 2

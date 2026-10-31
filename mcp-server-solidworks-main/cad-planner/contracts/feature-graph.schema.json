@@ -33,7 +33,8 @@
     "handedness: sketch_x x sketch_y = +normal on all three (right-handed): front +X x +Y = +Z, top +X x -Z = +Y, right -Z x +Y = +X",
     "origin: the sketch origin IS the model origin on every datum (no in-plane shift), and an offset plane keeps the SAME xdir/ydir — the offset moves the plane along the normal, it never rotates the 2-D frame",
     "independent: offset moves the PLANE only; reversed flips the GROWTH direction only — a reversed probe kept its twin's in-plane extents, and an offset probe kept growing toward +normal",
-    "negative offset: d < 0 lands the plane on the -normal side (front d=-0.012 -> pad Z in [-0.012, -0.008]) and the blind boss still grows toward +normal from there"
+    "negative offset: d < 0 lands the plane on the -normal side (front d=-0.012 -> pad Z in [-0.012, -0.008]) and the blind boss still grows toward +normal from there",
+    "Face preference changes support only: missing sketch.frame declares the canonical datum/offset frame, and coordinates are mapped into create_sketch measured axes; no implicit mirror is allowed."
    ],
    "_why_it_matters": "The frame is what makes a recorded 2-D contour replayable: a sketch's coordinates are along these axes, so the same contour on 'top' is NOT the same shape on 'front' (top's +y runs toward -Z). For the reverse path this is the rule that turns a drawing's front view into model coordinates, and it is why extrude.reversed's '+normal' list is Front->+Z, Top->+Y, Right->+X."
   },
@@ -420,7 +421,7 @@
    "radius": "number (optional, MODE A only — bend radius in meters; OMITTED = the sheet's default radius)",
    "position": "string (optional, MODE A only — 'material_inside' (tool default) | 'material_outside' | 'bend_outside' | 'centerline' | 'bend_sharp'; replay the recipe edge_flange block's `position` verbatim — 4-1's Edge-Flange1 is bend_outside)",
    "flip": "bool opt, dflt false — MODE A only: InsertSketchForEdgeFlange's FlipDir",
-   "frame": "{ origin, xdir, ydir } — the ORIGINAL profile sketch's frame (REQUIRED in mode A, ABSENT in mode B)",
+   "frame": "{ origin, xdir, ydir } — the ORIGINAL profile sketch's frame (REQUIRED in mode A, ABSENT in mode B) For datum/offset without frame the canonical datum_frame is the declaration. Explicit frames remain authoritative. Both declared and measured axes must be finite orthonormal unit vectors, on coincident planes within 1e-6 m; otherwise fail. Coordinate and signed extrusion direction are transformed into the measured frame.",
    "profile": "arr of profile primitives — the ORIGINAL profile sketch's segments, original 2D coords (line/arc/circle + construction flag)",
    "fixed": "{ near: [x,y,z], hint? } — a point (m) ON the sheet face, on the SIDE that stays put, in the PRE-flange geometry",
    "end": "str opt — 'blind' (default; needs depth) | 'through_all' | 'up_to_surface' (needs up_to) | 'mid_plane' (needs depth = TOTAL)"

@@ -38,6 +38,35 @@ import math
 from . import contours
 from . import thread_table
 
+
+def frame_error(frame):
+    """A rigid sketch frame has finite origin and orthonormal unit axes."""
+    if (not isinstance(frame, dict)
+            or not all(isinstance(frame.get(k), (list, tuple)) and len(frame[k]) == 3
+                       and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) for v in frame[k])
+                       for k in ("origin", "xdir", "ydir"))):
+        return "frame requires finite origin/xdir/ydir vectors of length 3"
+    x, y = frame["xdir"], frame["ydir"]
+    if (abs(sum(v*v for v in x)-1) > 1e-6
+            or abs(sum(v*v for v in y)-1) > 1e-6
+            or abs(sum(a*b for a, b in zip(x, y))) > 1e-6):
+        return "frame xdir/ydir must be orthogonal unit vectors"
+    return None
+
+
+def canonical_sketch_frame(ref):
+    """Declared coordinates for a datum sketch; never infer them from a chosen face."""
+    if ref.get("face") is not None:
+        return None
+    d = float(ref.get("offset") or 0)
+    origin, x, y = {
+        "front": ([0, 0, d], [1, 0, 0], [0, 1, 0]),
+        "top": ([0, d, 0], [1, 0, 0], [0, 0, -1]),
+        "right": ([d, 0, 0], [0, 0, -1], [0, 1, 0]),
+    }[ref.get("datum", "top")]
+    return {"origin": origin, "xdir": x, "ydir": y}
+
 DATUMS = frozenset(("front", "top", "right"))
 # Assembly sub-vocabulary (v0.6.0 — Phase B, ADR-047): component + mate. An assembly graph is
 # components first (tree order) then mates (creation order); part and assembly node types never
@@ -466,10 +495,9 @@ def validate(graph):
                     _check_profile_prim(prim, "%s.profile[%d]" % (label, j), errors)
             frame = node.get("frame")
             if frame is not None:
-                if (not isinstance(frame, dict)
-                        or not all(_is_point3(frame.get(k)) for k in ("origin", "xdir", "ydir"))):
-                    errors.append("%s: 'frame' must be {origin:[x,y,z], xdir:[x,y,z], ydir:[x,y,z]} "
-                                  "— the ORIGINAL sketch's frame from analyze_model(sketch)." % label)
+                problem = frame_error(frame)
+                if problem:
+                    errors.append("%s: %s" % (label, problem))
 
         elif ntype == "extrude":
             sk = node.get("sketch")

@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from models import utc_now
@@ -22,6 +23,43 @@ class JobStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+
+    @contextmanager
+    def recovery_chain(self):
+        """One unresolved modeling chain across jobs/processes; no reset API.
+
+        A process crash leaves an in-flight reservation, which must be reviewed, not retried.
+        The OS lock closes the check/reserve race between separate MCP server processes.
+        """
+        with self._lock:
+            lock_path = self.root / ".recovery-chain.lock"
+            with lock_path.open("a+b") as lock:
+                if lock.tell() == 0:
+                    lock.write(b"0")
+                    lock.flush()
+                lock.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    path = self.root / ".recovery-chain.json"
+                    data = json.loads(path.read_text(encoding="utf8")) if path.exists() else {"active": None, "history": []}
+                    yield data
+                    temp = path.with_suffix(".%s.tmp" % uuid.uuid4().hex)
+                    try:
+                        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf8")
+                        self._replace_with_retry(temp, path)
+                    finally:
+                        temp.unlink(missing_ok=True)
+                finally:
+                    lock.seek(0)
+                    if os.name == "nt":
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _path(self, job_id):
         if not isinstance(job_id, str) or not re.fullmatch(
