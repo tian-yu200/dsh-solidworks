@@ -200,7 +200,8 @@ def submit_feature_graph(
     A failed fresh graph may be rebuilt automatically only after recovery_status=discarded: the owned
     document is absent, earlier documents are unchanged and the job is unbound. Report
     operation_target separately from active_document_after_recovery. Never edit the latter.
-    L4 permits at most two repair executions after the initial attempt, persisted across jobs.
+    L4 permits at most two repair executions of one design after the initial attempt, persisted
+    across jobs.
     Resubmit the full graph with repair_evidence_json (error_code matching last failure,
     cause, readback, change); second repair needs new evidence, never identical replay.
     Lock node count/ordered (type,operation), material name/library, all non-placement
@@ -354,7 +355,9 @@ def confirm_action(
 def cancel_action(job_id: str, job_token: str, action_id: str) -> str:
     """Cancel a queued confirmation action without executing it.
 
-    Use this to cancel an unconfirmed Feature Graph and release its document-write guard.
+    Only when the user asks to cancel: it releases an unconfirmed Feature Graph's write guard.
+    A pending action you submitted yourself is confirmed (request_confirmation, confirm_action),
+    never cancelled on your own.
     Cancellation is final for that action; submit a new action if work is still wanted.
     """
     return _json_result(

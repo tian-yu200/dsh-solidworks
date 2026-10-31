@@ -8,9 +8,12 @@ Run two ways:
   - pytest:      pytest compiler/solidworks/pycompiler/tests/test_compiler.py
 """
 import copy
+import math
 import json
 import os
 import sys
+
+import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _COMPILER_ROOT = os.path.dirname(os.path.dirname(_HERE))  # compiler/solidworks/
@@ -2222,6 +2225,81 @@ def test_contours_non_finite_endpoints_never_pair():
     assert [(g["prim"], g["endpoint"]) for g in gaps] == [(1, "start"), (2, "start")]
     assert gaps[0]["x"] != gaps[0]["x"]          # nan x is surfaced, not silently paired
     assert gaps[1]["y"] == inf
+
+
+# 脚踏座 arm, 2026-11-01: profile[2]'s end sits 0.047 mm inside its start radius. SolidWorks drew
+# the arc from the start radius, the contour opened and three extrudes came back null; the same
+# sketch with the centre recomputed built (probe on the live service).
+_ARM_PROFILE = [
+    {"kind": "line", "x1": 0.003, "y1": 0.02, "x2": 0.022, "y2": 0.02},
+    {"kind": "arc", "cx": 0.022, "cy": 0.03, "x1": 0.022, "y1": 0.02, "x2": 0.03, "y2": 0.024, "dir": 1},
+    {"kind": "arc", "cx": 0.00484, "cy": 0.1086, "x1": 0.03, "y1": 0.024, "x2": 0.092, "y2": 0.095,
+     "dir": 1},
+    {"kind": "line", "x1": 0.092, "y1": 0.095, "x2": 0.074, "y2": 0.073},
+    {"kind": "arc", "cx": 0.0546, "cy": 0.0501, "x1": 0.074, "y1": 0.073, "x2": 0.025, "y2": 0.055,
+     "dir": 1},
+    {"kind": "line", "x1": 0.025, "y1": 0.055, "x2": 0.003, "y2": 0.055},
+    {"kind": "line", "x1": 0.003, "y1": 0.055, "x2": 0.003, "y2": 0.02},
+]
+
+
+def _arm_graph(profile):
+    return {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
+        {"id": "arm", "type": "sketch", "ref": {"datum": "front"}, "profile": profile},
+        {"id": "arm_boss", "type": "extrude", "sketch": "arm", "operation": "boss", "depth": 0.03,
+         "end": "mid_plane"}]}
+
+
+def test_true_arcs_puts_both_endpoints_on_the_circle_and_keeps_them():
+    trued, moves = _contours.true_arcs(_ARM_PROFILE)
+    assert [m["prim"] for m in moves] == [2, 4] and max(m["shift"] for m in moves) < 1e-4
+    for before, after in zip(_ARM_PROFILE, trued):
+        assert {k: after[k] for k in after if k not in ("cx", "cy")} == \
+               {k: before[k] for k in before if k not in ("cx", "cy")}
+        if after["kind"] == "arc":
+            r1, r2 = _contours.arc_radii(after)
+            assert abs(r1 - r2) < 1e-12
+    assert _ARM_PROFILE[2]["cx"] == 0.00484  # the IR node is never mutated
+    assert _contours.arc_radius_problems(_ARM_PROFILE) == []
+
+
+def test_lowering_emits_the_recentred_arc():
+    port = FakePort()
+    r = compile_and_run(port, _arm_graph(_ARM_PROFILE))
+    assert r.status == "COMPLETED", r.to_dict()
+    arcs = [p for t, p in port.calls if t == "add_sketch_entity" and p.get("entity_type") == "arc_center"]
+    for arc in arcs:
+        start = math.hypot(arc["x1"] - arc["cx"], arc["y1"] - arc["cy"])
+        assert abs(start - math.hypot(arc["x2"] - arc["cx"], arc["y2"] - arc["cy"])) < 1e-12
+    assert (arcs[1]["x2"], arcs[1]["y2"]) == (0.092, 0.095)
+    note = next(op["note"] for op in r.to_dict()["node_log"][0]["ops"] if op["tool"] == "create_sketch")
+    assert "2 arc centre(s) moved" in note
+
+
+def test_lowering_trues_an_arc_the_endpoint_weld_moved():
+    profile = copy.deepcopy(_ARM_PROFILE)
+    profile[2] = dict(profile[2], cx=0.004824317, cy=0.108591, x2=0.09206, y2=0.095)
+    profile[3] = dict(profile[3], x1=0.092, y1=0.095)
+    profile[2]["x1"], profile[2]["y1"] = 0.03, 0.024
+    port = FakePort()
+    assert compile_and_run(port, _arm_graph(profile)).status == "COMPLETED"
+    arc = [p for t, p in port.calls if t == "add_sketch_entity" and p.get("entity_type") == "arc_center"][1]
+    assert abs(math.hypot(arc["x1"] - arc["cx"], arc["y1"] - arc["cy"])
+               - math.hypot(arc["x2"] - arc["cx"], arc["y2"] - arc["cy"])) < 1e-12
+
+
+@pytest.mark.parametrize("change, phrase", [
+    ({"cx": 0.00384}, "end point is not on its circle"),
+    ({"cx": 0.03, "cy": 0.024}, "endpoint on its centre"),
+])
+def test_an_arc_off_its_circle_fails_before_any_call(change, phrase):
+    profile = copy.deepcopy(_ARM_PROFILE)
+    profile[2].update(change)
+    port = FakePort()
+    r = compile_and_run(port, _arm_graph(profile))
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED"
+    assert phrase in r.error["message"] and "profile[2]" in r.error["message"]
+    assert port.calls == []
 
 
 def test_closure_message_lists_every_consumer_and_counts_suppressed_gaps():

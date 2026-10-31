@@ -131,7 +131,8 @@ def lower_sketch(node, face_index=None):
     anything still open, so the weld only closes micron-level arithmetic drift. The weld count
     rides the create_sketch op's note (visible in the node_log)."""
     profile, welds = contours.weld_profile(node.get("profile") or [])
-    weld_note = _weld_note(welds)
+    profile, arcs = contours.true_arcs(profile)
+    weld_note = _weld_note(welds, arcs)
     offset = _offset(node)
     ops = []
     if face_index is not None:
@@ -154,10 +155,14 @@ def lower_sketch(node, face_index=None):
     return ops
 
 
-def _weld_note(welds):
-    if not welds:
-        return ""
-    return " (%d endpoint(s) welded within %g m)" % (len(welds), contours.CONTOUR_WELD_TOL)
+def _weld_note(welds, arcs=()):
+    note = ""
+    if welds:
+        note += " (%d endpoint(s) welded within %g m)" % (len(welds), contours.CONTOUR_WELD_TOL)
+    if arcs:
+        note += " (%d arc centre(s) moved onto both endpoints' circle, max %.3g m)" % (
+            len(arcs), max(a["shift"] for a in arcs))
+    return note
 
 
 def _profile_op(prim):
@@ -545,13 +550,14 @@ def lower_edge_flange(node, edge_index):
                    "edge flange (simple): length %g on edge #%d"
                    % (float(node["length"]), int(edge_index)))]
     profile, welds = contours.weld_profile(node.get("profile") or [])
+    profile, arcs = contours.true_arcs(profile)
     gen = {"feature_type": "edge_flange_sketch", "edge_index": int(edge_index),
            "angle": angle_deg}
     if node.get("flip") is True:
         gen["flip"] = True
     ops = [Op("sheet_metal_feature", gen,
               "edge flange: generate+clear the profile sketch on edge #%d%s"
-              % (int(edge_index), _weld_note(welds)))]
+              % (int(edge_index), _weld_note(welds, arcs)))]
     for prim in profile:
         ops.extend(_profile_ops(prim))
     fin = {"feature_type": "edge_flange_finish", "edge_index": int(edge_index),

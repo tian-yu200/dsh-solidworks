@@ -228,6 +228,14 @@ def test_reversed_and_malformed_regions_are_rejected(intake_root, sheet):
             intake.read_region(str(sheet), bad)
 
 
+def test_a_view_label_in_front_of_the_box_is_dropped():
+    assert intake.parse_region("主视/侧面轮廓及尺寸：60,45,500,610", 1293, 909) == (
+        (60, 45, 500, 610), "box", "60,45,500,610")
+    assert intake.parse_region("top view: 700,110,1065,475", 1293, 909)[0] == (700, 110, 1065, 475)
+    with pytest.raises(RuntimeError, match="INVALID_REGION"):
+        intake.parse_region("front/profile + dimensions", 1293, 909)
+
+
 def test_a_region_with_no_area_is_rejected(intake_root, sheet):
     with pytest.raises(RuntimeError, match="REGION_TOO_SMALL"):
         intake.read_region(str(sheet), "0,0,4,4")

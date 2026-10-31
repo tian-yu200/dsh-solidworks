@@ -33,7 +33,8 @@ from policy import (
 )
 from references import page_reference, read_reference
 from settings import BACKUP_ROOT
-from repair_policy import admit as admit_repair, repair_evidence, design_contract, graph_fingerprints
+from repair_policy import (admit as admit_repair, repair_evidence, design_contract, dimensions_equal,
+                           graph_fingerprints)
 
 
 # Who brought the job's document into SolidWorks. finish_job may only auto-close a document
@@ -393,8 +394,31 @@ class CadOrchestrator:
                     ledger["blocked_documents"][current_key] = record
 
 
+    @staticmethod
+    def _retire_foreign_chain(job, kind, payload, ledger):
+        """Archive a finished failure chain that another job left behind for a different part.
+
+        The chain is cross-job on purpose: a new job must not reset the repair budget of the SAME
+        design. But a cleanly discarded failure on one drawing made the next drawing's first build
+        (another session, another part) wait for a "design changed" confirmation, which models
+        then cancelled (2026-11-01). Nothing of the old chain is left open — its last attempt was
+        discarded — so a different design from a different job starts its own chain.
+        """
+        chain = ledger.get("active")
+        attempts = (chain or {}).get("attempts") or []
+        if (not attempts or attempts[-1].get("recovery_status") != "discarded"
+                or any(a.get("job_id") == job["job_id"] for a in attempts)):
+            return
+        if (kind == "feature_graph" and payload.get("fresh_document") and chain.get("design_contract") is not None
+                and dimensions_equal(chain["design_contract"], design_contract(payload["graph"]))):
+            return
+        chain.update(closed_by="new_job", closed_reason="另一个任务的新零件", closed_at=utc_now())
+        ledger.setdefault("history", []).append(chain)
+        ledger["active"] = None
+
     def _recovery_reasons(self, job, kind, payload, ledger, inventory):
         self._prune_document_blocks(ledger, inventory)
+        self._retire_foreign_chain(job, kind, payload, ledger)
         identity = self._recovery_identity(job, inventory)
         key = self._document_block_key(identity)
         reasons = []

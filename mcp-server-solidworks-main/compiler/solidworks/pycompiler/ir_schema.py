@@ -1112,6 +1112,27 @@ def _check_contour_closure(nodes):
         if not isinstance(profile, list):
             continue  # shape errors already reported in the per-node pass
         consumers = "/".join(consumer_of[key])
+        # SolidWorks draws an arc from its START radius, so an end point off that circle opens
+        # the contour mid-build (EXTRUSION_FAILED). Within the weld band lowering recentres the
+        # arc; anything larger is a wrong centre the planner must recompute.
+        arc_problems = contours.arc_radius_problems(profile)
+        for bad in arc_problems[:4]:
+            if bad["how"] == "no-radius":
+                errors.append(
+                    "nodes[%d] (%s): profile[%d] (arc) has an endpoint on its centre (radii %.4f / "
+                    "%.4f mm) — an arc needs cx,cy at its radius from BOTH endpoints."
+                    % (pos, label, bad["prim"], bad["r1"] * 1000, bad["r2"] * 1000))
+            else:
+                errors.append(
+                    "nodes[%d] (%s): profile[%d] (arc) end point is not on its circle — radius "
+                    "%.4f mm at the start, %.4f mm at the end. SolidWorks draws the arc from the "
+                    "start radius, so the contour would open by %.4f mm. Recompute cx,cy so both "
+                    "endpoints are equidistant (a tangent arc's centre lies on the normal through "
+                    "the tangent point); keep the shared endpoints."
+                    % (pos, label, bad["prim"], bad["r1"] * 1000, bad["r2"] * 1000,
+                       abs(bad["r1"] - bad["r2"]) * 1000))
+        if arc_problems:
+            continue  # its gap/collapse findings would only restate the bad centre
         # P1-1: the weld tolerance can collapse a genuinely thin feature (or a stray spike)
         # to a zero-length entity, which SolidWorks cannot build. Report it here rather than
         # letting the build fail mid-flight. Checked BEFORE the open-gap walk because a

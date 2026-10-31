@@ -196,6 +196,54 @@ def test_repair_needs_specific_new_evidence_and_unchanged_context(cad_env):
     assert "文档有变化" in pending["action_summary"]
 
 
+def test_a_new_job_for_another_part_is_not_held_by_an_old_discarded_chain(cad_env):
+    # 2026-11-01: a discarded failure on one drawing made the NEXT drawing's first build (another
+    # session) wait for "设计有改动" — models cancelled it and no part came out.
+    fail_graph(cad_env)
+    assert submit(cad_env, GRAPH)["recovery_status"] == "discarded"
+    cad_env.backend.feature_graph_handler = None
+    other = copy.deepcopy(GRAPH)
+    other["nodes"][0]["profile"][0]["diameter"] = .05
+    job, token = cad_env.store.create("next-drawing", "another part", {})
+    built = submit(cad_env, other, "{}", job["job_id"], token)
+    assert built["status"] == "completed", built
+    with cad_env.store.recovery_chain() as ledger:
+        assert ledger["active"] is None
+        assert ledger["history"][-2]["closed_by"] == "new_job"
+        assert ledger["history"][-1]["closed_by"] == "completed"
+
+
+def test_an_old_chain_that_was_not_discarded_still_needs_the_user(cad_env):
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    with cad_env.store.recovery_chain() as ledger:
+        ledger["active"]["attempts"][-1]["recovery_status"] = "recovery_unverified"
+    other = copy.deepcopy(GRAPH)
+    other["nodes"][0]["profile"][0]["diameter"] = .05
+    job, token = cad_env.store.create("next-drawing", "another part", {})
+    assert submit(cad_env, other, "{}", job["job_id"], token)["status"] == "pending_confirmation"
+
+
+def test_evidence_after_a_validation_failure_is_not_a_confirmation(cad_env):
+    # The first graph failed validation (nothing ran, no chain); the fix arrives with evidence.
+    cad_env.backend.feature_graph_handler = None
+    cited = json.dumps({"error_code": "VALIDATION_FAILED", "cause": "rounded_rect radius at the limit",
+                        "readback": "compiler rejected node before execution", "change": "slot primitive"})
+    assert submit(cad_env, GRAPH, cited)["status"] == "completed"
+
+
+def test_a_repair_may_cite_the_validation_failure_it_fixed_between_attempts(cad_env):
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    fixed = copy.deepcopy(GRAPH)
+    fixed["nodes"][0]["frame"] = FRAME
+    cited = json.dumps({"error_code": "VALIDATION_FAILED", "cause": "selector front unsupported",
+                        "readback": "previous build failed at the boss", "change": "declare the frame"})
+    repaired = submit(cad_env, fixed, cited)
+    assert repaired["status"] != "pending_confirmation", repaired
+    assert repaired["repair_attempts_used"] == 1
+
+
 def test_large_fresh_repair_needs_no_batch_confirmation_but_still_counts(cad_env):
     # User decision 2026-10-31: plan approval authorizes a fresh build, so a graph over ten nodes
     # runs at once. The repair budget and the user confirmation for inadmissible changes remain.

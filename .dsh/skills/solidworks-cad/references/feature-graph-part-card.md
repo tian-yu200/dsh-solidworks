@@ -21,7 +21,8 @@ Common nodes (required fields shown; consult schema for other end conditions):
 - box: width, depth, height >0; optional datum ref (default top). Centered footprint.
 - sketch: ref plus profile array. rectangle {kind,width,height,cx?,cy?}; circle
   {kind,diameter,cx?,cy?}; or lines {kind:"line",x1,y1,x2,y2} and arcs
-  {kind:"arc",cx,cy,x1,y1,x2,y2,dir:1|-1}. Exact shared endpoints form a CLOSED
+  {kind:"arc",cx,cy,x1,y1,x2,y2,dir:1|-1}; cx,cy equidistant from BOTH endpoints
+  (SolidWorks takes the start radius). Exact shared endpoints form a CLOSED
   chain before extrusion; construction:true is scaffolding, not the solid contour.
 - extrude: sketch:"immediately_preceding_sketch_id", operation:"boss"|"cut",
   depth positive (blind default). end:"through_all" for a through cut; end:"mid_plane"
@@ -63,7 +64,7 @@ warnings. Check that feature's location, depth and direction in readback AND all
 Only discarded permits AUTOMATIC rebuilding: owned document absent, old documents unchanged,
 Undo released, job unbound.
 Report operation_target separately from active_document_after_recovery; never write the latter.
-Initial execution plus at most 2 repairs is persisted across jobs. No reset, renumbering,
+Initial execution plus at most 2 repairs of one design is persisted across jobs. No reset, renumbering,
 identical replay or split graphs. Supply repair_evidence_json (error_code matching the last
 failure, cause, readback, change); the second repair needs new evidence.
 

@@ -25,7 +25,7 @@ result is compact single-line JSON. `start_job` returns `job_id` and
 | `save_or_export` | Save, export, batch export, or close through the safety policy. |
 | `request_confirmation` | Refresh one-time confirmation data for a pending high-risk action. |
 | `confirm_action` | Execute exactly one action after fresh, explicit user approval. |
-| `cancel_action` | Cancel a queued confirmation action without executing it; use this to release a pending Feature Graph. |
+| `cancel_action` | Cancel a queued confirmation action without executing it — only when the user asks to cancel. |
 | `finish_job` | Run final objective verification and close the authenticated job. |
 | `read_drawing_text` | Optional OCR candidate table with positions; directly view the original drawing first. |
 | `read_drawing_region` | Zoom part of a drawing image (grid cell or pixel box) so small dimensions can be read; read-only, needs no job and touches no CAD. |
@@ -495,7 +495,7 @@ IDs with the plan. On match, tick covered todos with short status lines; do not
 re-present the plan. On mismatch, stop mutation,
 use `L4`, set `REPLAN_REQUIRED`, log the smallest mismatch and root cause, revise
 the plan/version and report the repair under the approved scope.
-After `discarded`, L4 permits at most 2 complete repair executions, persisted across jobs.
+After `discarded`, L4 permits at most 2 complete repair executions of one design, persisted across jobs.
 See feature_graph_part_card recovery/L4: lock all dimensions/end types, ordered feature
 sequence, materials and intrinsic sketch shape; placement/reversed/frame may change.
 No identical replay, reset, renumbering or splitting; supply specific new repair evidence.

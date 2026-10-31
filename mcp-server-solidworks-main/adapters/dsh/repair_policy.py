@@ -207,10 +207,16 @@ def repair_evidence(raw):
     return evidence
 
 
+# Rejected before anything runs, so it never reaches the chain; a model that fixes one between two
+# executed attempts cites it, and that citation is as specific as the executed error's.
+PRE_EXECUTION_CODES = {"VALIDATION_FAILED"}
+
+
 def admit(chain,graph,evidence):
     design,representation=graph_fingerprints(graph)
     if not chain:
-        if evidence:raise RuntimeError("REPAIR_NO_PREDECESSOR: 没有可关联的上次失败，需确认开始新执行")
+        # Evidence for a graph that never executed (it failed validation) has nothing to repair:
+        # this is simply the first execution (2026-11-01: it used to stop for a confirmation).
         return design,representation
     if not chain.get("attempts"):
         raise RuntimeError("REPAIR_INCOMPLETE_CHAIN: 上次执行账本不完整，需用户确认后开始新执行")
@@ -227,7 +233,7 @@ def admit(chain,graph,evidence):
     if any(a.get("representation")==representation for a in chain["attempts"]):
         raise RuntimeError("REPAIR_IDENTICAL_REPLAY: 原样重放不属于自动修复，需用户确认")
     if (any(not isinstance(evidence.get(k),str) or not evidence[k].strip() for k in ("error_code","cause","readback","change"))
-            or evidence["error_code"] != last.get("error_code")):
+            or evidence["error_code"] not in {last.get("error_code")} | PRE_EXECUTION_CODES):
         raise RuntimeError("REPAIR_EVIDENCE_REQUIRED: 修复证据须完整且对应上次错误")
     digest=payload_hash(evidence)
     if any(a.get("evidence_hash")==digest for a in chain["attempts"]):

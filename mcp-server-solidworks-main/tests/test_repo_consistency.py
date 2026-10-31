@@ -230,6 +230,14 @@ def test_persona_merges_reading_plan_and_all_missing_dimensions_once():
     # 2026-10-31 approve-then-build: preparation before the question, submission right after it.
     for token in ("同一步里并行发出", "必须在提问之前", "下一个调用必须是submit_feature_graph(fresh_document=true)", "不读参考资料", "不重写计划或todo", "不再次确认", "不结束本轮", "新建零件不需要批量确认", "不许提供“示意模型", "按整个视图框选", "不要用网格单元格", "按工程图惯例直接采用", "写出你的解读作为推荐", "看图后先定难度", "“简单图/复杂图”就按用户的", "边内部任意一点", "PLANNED_FEATURES_MISSING", "拆出去的每个节点都必须补回", "save_or_export(save)另存为工作目录下的新文件", "计划里写出预期包络和体积", "不问用户、不结束本轮", "紧接着调用confirm_action", "不要在聊天里让用户打字确认", "上一个建错的新零件留着不动"):
         assert token in flat, token
+    # 2026-11-01 runs with no part: an approved recommendation was answered with BLOCKED, an empty
+    # "提供数值" option stalled a turn, a model cancelled its own pending build, schema paging cost
+    # minutes before the question.
+    for token in ("推荐值就是USER值，直接建模", "不得出现“提供数值”", "不得再报BLOCKED", "按图上数字建",
+                  "不得对自己提交的待确认操作调用cancel_action", "不分页通读feature_graph_schema",
+                  "同一设计由服务端跨job计数", "不要只挪位置"):
+        assert token in flat, token
+    assert "“接受/继续”只是批准" not in text
     assert "最多再补一次" not in text and "同一区域已读过再读会被拒绝" not in text
     assert "在回复中重新给出计划" not in text
 

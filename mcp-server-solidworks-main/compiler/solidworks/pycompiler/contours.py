@@ -159,6 +159,72 @@ def weld_profile(profile, tol=CONTOUR_WELD_TOL):
     return welded, welds
 
 
+def arc_radii(prim):
+    """(start radius, end radius) of an arc primitive, or None when a coordinate is unusable."""
+    vals = [_as_float(prim.get(k)) for k in ("cx", "cy", "x1", "y1", "x2", "y2")]
+    if None in vals:
+        return None
+    cx, cy, x1, y1, x2, y2 = vals
+    return math.hypot(x1 - cx, y1 - cy), math.hypot(x2 - cx, y2 - cy)
+
+
+def true_arcs(profile, tol=CONTOUR_WELD_TOL):
+    """Put every arc's centre where BOTH endpoints are on its circle.
+
+    SolidWorks' CreateArc takes the radius from the START point and only the direction from the
+    end, so an end point off that circle is drawn somewhere else and the contour opens there
+    (脚踏座, 2026-11-01: an R88 arc whose end sat 0.047 mm inside its start radius failed three
+    extrudes in a row; the same sketch with the centre corrected built). Hand-computed tangent
+    chains drift like this, and the endpoint weld above can add up to `tol` more.
+
+    An arc whose two radii differ by at most `tol` keeps both endpoints (they are the shared
+    contour vertices) and moves its centre onto the chord's perpendicular bisector at the mean
+    radius, on the side of the original centre, so the sweep sense is unchanged. Larger
+    mismatches are left alone for validation to reject (arc_radius_problems).
+    Returns (deep copy, [{prim, shift}]) — the IR node is never mutated.
+    """
+    out = copy.deepcopy(profile)
+    moves = []
+    for i, prim in enumerate(out):
+        if not isinstance(prim, dict) or prim.get("kind") != "arc":
+            continue
+        radii = arc_radii(prim)
+        if radii is None or abs(radii[0] - radii[1]) <= 1e-12 or abs(radii[0] - radii[1]) > tol:
+            continue
+        cx, cy = float(prim["cx"]), float(prim["cy"])
+        x1, y1, x2, y2 = (float(prim[k]) for k in ("x1", "y1", "x2", "y2"))
+        half = math.hypot(x2 - x1, y2 - y1) / 2.0
+        if half <= 1e-12:
+            continue  # a full circle: start and end are one point, already on its circle
+        radius = max(sum(radii) / 2.0, half)
+        rise = math.sqrt(radius * radius - half * half)
+        mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        nx, ny = -(y2 - y1) / (2.0 * half), (x2 - x1) / (2.0 * half)
+        centre = min(((mx + nx * rise, my + ny * rise), (mx - nx * rise, my - ny * rise)),
+                     key=lambda c: math.hypot(c[0] - cx, c[1] - cy))
+        prim["cx"], prim["cy"] = centre
+        moves.append({"prim": i, "shift": math.hypot(centre[0] - cx, centre[1] - cy)})
+    return out, moves
+
+
+def arc_radius_problems(profile, tol=CONTOUR_WELD_TOL):
+    """Arcs true_arcs cannot repair, judged after the endpoint weld: a start or end point on the
+    centre (no radius), or radii further apart than `tol`. [{prim, r1, r2, how}]."""
+    welded, _ = weld_profile(profile, tol)
+    out = []
+    for i, prim in enumerate(welded):
+        if not isinstance(prim, dict) or prim.get("kind") != "arc" or prim.get("construction") is True:
+            continue
+        radii = arc_radii(prim)
+        if radii is None:
+            continue
+        if min(radii) <= tol:
+            out.append({"prim": i, "r1": radii[0], "r2": radii[1], "how": "no-radius"})
+        elif abs(radii[0] - radii[1]) > tol:
+            out.append({"prim": i, "r1": radii[0], "r2": radii[1], "how": "off-circle"})
+    return out
+
+
 def _spline_points(prim):
     """The flat through-point list as [(x, y)], or [] when malformed/non-finite."""
     pts = prim.get("points")

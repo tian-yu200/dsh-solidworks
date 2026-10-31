@@ -54,6 +54,9 @@ _CELL_RE = re.compile(r"^([A-Ha-h])([1-9][0-9]?)$")
 # outside the image, and that answer (REGION_OUT_OF_IMAGE) is more useful than "not a box".
 _BOX_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*"
                      r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
+# Models name the view in front of the box ("主视/侧面：60,45,500,610", 2026-11-01, twice):
+# the box after the last colon is what they meant, so the label never costs a whole step.
+_LABEL_SEP_RE = re.compile(r"[:：]")
 
 
 def _fail(code, message):
@@ -132,6 +135,8 @@ def parse_region(region, width, height):
         return None, "overview", None
     if _CELL_RE.match(text):
         return _cell_box(text, width, height), "cell", text.upper()
+    if _LABEL_SEP_RE.search(text) and _BOX_RE.match(_LABEL_SEP_RE.split(text)[-1]):
+        text = _LABEL_SEP_RE.split(text)[-1].strip()
     match = _BOX_RE.match(text)
     if match:
         x0, y0, x1, y1 = (float(value) for value in match.groups())
