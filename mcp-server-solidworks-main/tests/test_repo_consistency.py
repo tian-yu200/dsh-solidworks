@@ -228,7 +228,7 @@ def test_persona_merges_reading_plan_and_all_missing_dimensions_once():
     for token in ("EXPLICIT", "DERIVED", "USER", "UNKNOWN", "直接看原图", "OCR与裁图按需", "全部真正缺失的尺寸", "只问一次ask_user_question", "答案引出新矛盾", "不设题数上限", "禁止按像素比例", "接受/继续", "小圆角"):
         assert token in flat, token
     # 2026-10-31 approve-then-build: preparation before the question, submission right after it.
-    for token in ("同一步里并行发出", "必须在提问之前", "下一个调用必须是submit_feature_graph(fresh_document=true)", "不读参考资料", "不重写计划或todo", "不再次确认", "不结束本轮", "新建零件不需要批量确认", "不许提供“示意模型", "按整个视图框选", "不要用网格单元格", "按工程图惯例直接采用", "写出你的解读作为推荐", "看图后先定难度", "“简单图/复杂图”就按用户的", "边内部任意一点", "PLANNED_FEATURES_MISSING", "拆出去的每个节点都必须补回", "save_or_export(save)另存为工作目录下的新文件", "计划里写出预期包络和体积", "不问用户、不结束本轮", "紧接着调用confirm_action", "不要在聊天里让用户打字确认", "上一个建错的新零件留着不动"):
+    for token in ("同一步里并行发出", "必须在提问之前", "下一个调用必须是submit_feature_graph(fresh_document=true)", "不读参考资料", "不重写计划或todo", "不再次确认", "不结束本轮", "新建零件不需要批量确认", "不许提供“示意模型", "按整个视图框选", "不要用网格单元格", "按工程图惯例直接采用", "写出你的解读作为推荐", "看图后先定难度", "“简单图/复杂图”就按用户的", "边内部任意一点", "PLANNED_FEATURES_MISSING", "拆出去的每个节点都必须补回", "save_or_export(save)另存为工作目录下的新文件", "“总包络长×宽×高=a×b×cmm”", "图的顶层带上expect", "服务端按expect核对", "但expect不得改","不问用户、不结束本轮", "紧接着调用confirm_action", "不要在聊天里让用户打字确认", "上一个建错的新零件留着不动"):
         assert token in flat, token
     # 2026-11-01 runs with no part: an approved recommendation was answered with BLOCKED, an empty
     # "提供数值" option stalled a turn, a model cancelled its own pending build, schema paging cost

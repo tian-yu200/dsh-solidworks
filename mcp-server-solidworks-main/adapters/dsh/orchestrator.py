@@ -317,8 +317,80 @@ class CadOrchestrator:
                 built[kind] = built.get(kind, 0) + 1
 
     @staticmethod
+    def _plan_check(graph, verification):
+        """The build's readback against graph.expect, or None when the graph states none.
+
+        2026-11-02 (脚踏座, d21731e7): the approved plan said 90×80×117 mm, the graph built
+        60×90×103 (a Ø60 seat for Ø38, a straight web for the R100/R30 arm), and the model
+        reported it verified. The envelope is the check: plans state it reliably (a36a476b's plan
+        93×157×90 against a built 94.07×157.57×90). Axes are compared sorted — a plan speaks in
+        length×width×height, not model axes — each within max(1 mm, 2%). Volume estimates are
+        rougher, so a volume miss beyond 2% is a warning, not a failure.
+        """
+        expect = graph.get("expect")
+        if not isinstance(expect, dict):
+            return None
+        readback = {}
+        for check in verification.get("deep_checks") or []:
+            for item in (check.get("cadState") or {}).get("features") or []:
+                if isinstance(item, str) and "=" in item:
+                    key, _, raw = item.partition("=")
+                    readback.setdefault(key.strip(), raw.strip())
+        built = None
+        try:
+            size = json.loads(readback.get("bbox_size") or "null")
+            if isinstance(size, list) and len(size) == 3:
+                built = sorted(round(float(v) * 1000, 3) for v in size)
+        except (TypeError, ValueError):
+            built = None
+        volume = None
+        try:
+            volume = float(readback["volume"].replace(",", ".")) * 1e9 if "volume" in readback else None
+        except ValueError:
+            volume = None
+
+        result = {"expected": expect, "bbox_ok": None, "volume_ok": None, "warnings": []}
+        wanted = expect.get("bbox_mm")
+        if isinstance(wanted, list) and len(wanted) == 3:
+            wanted = sorted(float(v) for v in wanted)
+            result.update(expected_bbox_mm=wanted, built_bbox_mm=built)
+            if built is None:
+                result["warnings"].append({
+                    "code": "PLAN_ENVELOPE_UNCHECKED",
+                    "message": "读回里没有包络（bbox_size），无法和计划核对：用 inspect_state(geometry) "
+                               "自己核对包络，核对前不得说已验证。"})
+            else:
+                misses = [round(b - w, 3) for w, b in zip(wanted, built)]
+                result["bbox_ok"] = all(abs(m) <= max(1.0, 0.02 * w) for m, w in zip(misses, wanted))
+                result["axis_misses_mm"] = misses
+                result["message"] = (
+                    "建出来的包络 %s mm 与批准计划 expect.bbox_mm %s mm %s（三边排序后逐边比较，容差 "
+                    "max(1 mm, 2%%)）。" % ("×".join("%g" % v for v in built), "×".join("%g" % v for v in wanted),
+                                       "一致" if result["bbox_ok"] else "不符"))
+                if not result["bbox_ok"]:
+                    result["message"] += (
+                        "图没有按计划建：对照计划逐个核对每个节点的尺寸、位置和方向，修正后"
+                        "重新提交整张图（repair_evidence_json.error_code=PLAN_MISMATCH；可以改尺寸和特征，"
+                        "expect 不变）。只有确认是计划本身算错了，才问用户改 expect。")
+        wanted_volume = expect.get("volume_mm3")
+        if isinstance(wanted_volume, (int, float)) and not isinstance(wanted_volume, bool) and volume:
+            delta = (volume - wanted_volume) / wanted_volume
+            result.update(expected_volume_mm3=wanted_volume, built_volume_mm3=round(volume, 1),
+                          volume_ok=abs(delta) <= 0.02)
+            if not result["volume_ok"]:
+                result["warnings"].append({
+                    "code": "PLAN_VOLUME_MISMATCH",
+                    "message": "体积 %.0f mm³ 与 expect.volume_mm3 %g 相差 %+.1f%%（容差 2%%）。先查原因："
+                               "漏建或多建的特征、凸/凹弧方向、深度和贯通；查明前不得说已验证。"
+                               % (volume, wanted_volume, delta * 100)})
+        if result["bbox_ok"] is False:
+            # Reached only for an edit into an existing document (a new one is discarded instead).
+            result["warnings"].append({"code": "PLAN_MISMATCH", "message": result["message"]})
+        return result
+
+    @staticmethod
     def _completeness_warnings(job, state):
-        warnings = []
+        warnings = list((job.get("plan_check") or {}).get("warnings") or [])
         planned = job.get("planned_feature_types") or {}
         built = job.get("built_feature_types") or {}
         missing = {kind: count - built.get(kind, 0) for kind, count in planned.items()
@@ -395,7 +467,16 @@ class CadOrchestrator:
 
 
     @staticmethod
-    def _retire_foreign_chain(job, kind, payload, ledger):
+    def _foreign_discarded_chain(job, ledger):
+        """The open chain when another job left it with its last attempt cleanly discarded."""
+        chain = ledger.get("active")
+        attempts = (chain or {}).get("attempts") or []
+        if (attempts and attempts[-1].get("recovery_status") == "discarded"
+                and not any(a.get("job_id") == job["job_id"] for a in attempts)):
+            return chain
+        return None
+
+    def _retire_foreign_chain(self, job, kind, payload, ledger):
         """Archive a finished failure chain that another job left behind for a different part.
 
         The chain is cross-job on purpose: a new job must not reset the repair budget of the SAME
@@ -403,13 +484,14 @@ class CadOrchestrator:
         (another session, another part) wait for a "design changed" confirmation, which models
         then cancelled (2026-11-01). Nothing of the old chain is left open — its last attempt was
         discarded — so a different design from a different job starts its own chain.
+        Only a fresh build of a different design retires it. Anything else from that job (an
+        edit, a save) is not held for it (_recovery_reasons) and leaves its budget in place, so
+        a later rebuild of the same design still counts against it.
         """
-        chain = ledger.get("active")
-        attempts = (chain or {}).get("attempts") or []
-        if (not attempts or attempts[-1].get("recovery_status") != "discarded"
-                or any(a.get("job_id") == job["job_id"] for a in attempts)):
+        chain = self._foreign_discarded_chain(job, ledger)
+        if chain is None or kind != "feature_graph" or not payload.get("fresh_document"):
             return
-        if (kind == "feature_graph" and payload.get("fresh_document") and chain.get("design_contract") is not None
+        if (chain.get("design_contract") is not None
                 and dimensions_equal(chain["design_contract"], design_contract(payload["graph"]))):
             return
         chain.update(closed_by="new_job", closed_reason="另一个任务的新零件", closed_at=utc_now())
@@ -443,7 +525,7 @@ class CadOrchestrator:
                       or {d["document_id"] for d in baseline["documents"]} !=
                          {d["document_id"] for d in inventory["documents"]}):
                     reasons.append("打开的文档有变化，需确认在当前环境开始新执行")
-        elif chain:
+        elif chain and self._foreign_discarded_chain(job, ledger) is None:
             reasons.append("上次新建执行链尚未解决；本次不是完整自动重建，需确认另行执行")
         if inventory.get("undo_scope_active"):
             reasons.append("上次执行的 Undo scope 仍活动；确认后只新建，不关闭残留文档")
@@ -1555,7 +1637,10 @@ class CadOrchestrator:
                 **self._job_metadata(job),
             )
 
-    def feature_graph(self, job_id, job_token, graph_json, fresh_document=True, repair_evidence_json="{}"):
+    def feature_graph(self, job_id, job_token, graph_json, fresh_document=True, repair_evidence_json="{}",
+                      require_expect=False):
+        """require_expect: the DSH tool sets it — a new part must state the approved plan's envelope
+        (graph.expect.bbox_mm) so the build can be checked against it (_plan_check)."""
         graph = json.loads(graph_json)
         if not isinstance(graph, dict):
             raise ValueError("graph_json must decode to a JSON object")
@@ -1568,12 +1653,36 @@ class CadOrchestrator:
             if not payload["fresh_document"]:
                 self._require_bound_job(job, "submit_feature_graph with fresh_document=false")
                 self._require_document_write_access(job, "submit_feature_graph")
-            self._validate_feature_graph_before_confirmation(graph)
+            try:
+                if payload["fresh_document"] and require_expect and not (
+                        isinstance(graph.get("expect"), dict) and "bbox_mm" in graph["expect"]):
+                    raise RuntimeError(
+                        "VALIDATION_FAILED: a fresh_document graph must carry graph.expect.bbox_mm — the "
+                        "overall envelope in millimetres stated in the approved plan (plus volume_mm3 and "
+                        "features when the plan has them); the server checks the build against it.")
+                self._validate_feature_graph_before_confirmation(graph)
+            except RuntimeError:
+                if payload["fresh_document"]:
+                    self._note_validation_failure()
+                raise
             payload, risk, summary, _ = self._prepare_recovery_action(
                 job, "feature_graph", payload, risk, self._feature_graph_summary(job, graph, fresh_document))
             if risk == "batch":
                 return self._queue_confirmation(job, "feature_graph", payload, risk, summary)
             return self._execute_feature_graph(job, payload, risk)
+
+    @staticmethod
+    def _note_validation_failure():
+        """Record on the open chain's last attempt that a graph was rejected before running.
+
+        A repair may cite VALIDATION_FAILED instead of the executed error only when this
+        happened since that attempt; otherwise any repair could cite it and the evidence check
+        would compare nothing (repair_policy.admit).
+        """
+        with job_store.recovery_chain() as ledger:
+            attempts = (ledger.get("active") or {}).get("attempts") or []
+            if attempts:
+                attempts[-1]["validation_failures"] = attempts[-1].get("validation_failures", 0) + 1
 
     def _execute_feature_graph(self, job, payload, risk, confirmed=False):
         payload, risk, baseline, pending = self._authorize_recovery_execution(
@@ -1606,6 +1715,10 @@ class CadOrchestrator:
                            "representation": representation, "evidence_hash": payload_hash(payload.get("repair_evidence") or {}),
                            "evidence": payload.get("repair_evidence") or {}, "recovery_status": "in_flight"}
                 chain["attempts"].append(attempt)
+                # The lock follows the latest admitted graph: equal to the old one for an ordinary
+                # repair, and the corrected dimensions after a PLAN_MISMATCH repair (admit), which
+                # the next repair of this chain must then keep.
+                chain.update(design=design, design_contract=design_contract(payload["graph"]))
                 chain_id = chain["chain_id"]
                 job["repair_chain_id"] = chain_id
                 job["repair_attempts_used"] = len(chain["attempts"])-1
@@ -1911,6 +2024,37 @@ class CadOrchestrator:
                 else None,
             )
 
+        plan = self._plan_check(payload["graph"], verification)
+        if plan is not None:
+            verification["plan_check"] = plan
+            job["plan_check"] = plan
+            job_store.save(job)
+        if plan is not None and plan["bbox_ok"] is False and fresh_document:
+            # Built cleanly, but not the part the user approved: discarded like any failed
+            # verification, so the repair runs on a clean slate and counts against the budget.
+            verification["all_completed"] = False
+            job.pop("verification_stamp", None)
+            recovery_status, recovered_state, recovery = self._recover_transaction(
+                job, kind="feature_graph", previous_identity=previous_identity, newly_created=True)
+            return self._transaction_failure_response(
+                job,
+                kind="feature_graph",
+                phase="verification",
+                risk=risk,
+                error={"code": "PLAN_MISMATCH",
+                       "message": plan["message"] + "这个新零件已丢弃，修复从干净状态开始，计入 2 次修复预算。",
+                       "expected_bbox_mm": plan["expected_bbox_mm"],
+                       "built_bbox_mm": plan["built_bbox_mm"]},
+                verification=verification,
+                recovery_status=recovery_status,
+                recovery_event=recovery,
+                completed_steps=completed,
+                partial_state={"cad": recovered_state, "compiler": compiler},
+                target_state=recovered_state,
+                backup_path=backup_path,
+                created_identity=job.get("created_document_identity"),
+            )
+
         committed = backend.commit_transaction(transaction_name)
         if committed.get("status") != "COMPLETED":
             recovery_status, recovered_state, recovery = (
@@ -1955,9 +2099,8 @@ class CadOrchestrator:
         # A non-fatal compiler finding (today: MATERIAL_NOT_FOUND) — the geometry is committed and
         # the document just lacks the requested property. Emitted only when there IS one, and
         # never as `error`: a warning that reads as a failure invites a rollback of good work.
-        extras = {}
-        if compiler.get("warnings"):
-            extras["warnings"] = compiler["warnings"]
+        warnings = list(compiler.get("warnings") or []) + list((plan or {}).get("warnings") or [])
+        extras = {"warnings": warnings} if warnings else {}
         return envelope(
             status="completed",
             risk=risk,

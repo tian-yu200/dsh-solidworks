@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -232,16 +233,46 @@ def test_evidence_after_a_validation_failure_is_not_a_confirmation(cad_env):
     assert submit(cad_env, GRAPH, cited)["status"] == "completed"
 
 
+VALIDATION_CITED = json.dumps({"error_code": "VALIDATION_FAILED", "cause": "selector front unsupported",
+                               "readback": "previous build failed at the boss", "change": "declare the frame"})
+
+
 def test_a_repair_may_cite_the_validation_failure_it_fixed_between_attempts(cad_env):
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    with pytest.raises(RuntimeError, match="VALIDATION_FAILED"):
+        submit(cad_env, dict(GRAPH, units="millimeters"))
+    fixed = copy.deepcopy(GRAPH)
+    fixed["nodes"][0]["frame"] = FRAME
+    repaired = submit(cad_env, fixed, VALIDATION_CITED)
+    assert repaired["status"] != "pending_confirmation", repaired
+    assert repaired["repair_attempts_used"] == 1
+
+
+def test_citing_a_validation_failure_that_never_happened_is_not_evidence(cad_env):
     fail_graph(cad_env)
     submit(cad_env, GRAPH)
     fixed = copy.deepcopy(GRAPH)
     fixed["nodes"][0]["frame"] = FRAME
-    cited = json.dumps({"error_code": "VALIDATION_FAILED", "cause": "selector front unsupported",
-                        "readback": "previous build failed at the boss", "change": "declare the frame"})
-    repaired = submit(cad_env, fixed, cited)
-    assert repaired["status"] != "pending_confirmation", repaired
-    assert repaired["repair_attempts_used"] == 1
+    pending = submit(cad_env, fixed, VALIDATION_CITED)
+    assert pending["status"] == "pending_confirmation"
+    assert "修复证据须完整且对应上次错误" in pending["action_summary"]
+
+
+def test_another_jobs_edit_neither_waits_for_nor_resets_a_discarded_chain(cad_env):
+    fail_graph(cad_env)
+    assert submit(cad_env, GRAPH)["recovery_status"] == "discarded"
+    job, token = cad_env.store.create("another-job", "edit another part",
+                                      cad_env.orchestrator._identity(cad_env.backend.state))
+    job["document_write_allowed"] = True
+    cad_env.store.save(job)
+    edited = cad_env.orchestrator.document_edits("another-job", token,
+        json.dumps([{"tool": "modify_dimension", "params": {"name": "D1", "value": .01}}]))
+    assert edited["status"] != "pending_confirmation", edited
+    with cad_env.store.recovery_chain() as ledger:
+        assert ledger["active"] is not None and len(ledger["active"]["attempts"]) == 1
+    # The same design from that job is still a repair of the old chain: a replay is caught.
+    assert "原样重放" in submit(cad_env, GRAPH, evidence(), "another-job", token)["action_summary"]
 
 
 def test_large_fresh_repair_needs_no_batch_confirmation_but_still_counts(cad_env):
@@ -322,3 +353,109 @@ def test_existing_edit_failure_blocks_a_new_job_on_same_document(cad_env):
     assert "已有文档上次恢复未验证" in pending["action_summary"]
     assert len(cad_env.backend.calls) == calls
 
+
+
+# --- graph.expect: the build checked against the approved plan (2026-11-02, 脚踏座 d21731e7) ---
+
+PLANNED = dict(copy.deepcopy(GRAPH), expect={"bbox_mm": [90, 80, 117]})
+
+
+def readback(cad_env, size_m, volume_m3=None):
+    """analyze_model(mass_properties) answers with this envelope (and volume)."""
+    features = ["bbox_size=[%s]" % ",".join(str(v) for v in size_m)]
+    if volume_m3 is not None:
+        features.insert(0, "volume=%s" % volume_m3)
+
+    def handler(tool, params):
+        if tool == "analyze_model" and params.get("analysis_type") == "mass_properties":
+            return {"status": "COMPLETED", "stateVersion": cad_env.backend.state.get("stateVersion", 1),
+                    "cadState": {"features": features}, "error": None}
+        return None
+    cad_env.backend.call_handler = handler
+
+
+def plan_cited(number=1):
+    return json.dumps({"error_code": "PLAN_MISMATCH", "cause": "seat drawn Ø60 not the planned Ø38 %s" % number,
+                       "readback": "built 60x90x103 against planned 80x90x117",
+                       "change": "seat diameter back to the plan %s" % number})
+
+
+def test_a_build_that_misses_the_planned_envelope_is_discarded_as_plan_mismatch(cad_env):
+    readback(cad_env, [0.09, 0.103, 0.06], 1.28671e-4)
+    response = submit(cad_env, PLANNED)
+    assert response["status"] == "verification_failed", response
+    assert response["error"]["code"] == "PLAN_MISMATCH"
+    assert response["error"]["built_bbox_mm"] == [60, 90, 103]
+    assert response["error"]["expected_bbox_mm"] == [80, 90, 117]
+    assert response["recovery_status"] == "discarded" and response["created_document_discarded"] is True
+    assert response["automatic_retry_allowed"] is True
+    tools = [tool for tool, _ in cad_env.backend.calls]
+    assert "commit_undo_scope" not in tools and "close_document" in tools
+    with cad_env.store.recovery_chain() as ledger:
+        assert ledger["active"]["attempts"][-1]["error_code"] == "PLAN_MISMATCH"
+
+
+def test_a_plan_mismatch_repair_may_change_dimensions_but_not_the_plan(cad_env):
+    readback(cad_env, [0.09, 0.103, 0.06])
+    submit(cad_env, PLANNED)
+    moved_plan = copy.deepcopy(PLANNED)
+    moved_plan["nodes"][0]["profile"][0]["diameter"] = .038
+    moved_plan["expect"]["bbox_mm"] = [90, 103, 60]
+    pending = submit(cad_env, moved_plan, plan_cited())
+    assert pending["status"] == "pending_confirmation" and "expect" in pending["action_summary"]
+    cad_env.orchestrator.cancel_action("job-1", cad_env.token, pending["action_id"])
+    fixed = copy.deepcopy(PLANNED)
+    fixed["nodes"][0]["profile"][0]["diameter"] = .038
+    readback(cad_env, [0.117, 0.09, 0.08])
+    repaired = submit(cad_env, fixed, plan_cited())
+    assert repaired["status"] == "completed", repaired
+    assert repaired["repair_attempts_used"] == 1
+    assert repaired["verification"]["plan_check"]["bbox_ok"] is True
+
+
+def test_after_a_plan_mismatch_repair_the_corrected_dimensions_are_the_lock(cad_env):
+    readback(cad_env, [0.09, 0.103, 0.06])
+    submit(cad_env, PLANNED)
+    fixed = copy.deepcopy(PLANNED)
+    fixed["nodes"][0]["profile"][0]["diameter"] = .038
+    fail_graph(cad_env)
+    assert submit(cad_env, fixed, plan_cited())["repair_attempts_used"] == 1
+    # The next repair answers EXTRUSION_FAILED: only placement may change now, and going back to
+    # the mismatched Ø20 is a design change for the user, not a repair.
+    back = copy.deepcopy(PLANNED)
+    back["nodes"][0]["frame"] = FRAME
+    pending = submit(cad_env, back, evidence())
+    assert pending["status"] == "pending_confirmation" and "设计有改动" in pending["action_summary"]
+    cad_env.orchestrator.cancel_action("job-1", cad_env.token, pending["action_id"])
+    placed = copy.deepcopy(fixed)
+    placed["nodes"][0]["frame"] = FRAME
+    assert submit(cad_env, placed, evidence(2))["repair_attempts_used"] == 2
+
+
+def test_a_matching_envelope_completes_and_a_volume_miss_is_a_warning(cad_env):
+    # a36a476b: planned 93×157×90, built 94.069×157.568×90 — inside max(1 mm, 2%).
+    readback(cad_env, [0.094069, 0.157568, 0.09], 1.28671e-4)
+    graph = dict(copy.deepcopy(GRAPH), expect={"bbox_mm": [157, 90, 93], "volume_mm3": 100000})
+    response = submit(cad_env, graph)
+    assert response["status"] == "completed", response
+    plan = response["verification"]["plan_check"]
+    assert plan["bbox_ok"] is True and plan["volume_ok"] is False
+    assert [w["code"] for w in response["warnings"]] == ["PLAN_VOLUME_MISMATCH"]
+    assert "+28.7%" in response["warnings"][0]["message"]
+    finished = cad_env.orchestrator.finish_job("job-1", cad_env.token)
+    assert "PLAN_VOLUME_MISMATCH" in [w["code"] for w in finished.get("warnings", [])]
+
+
+def test_the_dsh_tool_requires_the_plan_envelope_on_a_new_part(cad_env):
+    calls = len(cad_env.backend.calls)
+    with pytest.raises(RuntimeError, match="VALIDATION_FAILED: a fresh_document graph must carry graph.expect.bbox_mm"):
+        cad_env.orchestrator.feature_graph("job-1", cad_env.token, json.dumps(GRAPH), True, "{}",
+                                           require_expect=True)
+    with pytest.raises(RuntimeError, match="graph has 0 fillet"):
+        cad_env.orchestrator.feature_graph(
+            "job-1", cad_env.token, json.dumps(dict(PLANNED, expect={"bbox_mm": [90, 80, 117],
+                                                                     "features": {"fillet": 1}})),
+            True, "{}", require_expect=True)
+    assert len(cad_env.backend.calls) == calls
+    server = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+    assert "require_expect=True" in server

@@ -240,8 +240,9 @@ def _compile_and_run(port, graph):
                     u, v, off = resolver.project_point_into_frame(measured, placement_at)
                     if abs(off) > resolver._PLANE_TOL:
                         raise FeatureError(
-                            "ref.at %s is %.6f m off the sketch plane — the point must lie ON "
-                            "the referenced face." % (list(placement_at), off),
+                            ("ref.at %s is %.6f m off the sketch plane — the point must lie ON "
+                             "the referenced face." % (list(placement_at), off))
+                            + resolver.HOLE_AXIS_HINT,
                             code="PLACEMENT_OFF_FACE", node_id=nid, node_type=ntype,
                             step=op.tool)
                     placement_uv = (u, v)
@@ -779,6 +780,14 @@ def _advance(resp, sv, nid, ntype, op):
         nv = resp.get("last_known_state_version")
         return nv if nv is not None else sv
     err = resp.get("error") or {}
-    raise FeatureError("low-level tool '%s' failed: %s" % (op.tool, err.get("message")),
-                       code=err.get("code") or "TOOL_FAILED",
+    message = "low-level tool '%s' failed: %s" % (op.tool, err.get("message"))
+    if err.get("code") == "EXTRUSION_FAILED" and (op.params or {}).get("feature_type") == "boss":
+        # 阀体 2026-11-02: a side boss sketched on the plane tangent to a cylinder shares only a
+        # line with it, so SolidWorks returns null. Said here, where the failure surfaces, it
+        # costs the happy path nothing.
+        message += (" A boss whose sketch plane only touches a curved face (tangent to a "
+                    "cylinder) has no overlapping material: sketch on a plane through the axis, "
+                    "or wherever the profile lies inside the existing solid, and extrude to the "
+                    "boss face — never a fixed inward offset.")
+    raise FeatureError(message, code=err.get("code") or "TOOL_FAILED",
                        node_id=nid, node_type=ntype, step=op.tool)

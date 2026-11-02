@@ -193,6 +193,13 @@ def submit_feature_graph(
 
     IR distances are meters and angles are radians. A fresh_document=true graph executes
     immediately at any size: the approved plan authorizes it and it creates its own document.
+    It must carry graph.expect = the approved plan's check values: {"bbox_mm": [a, b, c]
+    (overall envelope in MILLIMETRES, any axis order), "volume_mm3": n (omit if the plan has
+    none), "features": {"fillet": n, "chamfer": n} (minimum node counts the plan promises)}.
+    After the build the server compares the readback: an envelope axis off by more than
+    max(1 mm, 2%) fails with PLAN_MISMATCH and the new document is discarded — fix the graph
+    toward the plan (dimensions and features may change in that repair, expect may not);
+    a volume off by more than 2% returns a PLAN_VOLUME_MISMATCH warning to explain first.
     A graph over 10 nodes into an existing document returns pending_confirmation. While a graph is pending,
     document writes are refused with GRAPH_PENDING_CONFIRMATION until it is confirmed
     or cancelled with cancel_action.
@@ -207,7 +214,7 @@ def submit_feature_graph(
     Lock node count/ordered (type,operation), material name/library, all non-placement
     dimensions/specs/end types and intrinsic sketch shape (1e-9 m tolerance). Placement anchors, reversed,
     ref/datum/face/signed offset, frame and whole-sketch rigid motion/mirror may change.
-    Inadmissible, exhausted, context-changed, in_flight or unverified recovery requests user
+    After PLAN_MISMATCH only expect is locked. Inadmissible, exhausted, context-changed, in_flight or unverified recovery requests user
     confirmation; approval archives closed_by=user_override and starts a new first attempt
     at count 0, as one prompt. It does not close residual documents.
     recovery_unverified / rollback_failed prohibits AUTOMATIC retry. Undo is not yet verified.
@@ -219,7 +226,8 @@ def submit_feature_graph(
     """
     return _json_result(
         lambda: orchestrator.feature_graph(
-            job_id, job_token, graph_json, fresh_document, repair_evidence_json
+            job_id, job_token, graph_json, fresh_document, repair_evidence_json,
+            require_expect=True,
         )
     )
 

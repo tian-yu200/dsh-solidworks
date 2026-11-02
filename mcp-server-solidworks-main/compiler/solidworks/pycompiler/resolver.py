@@ -33,6 +33,13 @@ import math
 from .errors import FeatureError
 
 _UP = (0.0, 1.0, 0.0)   # SolidWorks default "up" axis (+Y). v0-exp binds 'top' to global +Y.
+# 脚踏座 2026-11-02: a bore on a boss's front face was written as a `hole` on 'top' (the only
+# selector), then only its third coordinate was moved — twice, until the build gave up. Say
+# where the axis goes and what to use instead, in the message the model reads.
+HOLE_AXIS_HINT = (" A hole on selector 'top' goes into the body's upward (+Y) face, so it runs "
+                  "along Y. A bore along X or Z (a front/side face, a boss end) is a sketch with a "
+                  "circle on that datum plane (signed offset) plus an extrude with operation 'cut'; "
+                  "that changes the feature sequence, so it takes one user confirmation.")
 _NORMAL_TOL = 0.9       # a face counts as "upward" when normal . up >= this
 _TIE_EPS = 1e-6         # two upward faces this close in height => ambiguous
 _PLANE_TOL = 1e-5       # anchor->plane distance for a face-anchor match (10x the 1µm grid)
@@ -398,10 +405,10 @@ def check_hole_on_face(at, face, diameter, node_id=None):
     off = abs(d[0] * n[0] + d[1] * n[1] + d[2] * n[2])
     if off > _PLANE_TOL:
         raise FeatureError(
-            "hole placement point %s is %.6g m OFF the referenced face's plane (tolerance "
-            "%g m). The point must lie ON the face — read analyze_model(faces) `point`/`normal` "
-            "for that face and move the third coordinate onto it."
-            % (list(at), off, _PLANE_TOL),
+            ("hole placement point %s is %.6g m OFF the referenced face's plane (tolerance "
+             "%g m). The point must lie ON the face — read analyze_model(faces) `point`/`normal` "
+             "for that face and move the third coordinate onto it."
+             % (list(at), off, _PLANE_TOL)) + HOLE_AXIS_HINT,
             code="PLACEMENT_OFF_FACE", node_id=node_id, step="check_hole_on_face")
 
 
@@ -739,6 +746,54 @@ def _on_edge_distances(port, state_version, points, node_id, step):
     return rows
 
 
+def _fmt3(p):
+    return "[%s]" % ", ".join("%.6g" % (round(float(v), 9) + 0.0) for v in p[:3])
+
+
+def _circle_point(edge, toward, away=False):
+    """The point of a full-circle edge nearest `toward` (or diametrically across from it)."""
+    c, n, r = edge["center"], edge["normal"], float(edge["radius"])
+    length = math.sqrt(sum(v * v for v in n[:3])) or 1.0
+    n = [v / length for v in n[:3]]
+    v = [toward[i] - c[i] for i in range(3)]
+    axial = sum(v[i] * n[i] for i in range(3))
+    u = [v[i] - axial * n[i] for i in range(3)]
+    size = math.sqrt(sum(x * x for x in u))
+    if size <= 1e-12:  # anchor on the axis: any radial direction will do
+        seed = [1.0, 0.0, 0.0] if abs(n[0]) < 0.9 else [0.0, 1.0, 0.0]
+        dot = sum(seed[i] * n[i] for i in range(3))
+        u = [seed[i] - dot * n[i] for i in range(3)]
+        size = math.sqrt(sum(x * x for x in u))
+    sign = -1.0 if away else 1.0
+    return [c[i] + sign * r * u[i] / size for i in range(3)]
+
+
+def _edge_label(i, edge, near, away=False):
+    """One readback edge as a model can re-anchor on it: what it is, and a point inside it.
+
+    2026-11-02 (脚踏座): three chamfer repairs in a row guessed at a rim from "nearest was 0.006 m
+    away" alone and spent the whole repair budget; the rim was on the other end of the boss.
+    """
+    if edge.get("kind") == "circle" and _point3(edge.get("center")) and _point3(edge.get("normal")) \
+            and isinstance(edge.get("radius"), (int, float)):
+        return "#%d circle R%.6g centre %s axis %s, use near %s" % (
+            i, edge["radius"], _fmt3(edge["center"]), _fmt3(edge["normal"]),
+            _fmt3(_circle_point(edge, near, away)))
+    a, b, m = edge.get("start"), edge.get("end"), edge.get("mid")
+    inside = m if _point3(m) else ([(a[k] + b[k]) / 2.0 for k in range(3)]
+                                   if _point3(a) and _point3(b) else None)
+    if _point3(a) and _point3(b) and inside is not None:
+        return "#%d edge %s to %s, use near %s" % (i, _fmt3(a), _fmt3(b), _fmt3(inside))
+    return "#%d edge, use near %s" % (i, _fmt3(inside)) if inside is not None else "#%d edge" % i
+
+
+def _edge_candidates(near, edges, ranked, away=False, limit=3):
+    """' Candidates: …' for an error message — the edges in `ranked` order, at most `limit`."""
+    rows = dict(edges)
+    labels = [_edge_label(i, rows[i], near, away) for i in ranked[:limit] if i in rows]
+    return (" Candidates: " + "; ".join(labels) + ".") if labels else ""
+
+
 def resolve_edges_by_anchor(port, state_version, anchors, node_id=None):
     """Edge anchors -> edge indices (for add_edge_feature edge_indices).
 
@@ -766,10 +821,13 @@ def resolve_edges_by_anchor(port, state_version, anchors, node_id=None):
         raise FeatureError("analyze_model(edges) reported no edge midpoints",
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
 
-    def on_edge_ambiguous(k, near, count):
+    def on_edge_ambiguous(k, near, matched):
+        # The point each candidate offers is on the far side of a circle from the anchor (the
+        # anchor sits where edges meet) and an edge's own midpoint otherwise.
         return FeatureError("edge anchor %d %s lies on %d edges within %g m — ambiguous; "
-                            "anchor an interior point of one edge, not a shared vertex"
-                            % (k, list(near), count, _EDGE_TOL),
+                            "anchor an interior point of one edge, not a shared vertex.%s"
+                            % (k, list(near), len(matched), _EDGE_TOL,
+                               _edge_candidates(near, edges, [i for _d, i in matched], away=True)),
                             code="REFERENCE_AMBIGUOUS", node_id=node_id, step=step)
 
     hits = {}      # anchor index -> edge index
@@ -778,14 +836,15 @@ def resolve_edges_by_anchor(port, state_version, anchors, node_id=None):
         near = anchor["near"]
         in_ball = [(d, i) for (i, m) in mids for d in (_dist3(near, m),) if d <= _EDGE_TOL]
         if len(in_ball) > 1:
-            raise FeatureError("edge anchor %d %s matched %d edge midpoints within %g m — ambiguous"
-                               % (k, list(near), len(in_ball), _EDGE_TOL),
+            raise FeatureError("edge anchor %d %s matched %d edge midpoints within %g m — ambiguous.%s"
+                               % (k, list(near), len(in_ball), _EDGE_TOL,
+                                  _edge_candidates(near, edges, [i for _d, i in in_ball], away=True)),
                                code="REFERENCE_AMBIGUOUS", node_id=node_id, step=step)
         if not in_ball:
             in_ball = [(d, i) for (i, e) in edges for d in (_edge_distance(near, e),)
                        if d is not None and d <= _EDGE_TOL]
             if len(in_ball) > 1:
-                raise on_edge_ambiguous(k, near, len(in_ball))
+                raise on_edge_ambiguous(k, near, in_ball)
         if in_ball:
             hits[k] = in_ball[0][1]
         else:
@@ -800,14 +859,19 @@ def resolve_edges_by_anchor(port, state_version, anchors, node_id=None):
             near = anchors[k]["near"]
             on_edge = [(row[j], i) for (i, row) in exact if row[j] is not None and row[j] <= _EDGE_TOL]
             if len(on_edge) > 1:
-                raise on_edge_ambiguous(k, near, len(on_edge))
+                raise on_edge_ambiguous(k, near, on_edge)
             if not on_edge:
-                distances = [_dist3(near, m) for (_i, m) in mids]
-                distances += [d for (_i, e) in edges for d in (_edge_distance(near, e),) if d is not None]
-                distances += [row[j] for (_i, row) in exact if row[j] is not None]
+                best = {}  # edge index -> the smallest distance any rule measured to it
+                for i, d in ([(i, _dist3(near, m)) for (i, m) in mids]
+                             + [(i, _edge_distance(near, e)) for (i, e) in edges]
+                             + [(i, row[j]) for (i, row) in exact]):
+                    if d is not None:
+                        best[i] = min(d, best.get(i, d))
+                ranked = sorted(best, key=best.get)
                 raise FeatureError("edge anchor %d %s lies on no edge and matched no edge midpoint "
-                                   "within %g m (nearest was %.6f m away)"
-                                   % (k, list(near), _EDGE_TOL, min(distances)),
+                                   "within %g m (nearest was %.6f m away).%s"
+                                   % (k, list(near), _EDGE_TOL, best[ranked[0]],
+                                      _edge_candidates(near, edges, ranked)),
                                    code="REFERENCE_UNRESOLVED", node_id=node_id, step=step)
             hits[k] = on_edge[0][1]
 

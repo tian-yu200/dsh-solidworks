@@ -8,6 +8,8 @@ Units: graph.units="meters"; all lengths m, all angles radians. Convert mm /1000
 Each node needs unique id and type; order is dependency/feature-tree order.
 ref is an OBJECT, never a string. Node IDs are graph IDs, not runtime face indices.
 Omit graph.material when unspecified. Save a new working-directory file; no overwrite.
+A new part REQUIRES graph.expect from the approved plan: bbox_mm:[a,b,c] (envelope, MM,
+any order), volume_mm3?, features?:{"fillet":n,"chamfer":n}. Off-plan build: PLAN_MISMATCH.
 
 Datum frames (sketch x,y; positive extrusion normal):
 front = +X,+Y; +Z. top = +X,-Z; +Y. right = -Z,+Y; +X.
@@ -27,18 +29,18 @@ Common nodes (required fields shown; consult schema for other end conditions):
 - extrude: sketch:"immediately_preceding_sketch_id", operation:"boss"|"cut",
   depth positive (blind default). end:"through_all" for a through cut; end:"mid_plane"
   uses depth as TOTAL thickness. reversed:true flips growth; it is not a plane offset.
-- hole: ref as above, diameter >0, depth:"through_all" or positive blind depth.
+- hole: +Y (top) face only; diameter >0, depth:"through_all"|blind. Side bore:
+  circle sketch + extrude cut.
 - fillet: radius >0, edges:[{near:[x,y,z]}]. near is any MODEL-space point inside the
   edge (a full circle: anywhere on it), never a shared vertex or arc center. Ambiguous
   or absent anchors fail. Add every drawing fillet/chamfer; never silently omit one.
 
-Complete example: 50 mm cube on top datum, blind side pocket, top-center through
-hole, then 1 mm round on the +X/+Y edge. All numbers here are example facts only.
-A fresh graph is submitted via submit_feature_graph(fresh_document=true); use job
-credentials and retain the normal server confirmation/verification procedures.
+Example (numbers are examples only): 50 mm cube, blind side pocket, top-center through
+hole, 1 mm round on the +X/+Y edge; submit_feature_graph(fresh_document=true).
 ```json
 {
   "schema_version":"0.8.0-draft","units":"meters",
+  "expect":{"bbox_mm":[50,50,50],"features":{"fillet":1}},
   "nodes":[
     {"id":"base","type":"box","ref":{"datum":"top"},"width":0.05,"depth":0.05,"height":0.05},
     {"id":"pocket","type":"sketch","ref":{"datum":"front","offset":0.025},"profile":[{"kind":"rectangle","width":0.01,"height":0.01,"cy":0.025}]},
@@ -49,9 +51,8 @@ credentials and retain the normal server confirmation/verification procedures.
 }
 ```
 
-Return statuses are not dimensional verification. Inspect rebuilt geometry and
-compare all supplied views; report unavailable checks honestly. Keep the complete
-feature list, EXPLICIT/DERIVED/USER/UNKNOWN sources, and the approved compact plan.
+A completed status is not dimensional verification: compare readback with all views,
+report unavailable checks honestly, keep EXPLICIT/DERIVED/USER/UNKNOWN sources.
 
 ## Execution recovery and L4
 
@@ -74,7 +75,8 @@ and each sketch's intrinsic shape, with 1e-9 m dimension tolerance. It allows pl
 ref (datum/face/signed offset), frame and ONE whole-sketch translation/rotation/mirror;
 node ids/names/descriptions may change. Do not change diameters, depths, radii, hole/thread
 specs, counts, spacing, angles, thickness, sketch lengths or omit features. Moving separate
-primitives independently is not a whole-sketch placement repair.
+primitives independently is not a whole-sketch placement repair. After PLAN_MISMATCH only
+expect is locked: change dimensions/features until the graph builds the approved plan.
 
 Inadmissible design/evidence, exhausted budget, context changes, in_flight or uncertain
 recovery returns pending_confirmation. Show the Chinese reason; request_confirmation/
@@ -84,5 +86,3 @@ A fresh-document graph needs no batch confirmation (plan approval authorizes it)
 an existing-document graph over 10 nodes does. Recovery needs at most ONE confirmation.
 Existing-document failures always report recovery_unverified and prohibit automatic retry;
 continuation also requires user confirmation. First save of the own part: no prompt.
-Document blocks use normalized saved path or unsaved stable document_id, never title/empty
-identity; absent instances retire automatically and explicit approval can release the target.

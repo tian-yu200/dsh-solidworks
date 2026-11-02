@@ -179,8 +179,11 @@ def true_arcs(profile, tol=CONTOUR_WELD_TOL):
 
     An arc whose two radii differ by at most `tol` keeps both endpoints (they are the shared
     contour vertices) and moves its centre onto the chord's perpendicular bisector at the mean
-    radius, on the side of the original centre, so the sweep sense is unchanged. Larger
-    mismatches are left alone for validation to reject (arc_radius_problems).
+    radius, on the side of the original centre, so the sweep sense is unchanged. The move is
+    itself capped at `tol`: on a shallow arc a tiny radius mismatch means a large centre move
+    (R100 over a 10 mm chord: 0.09 mm off → 0.9 mm), which would silently break concentricity
+    with a hole drawn at the original centre. Larger mismatches and larger moves are left alone
+    for validation to reject (arc_radius_problems).
     Returns (deep copy, [{prim, shift}]) — the IR node is never mutated.
     """
     out = copy.deepcopy(profile)
@@ -191,25 +194,35 @@ def true_arcs(profile, tol=CONTOUR_WELD_TOL):
         radii = arc_radii(prim)
         if radii is None or abs(radii[0] - radii[1]) <= 1e-12 or abs(radii[0] - radii[1]) > tol:
             continue
-        cx, cy = float(prim["cx"]), float(prim["cy"])
-        x1, y1, x2, y2 = (float(prim[k]) for k in ("x1", "y1", "x2", "y2"))
-        half = math.hypot(x2 - x1, y2 - y1) / 2.0
-        if half <= 1e-12:
-            continue  # a full circle: start and end are one point, already on its circle
-        radius = max(sum(radii) / 2.0, half)
-        rise = math.sqrt(radius * radius - half * half)
-        mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-        nx, ny = -(y2 - y1) / (2.0 * half), (x2 - x1) / (2.0 * half)
-        centre = min(((mx + nx * rise, my + ny * rise), (mx - nx * rise, my - ny * rise)),
-                     key=lambda c: math.hypot(c[0] - cx, c[1] - cy))
-        prim["cx"], prim["cy"] = centre
-        moves.append({"prim": i, "shift": math.hypot(centre[0] - cx, centre[1] - cy)})
+        trued = _trued_centre(prim, radii)
+        if trued is None or trued[1] > tol:
+            continue
+        prim["cx"], prim["cy"] = trued[0]
+        moves.append({"prim": i, "shift": trued[1]})
     return out, moves
+
+
+def _trued_centre(prim, radii):
+    """((cx, cy), shift) for true_arcs, or None for a full circle (start and end are one point,
+    already on its circle)."""
+    cx, cy = float(prim["cx"]), float(prim["cy"])
+    x1, y1, x2, y2 = (float(prim[k]) for k in ("x1", "y1", "x2", "y2"))
+    half = math.hypot(x2 - x1, y2 - y1) / 2.0
+    if half <= 1e-12:
+        return None
+    radius = max(sum(radii) / 2.0, half)
+    rise = math.sqrt(radius * radius - half * half)
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    nx, ny = -(y2 - y1) / (2.0 * half), (x2 - x1) / (2.0 * half)
+    centre = min(((mx + nx * rise, my + ny * rise), (mx - nx * rise, my - ny * rise)),
+                 key=lambda c: math.hypot(c[0] - cx, c[1] - cy))
+    return centre, math.hypot(centre[0] - cx, centre[1] - cy)
 
 
 def arc_radius_problems(profile, tol=CONTOUR_WELD_TOL):
     """Arcs true_arcs cannot repair, judged after the endpoint weld: a start or end point on the
-    centre (no radius), or radii further apart than `tol`. [{prim, r1, r2, how}]."""
+    centre (no radius), radii further apart than `tol`, or a truing move larger than `tol`.
+    [{prim, r1, r2, how[, shift]}]."""
     welded, _ = weld_profile(profile, tol)
     out = []
     for i, prim in enumerate(welded):
@@ -222,6 +235,11 @@ def arc_radius_problems(profile, tol=CONTOUR_WELD_TOL):
             out.append({"prim": i, "r1": radii[0], "r2": radii[1], "how": "no-radius"})
         elif abs(radii[0] - radii[1]) > tol:
             out.append({"prim": i, "r1": radii[0], "r2": radii[1], "how": "off-circle"})
+        elif abs(radii[0] - radii[1]) > 1e-12:
+            trued = _trued_centre(prim, radii)
+            if trued is not None and trued[1] > tol:
+                out.append({"prim": i, "r1": radii[0], "r2": radii[1], "how": "centre-shift",
+                            "shift": trued[1]})
     return out
 
 

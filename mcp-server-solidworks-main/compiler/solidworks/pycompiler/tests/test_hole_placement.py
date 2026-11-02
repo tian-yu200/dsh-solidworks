@@ -231,6 +231,10 @@ def test_point_off_the_face_is_rejected_with_zero_execution_calls():
     assert result.status == "FAILED", result.to_dict()
     assert result.error["code"] == "PLACEMENT_OFF_FACE", result.error
     assert "ON the face" in result.error["message"]
+    # 脚踏座 2026-11-02: the model only moved the third coordinate, twice. The message says the
+    # hole runs along Y and what a bore along X/Z is built as.
+    assert "runs along Y" in result.error["message"]
+    assert "operation 'cut'" in result.error["message"]
     # The box node before the hole already executed; what matters is that the REJECTED hole
     # issued no write of its own (plan-time checks need only the read-only face dump).
     hole_writes = [t for (t, _p) in port.calls
@@ -333,6 +337,10 @@ def test_two_holes_far_apart_on_the_same_face_are_fine():
     ({"position": "point", "at": [0.0, "x", 0.0]}, "ref.at must be a 3-D point"),
     ({"position": "center", "at": [0.0, 0.010, 0.0]}, "only read when ref.position is 'point'"),
     ({"position": "corner"}, "ref.position"),
+    # 脚踏座 2026-11-02: renaming 'front' to 'top' moved the bore onto the wrong face.
+    ({"node_face": {"node": "b1", "selector": "front"}, "position": "center"},
+     "use a sketch with a circle on that datum plane (signed offset) and an extrude with "
+     "operation 'cut' — do not just rename the selector"),
 ])
 def test_structural_validation_rejects_bad_placement(ref, needle):
     base = {"node_face": {"node": "b1", "selector": "top"}}

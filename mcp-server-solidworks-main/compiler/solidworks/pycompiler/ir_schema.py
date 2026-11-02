@@ -369,6 +369,61 @@ def _check_thread_block(block, label, errors, declared_pilot=None, declared_pilo
     return major_m, pitch_m
 
 
+EXPECT_KEYS = ("bbox_mm", "volume_mm3", "features")
+
+
+def _check_expect(expect, nodes, errors):
+    """Graph-level `expect`: what the approved plan says the part will be, checked against the
+    build. Never lowered: the compiler builds nodes only; the DSH orchestrator compares the
+    readback envelope and volume after the build (2026-11-02, 脚踏座: a plan of 90×80×117 was
+    built as 60×90×103 and reported verified). Millimetres on purpose, as the plan states them.
+
+    The `features` minimums are checked HERE, before anything runs: a plan with an R3 fillet
+    whose graph has no fillet node is caught at no cost (10-31 and 11-02 both dropped one).
+    """
+    if expect is None:
+        return
+    if not isinstance(expect, dict) or not expect:
+        errors.append("graph.expect must be an object {bbox_mm, volume_mm3?, features?} when present.")
+        return
+    for key in sorted(expect):
+        if key not in EXPECT_KEYS:
+            errors.append("graph.expect.%s is not a plan check (allowed: %s)." % (key, ", ".join(EXPECT_KEYS)))
+    bbox = expect.get("bbox_mm")
+    if bbox is not None:
+        if not isinstance(bbox, list) or len(bbox) != 3 or not all(_is_pos_number(v) for v in bbox):
+            errors.append("graph.expect.bbox_mm must be the plan's overall envelope as three positive "
+                          "numbers in millimetres, any axis order (got %r)." % (bbox,))
+        elif max(bbox) < 1:
+            errors.append("graph.expect.bbox_mm is in MILLIMETRES (got %r — that reads as metres; "
+                          "write e.g. [90, 93, 157])." % (bbox,))
+    volume = expect.get("volume_mm3")
+    if volume is not None and not _is_pos_number(volume):
+        errors.append("graph.expect.volume_mm3 must be a positive number of cubic millimetres "
+                      "(leave it out when the plan has no volume).")
+    features = expect.get("features")
+    if features is None:
+        return
+    if not isinstance(features, dict):
+        errors.append("graph.expect.features must be {node type: count}, e.g. {\"fillet\": 1, "
+                      "\"chamfer\": 1}.")
+        return
+    counts = {}
+    for node in nodes:
+        if isinstance(node, dict) and isinstance(node.get("type"), str):
+            counts[node["type"]] = counts.get(node["type"], 0) + 1
+    for kind in sorted(features):
+        want = features[kind]
+        if kind not in NODE_TYPES or kind == "sketch":
+            errors.append("graph.expect.features.%s is not a feature node type." % kind)
+        elif isinstance(want, bool) or not isinstance(want, int) or want < 1:
+            errors.append("graph.expect.features.%s must be a positive whole count." % kind)
+        elif counts.get(kind, 0) < want:
+            errors.append("graph.expect.features.%s = %d but the graph has %d %s node(s): the approved "
+                          "plan has it — add the node(s), do not drop them from expect."
+                          % (kind, want, counts.get(kind, 0), kind))
+
+
 def validate(graph):
     """Return a list of human-readable error strings ([] == structurally valid)."""
     errors = []
@@ -405,6 +460,8 @@ def validate(graph):
         if "assembly" in kinds:
             errors.append("graph.material is PART-only — set_part_material requires a part "
                           "document, not an assembly.")
+
+    _check_expect(graph.get("expect"), nodes, errors)
 
     # Graph-level thread defaults (v0.9.0): DOCUMENT state, exactly like `material` — a drawing
     # whose holes are all ISO 6H should not repeat that on every node. Node-level fields win;
@@ -525,7 +582,13 @@ def validate(graph):
             elif seen.get(tgt) not in BODY_PRODUCERS:
                 errors.append("%s: ref.node_face.node '%s' must reference an earlier box/extrude node." % (label, tgt))
             if nf.get("selector") not in FACE_SELECTORS:
-                errors.append("%s: ref.node_face.selector %r unsupported (only %s)."
+                # Just renaming the selector to 'top' turns a side bore into a hole on the
+                # upward face (脚踏座 2026-11-02), so say what a side bore is built as.
+                errors.append("%s: ref.node_face.selector %r unsupported (only %s). A hole goes "
+                              "only into a body's upward (+Y) face; for a bore in any other face "
+                              "(front/side/boss end) use a sketch with a circle on that datum "
+                              "plane (signed offset) and an extrude with operation 'cut' — do not "
+                              "just rename the selector."
                               % (label, nf.get("selector"), sorted(FACE_SELECTORS)))
             # --- placement (batch 10a) — off-centre holes ---------------------------------
             # `position: 'point'` + `at: [x,y,z]` (MODEL space, metres) puts the hole anywhere on
@@ -1122,6 +1185,15 @@ def _check_contour_closure(nodes):
                     "nodes[%d] (%s): profile[%d] (arc) has an endpoint on its centre (radii %.4f / "
                     "%.4f mm) — an arc needs cx,cy at its radius from BOTH endpoints."
                     % (pos, label, bad["prim"], bad["r1"] * 1000, bad["r2"] * 1000))
+            elif bad["how"] == "centre-shift":
+                errors.append(
+                    "nodes[%d] (%s): profile[%d] (arc) end point is not on its circle — radius "
+                    "%.4f mm at the start, %.4f mm at the end. On this shallow arc, putting both "
+                    "endpoints on one circle would move the centre %.3f mm (automatic limit "
+                    "%.1f mm), which would break concentricity with anything drawn at it. "
+                    "Recompute cx,cy so both endpoints are equidistant; keep the shared endpoints."
+                    % (pos, label, bad["prim"], bad["r1"] * 1000, bad["r2"] * 1000,
+                       bad["shift"] * 1000, contours.CONTOUR_WELD_TOL * 1000))
             else:
                 errors.append(
                     "nodes[%d] (%s): profile[%d] (arc) end point is not on its circle — radius "

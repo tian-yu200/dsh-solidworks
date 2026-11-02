@@ -207,8 +207,9 @@ def repair_evidence(raw):
     return evidence
 
 
-# Rejected before anything runs, so it never reaches the chain; a model that fixes one between two
-# executed attempts cites it, and that citation is as specific as the executed error's.
+# Rejected before anything runs, so it never becomes an attempt; a model that fixes one between
+# two executed attempts cites it. Admitted only when the orchestrator recorded such a rejection
+# on the last attempt (validation_failures), so the code is never a free pass.
 PRE_EXECUTION_CODES = {"VALIDATION_FAILED"}
 
 
@@ -228,12 +229,20 @@ def admit(chain,graph,evidence):
     previous=chain.get("design_contract")
     if previous is None:
         raise RuntimeError("REPAIR_LEGACY_CONTRACT: 上次为旧版恢复账本，需确认后采用新规则")
-    if not dimensions_equal(previous,design_contract(graph)):
-        raise RuntimeError("REPAIR_DESIGN_CHANGED: "+design_change_description(previous,design_contract(graph)))
+    current=design_contract(graph)
+    if last.get("error_code")=="PLAN_MISMATCH":
+        # The graph did not build the approved plan, so its fix changes dimensions or features by
+        # definition. What the user approved is graph.expect; that stays locked instead.
+        if not dimensions_equal(previous.get("expect"),current.get("expect")):
+            raise RuntimeError("REPAIR_DESIGN_CHANGED: 批准的计划 expect 有改动：%s→%s"
+                               % (previous.get("expect"),current.get("expect")))
+    elif not dimensions_equal(previous,current):
+        raise RuntimeError("REPAIR_DESIGN_CHANGED: "+design_change_description(previous,current))
     if any(a.get("representation")==representation for a in chain["attempts"]):
         raise RuntimeError("REPAIR_IDENTICAL_REPLAY: 原样重放不属于自动修复，需用户确认")
+    citable={last.get("error_code")} | (PRE_EXECUTION_CODES if last.get("validation_failures") else set())
     if (any(not isinstance(evidence.get(k),str) or not evidence[k].strip() for k in ("error_code","cause","readback","change"))
-            or evidence["error_code"] not in {last.get("error_code")} | PRE_EXECUTION_CODES):
+            or evidence["error_code"] not in citable):
         raise RuntimeError("REPAIR_EVIDENCE_REQUIRED: 修复证据须完整且对应上次错误")
     digest=payload_hash(evidence)
     if any(a.get("evidence_hash")==digest for a in chain["attempts"]):

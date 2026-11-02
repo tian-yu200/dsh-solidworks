@@ -11,6 +11,7 @@ import copy
 import math
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -896,6 +897,46 @@ def test_anchor_on_a_shared_vertex_is_ambiguous_and_off_edge_is_unresolved():
     r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.03, 0.002, 0.0]]))
     assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
     assert "nearest was 0.002000" in r.error["message"]
+
+
+def _suggested(message, edge):
+    match = re.search(r"#%d [^;]*?use near \[([^\]]+)\]" % edge, message)
+    assert match, message
+    return [float(v) for v in match.group(1).split(",")]
+
+
+def test_an_unresolved_anchor_names_the_nearest_edges_with_a_usable_point():
+    # 2026-11-02 脚踏座: the anchor sat 6 mm off the rim plane and the message gave only that
+    # distance; three repairs guessed and the budget ran out.
+    r = compile_and_run(FakePort(edges=_RIM_EDGES), _edge_graph("chamfer", [[0.093, 0.095, 0.036]]))
+    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
+    message = r.error["message"]
+    assert "#0 circle R0.019 centre [0.074, 0.095, 0.03] axis [0, 0, 1]" in message
+    assert message.index("#0 circle") < message.index("#2 circle") < message.index("#1 circle")
+    port = FakePort(edges=_RIM_EDGES)
+    r = compile_and_run(port, _edge_graph("chamfer", [_suggested(message, 0)]))
+    assert r.status == "COMPLETED", r.to_dict()
+    assert port.calls[-1][1]["edge_indices"] == "[0]"
+
+
+def test_an_anchor_where_edges_meet_offers_a_point_inside_each():
+    r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.02, 0.0, 0.0]]))
+    message = r.error["message"]
+    assert _suggested(message, 0) == [0.01, 0.0, 0.0] and _suggested(message, 1) == [0.035, 0.0, 0.0]
+    # A boss rim meeting a plate edge (the 脚踏座 Ø60 seat end at z=0): the circle's point is
+    # taken across the circle, away from the junction, and it resolves.
+    edges = json.dumps({"edge_count": 2, "edges": [
+        {"i": 0, "start": [0.038, 0.0, 0.03], "end": [0.038, 0.0, 0.03], "mid": [0.038, 0.0, 0.03],
+         "kind": "circle", "center": [0.038, 0.0, 0.0], "normal": [1, 0, 0], "radius": 0.03},
+        {"i": 1, "start": [0.038, 0.03, 0.0], "end": [0.038, 0.03, 0.004], "mid": [0.038, 0.03, 0.002]},
+    ]})
+    r = compile_and_run(FakePort(edges=edges), _edge_graph("chamfer", [[0.038, 0.03, 0.0]]))
+    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
+    assert _suggested(r.error["message"], 0) == [0.038, -0.03, 0.0]
+    port = FakePort(edges=edges)
+    r = compile_and_run(port, _edge_graph("chamfer", [_suggested(r.error["message"], 0)]))
+    assert r.status == "COMPLETED", r.to_dict()
+    assert port.calls[-1][1]["edge_indices"] == "[0]"
 
 
 # An R10 rounded-rectangle corner: an OPEN arc, so the readback carries only start/end and the
@@ -2302,6 +2343,37 @@ def test_an_arc_off_its_circle_fails_before_any_call(change, phrase):
     assert port.calls == []
 
 
+def test_a_shallow_arc_is_not_trued_when_its_centre_would_move_far():
+    # R100 over a 10 mm chord, end 0.09 mm inside the start radius: within the weld band, but
+    # putting both ends on one circle moves the centre ~0.9 mm — a hole drawn at the original
+    # centre would silently stop being concentric. Validation asks for the centre instead.
+    r_end, h = 0.1 - 0.00009, 0.005
+    a = (math.sqrt(0.1 ** 2 - h ** 2), -h)
+    b = (math.sqrt(r_end ** 2 - h ** 2), h)
+    profile = [
+        {"kind": "arc", "cx": 0.0, "cy": 0.0, "x1": a[0], "y1": a[1], "x2": b[0], "y2": b[1], "dir": 1},
+        {"kind": "line", "x1": b[0], "y1": b[1], "x2": 0.09, "y2": h},
+        {"kind": "line", "x1": 0.09, "y1": h, "x2": 0.09, "y2": -h},
+        {"kind": "line", "x1": 0.09, "y1": -h, "x2": a[0], "y2": a[1]},
+    ]
+    assert _contours.true_arcs(profile)[1] == []
+    port = FakePort()
+    r = compile_and_run(port, _arm_graph(profile))
+    assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED"
+    assert "would move the centre 0.9" in r.error["message"] and "profile[0]" in r.error["message"]
+    assert port.calls == []
+
+
+def test_a_failed_boss_names_the_tangent_sketch_plane_cause():
+    port = FakePort(fail_on=("extrude_feature", 1))  # the box boss
+    r = compile_and_run(port, EXAMPLE)
+    assert r.error["code"] == "EXTRUSION_FAILED"
+    assert "tangent to a cylinder" in r.error["message"]
+    cut = compile_and_run(FakePort(fail_on=("extrude_feature", 2)), EXAMPLE)  # the hole's cut
+    assert cut.error["code"] == "EXTRUSION_FAILED"
+    assert "tangent" not in cut.error["message"]
+
+
 def test_closure_message_lists_every_consumer_and_counts_suppressed_gaps():
     # P2-2: a sketch referenced by more than one consumer names them ALL (a plain dict
     # would keep only the last), and more than four open endpoints append a "+N more"
@@ -2528,3 +2600,34 @@ if __name__ == "__main__":
             print("ERR  -", t.__name__, "::", type(ex).__name__, ex)
     print("\n%d/%d passed" % (len(_TESTS) - failed, len(_TESTS)))
     sys.exit(1 if failed else 0)
+
+
+# --- graph.expect: the approved plan's check values (2026-11-02) ---
+
+def _expect_errors(expect, nodes=None):
+    from pycompiler.ir_schema import validate
+    graph = {"schema_version": "0.8.0-draft", "units": "meters", "expect": expect,
+             "nodes": nodes or [{"id": "b1", "type": "box", "width": 0.05, "depth": 0.05, "height": 0.05}]}
+    return [e for e in validate(graph) if "expect" in e]
+
+
+def test_expect_accepts_the_plan_envelope_volume_and_feature_minimums():
+    nodes = [{"id": "b1", "type": "box", "width": 0.05, "depth": 0.05, "height": 0.05},
+             {"id": "f1", "type": "fillet", "radius": 0.003, "edges": [{"near": [0.025, 0.025, 0.0]}]}]
+    assert _expect_errors({"bbox_mm": [90, 93, 157], "volume_mm3": 174630, "features": {"fillet": 1}},
+                          nodes) == []
+
+
+@pytest.mark.parametrize("expect, fragment", [
+    ({"bbox_mm": [0.09, 0.093, 0.157]}, "MILLIMETRES"),
+    ({"bbox_mm": [90, 93]}, "three positive numbers"),
+    ({"bbox_mm": [90, 93, 157], "volume": 1}, "expect.volume is not a plan check"),
+    ({"bbox_mm": [90, 93, 157], "volume_mm3": -1}, "volume_mm3 must be a positive"),
+    ({"bbox_mm": [90, 93, 157], "features": {"fillet": 1, "chamfer": 1}}, "graph has 0 fillet"),
+    ({"bbox_mm": [90, 93, 157], "features": {"sketch": 1}}, "not a feature node type"),
+    ({"bbox_mm": [90, 93, 157], "features": {"box": True}}, "positive whole count"),
+    ([90, 93, 157], "must be an object"),
+])
+def test_expect_rejects_what_the_check_could_not_use(expect, fragment):
+    errors = _expect_errors(expect)
+    assert any(fragment in e for e in errors), errors
