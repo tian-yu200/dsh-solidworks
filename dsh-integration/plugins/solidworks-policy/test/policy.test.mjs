@@ -440,6 +440,30 @@ test("a pending user question blocks SolidWorks calls until its tool settles", a
   assert.equal((await env.preExecute(cad)).kind, "allow");
 });
 
+test("a plan question too long for the non-scrolling dialog is sent back, and blocks nothing", async () => {
+  // 2026-11-02 (9bfd53ef): a 1511-character, 22-line plan question hid the dialog's submit button.
+  const env = harness();
+  apply(env.ctx);
+  const agent = {};
+  const options = [{ label: "批准并建模（推荐）", description: "按上面的计划建模" }, { label: "我会提供修订值" }];
+  const checks = "总包络 长×宽×高 = 93×90×157 mm\n体积约 未算\n最没把握的 3 处读法：①11 是轴孔中心高差；②30 是凹面宽；③8 是翼缘厚";
+  const long = { name: "ask_user_question", agent,
+                 arguments: { questions: [{ question: checks + "\n" + "PLAN: 读图结论与计划正文。".repeat(60), options }] } };
+  const decision = await env.preExecute(long);
+  assert.equal(decision.kind, "deny");
+  assert.match(decision.reason, /over 600 \/ 10; the DSH dialog does not scroll/);
+  assert.match(decision.reason, /plan in your message text/);
+  const cad = { name: "mcp__solidworks__inspect_state", agent, arguments: {} };
+  assert.equal((await env.preExecute(cad)).kind, "allow", "a refused question leaves nothing pending");
+
+  const tall = { name: "ask_user_question", agent,
+                 arguments: JSON.stringify({ questions: [{ question: "a\n".repeat(10), options }] }) };
+  assert.equal((await env.preExecute(tall)).kind, "deny", "line count counts too, string arguments too");
+
+  const short = { name: "ask_user_question", agent, arguments: { questions: [{ question: checks, options }] } };
+  assert.equal((await env.preExecute(short)).kind, "allow");
+});
+
 test("overlapping user questions keep SolidWorks calls blocked until all settle", async () => {
   const env = harness();
   apply(env.ctx);

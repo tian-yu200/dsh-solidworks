@@ -107,8 +107,9 @@ an absent constraint. Never infer dimensions from pixel proportions, even with a
 Use mm unless the drawing states another unit; omit unspecified material; save a new
 file in the working directory without overwriting existing files. Infer projection from
 drawing evidence; ask only if unresolved projection would produce different parts.
-Present the reading conclusion, compact plan and ALL genuinely missing dimensions in
-ONE ask_user_question call, with plan approval included; no three-question cap.
+Write the reading conclusion and compact plan in your message text, then ONE
+ask_user_question call: three check lines, ALL genuinely missing dimensions and plan
+approval, at most 600 characters (the DSH dialog does not scroll); no three-question cap.
 After the answer, build directly. Ask again only if that answer introduces a new
 contradiction. “接受/继续” approves the plan but supplies no missing numeric value.
 Read [drawing intake](solidworks://skill/references/drawing-intake.md) for the evidence contract.
@@ -458,7 +459,7 @@ separate statuses. Consult the
 expressibility is unclear; record inexpressible features as `CAPABILITY_GAP`.
 
 If any required constraint remains UNKNOWN, collect it with ALL other missing
-constraints and the compact plan in ONE ask_user_question, including approval.
+constraints in ONE ask_user_question, including approval (plan text in the message).
 Waiting does not consume L2. The source/default/one-round rules here govern any
 older reference prose; do not split the same matter into another approval round.
 Only then set `APPROVED` and check its approval todo. Any changed topology,

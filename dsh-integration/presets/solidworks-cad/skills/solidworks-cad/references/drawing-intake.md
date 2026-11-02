@@ -34,9 +34,10 @@ that was not specified. Save a new, non-overwriting file in the working director
 Use projection symbols, labels, aligned views and topology to resolve projection;
 ask only if unresolved alternatives create different parts.
 
-Combine the reading conclusion, compact PLAN.md-style plan (including feature
-completeness, milestones, outputs and validation), and ALL genuine missing dimensions
-in ONE ask_user_question. Include plan approval in that same round; no hard limit
+Write the reading conclusion and compact PLAN.md-style plan (including feature
+completeness, milestones, outputs and validation) in the message text, then ask ALL
+genuine missing dimensions in ONE ask_user_question of at most 600 characters (the DSH
+dialog does not scroll). Include plan approval in that same round; no hard limit
 of three questions. A fully resolved drawing only needs that compact plan approval,
 not invented dimension questions. A previously approved matching plan needs no repeat.
 After the answer, build directly; ask again only if the answer introduces a NEW

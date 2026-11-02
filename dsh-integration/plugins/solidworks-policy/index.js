@@ -53,6 +53,31 @@ const QUESTION_WAIT_REASON =
   "ask_user_question is waiting for the user. Do not call a SolidWorks tool until it returns " +
   "the user's answer.";
 const pendingUserQuestions = new WeakMap();
+// The DSH desktop question dialog does not scroll: measured 2026-11-02, a 1511-character / 22-line
+// plan question pushed the submit button out of reach (session 9bfd53ef) while a 1263 / 17 one
+// still fitted. The plan belongs in the message text; the dialog keeps the check lines and choices.
+const QUESTION_MAX_CHARS = 600;
+const QUESTION_MAX_LINES = 10;
+
+function oversizedQuestion(args) {
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch { return null; }
+  }
+  for (const question of Array.isArray(args?.questions) ? args.questions : []) {
+    const text = String(question?.question ?? "");
+    const options = Array.isArray(question?.options) ? question.options : [];
+    const chars = text.length + options.reduce(
+      (sum, option) => sum + String(option?.label ?? "").length + String(option?.description ?? "").length, 0);
+    const lines = text.split("\n").length + options.length;
+    if (chars > QUESTION_MAX_CHARS || lines > QUESTION_MAX_LINES) {
+      return `ask_user_question refused: one question carries ${chars} characters / ${lines} lines, ` +
+        `over ${QUESTION_MAX_CHARS} / ${QUESTION_MAX_LINES}; the DSH dialog does not scroll and its submit ` +
+        "button ends up hidden. Write the reading conclusion and plan in your message text, then ask again " +
+        "with only the three check lines, the missing values and the approval choices.";
+    }
+  }
+  return null;
+}
 const MODLENS_LOCAL_ONLY_REASON =
   "modlens_read_image accepts only a non-empty local image file path in the SolidWorks " +
   "profile; URL forms such as http://, https://, ftp:// and file:// are not allowed.";
@@ -420,6 +445,10 @@ function apply(ctx) {
         kind: "deny",
         reason: `Only the ${ALLOWED_SKILLS.join(", ")} skill is available in the SolidWorks profile.`,
       };
+    }
+    if (exec.name === QUESTION_TOOL) {
+      const oversized = oversizedQuestion(exec.arguments);
+      if (oversized) return { kind: "deny", reason: oversized };
     }
     if (exec.name === QUESTION_TOOL && exec.agent) {
       beginUserQuestion(exec);
