@@ -9,8 +9,10 @@ namespace SolidworksExecution.Infrastructure
         private static readonly OperationGuard _instance = new OperationGuard();
         public static OperationGuard Instance => _instance;
 
-        private readonly ConcurrentDictionary<string, ExecutionResponse> _completed
-            = new ConcurrentDictionary<string, ExecutionResponse>();
+        // Only the ids are kept: GetDuplicate answers a fresh DUPLICATE response and never read the
+        // stored one, which carried a whole cadState per call for the life of the process.
+        private readonly ConcurrentDictionary<string, byte> _completed
+            = new ConcurrentDictionary<string, byte>();
 
         private volatile int _currentStateVersion = 0;
 
@@ -23,7 +25,7 @@ namespace SolidworksExecution.Infrastructure
 
         public ExecutionResponse GetDuplicate(string operationId)
         {
-            if (_completed.TryGetValue(operationId, out var original))
+            if (_completed.ContainsKey(operationId))
             {
                 return new ExecutionResponse
                 {
@@ -44,7 +46,7 @@ namespace SolidworksExecution.Infrastructure
 
         public void RegisterCompleted(string operationId, ExecutionResponse response)
         {
-            _completed[operationId] = response;
+            _completed[operationId] = 0;
             Interlocked.Increment(ref _currentStateVersion);
         }
 

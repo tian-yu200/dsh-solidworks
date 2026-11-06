@@ -707,10 +707,10 @@
     "name": "string (optional, default 'DSH SolidWorks operation' - audit label)"
    }
   },
-  "output": "-> see execution-response.json - result_geometry {scope_active:true, document}; fails with UNDO_SCOPE_ACTIVE when another scope is open"
+  "output": "-> see execution-response.json - result_geometry {scope_active:true, document, undo_scope_previous_dropped?}; fails with UNDO_SCOPE_ACTIVE when another scope is open on a document that is still open. A scope whose document was closed is dropped and the new one begins (undo_scope_previous_dropped:true)."
  },
  "commit_undo_scope": {
-  "description": "Finishes and commits the active DSH undo recording scope. The active document must still be the document that opened the scope.",
+  "description": "Finishes and commits the active DSH undo recording scope on the document that opened it, re-activating that document first when another one is in front.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -718,16 +718,16 @@
     "name": "string (optional, default 'DSH SolidWorks operation' - committed undo label)"
    }
   },
-  "output": "-> see execution-response.json - result_geometry {scope_active:false, committed:true}; fails with NO_UNDO_SCOPE or UNDO_DOCUMENT_CHANGED when the transaction identity is invalid"
+  "output": "-> see execution-response.json - result_geometry {scope_active:false, committed:true, undo_scope_owner_reactivated?}; fails with NO_UNDO_SCOPE, UNDO_SCOPE_OWNER_CLOSED (its document was closed; the scope is released) or UNDO_SCOPE_OWNER_ACTIVATION_FAILED"
  },
  "rollback_undo_scope": {
-  "description": "Finishes the active recording, performs one SolidWorks undo, rebuilds, and clears the static DSH transaction scope. Used after execution or verification failure.",
+  "description": "Finishes the active recording on the document that opened it (re-activated first when another one is in front), performs one SolidWorks undo, rebuilds, and clears the static DSH transaction scope. Used after execution or verification failure.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {}
   },
-  "output": "-> see execution-response.json - result_geometry {scope_active:false, rolled_back:true, rebuilt:true}; ROLLBACK_REBUILD_FAILED means undo ran but rebuild failed"
+  "output": "-> see execution-response.json - result_geometry {scope_active:false, rolled_back:true, rebuilt:true, undo_scope_owner_reactivated?}; ROLLBACK_REBUILD_FAILED means undo ran but rebuild failed; NO_UNDO_SCOPE, UNDO_SCOPE_OWNER_CLOSED and UNDO_SCOPE_OWNER_ACTIVATION_FAILED as for commit_undo_scope"
  },
  "insert_toolbox_component": {
   "description": "Resolves a purchasable fastener or standard part under configured SolidWorks Toolbox roots and inserts it into the active assembly through insert_component. The DSH document-edit policy is the only model-visible route to this command.",

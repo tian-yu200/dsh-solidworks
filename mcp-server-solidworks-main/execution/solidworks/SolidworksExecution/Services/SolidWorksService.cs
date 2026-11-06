@@ -25,7 +25,9 @@ namespace SolidworksExecution.Services
         private static readonly object UndoScopeSync = new object();
         private static bool _undoScopeActive;
         private static string _undoScopeDocumentTitle;
-        private static string _undoScopeDocumentPath;
+        // The owner's StableDocumentId. Identity rather than title or path: a part closed by hand
+        // and reopened from the same file is a new document, and the scope died with the old one.
+        private static string _undoScopeDocumentId;
         // Retain each open document's RCW while its ID is live, so a freed COM address cannot
         // be reused as the identity of a different document between inventory snapshots.
         private static readonly Dictionary<IntPtr, Tuple<IModelDoc2, string>> DocumentIds =
@@ -83,12 +85,17 @@ namespace SolidworksExecution.Services
                 throw new InvalidOperationException("Active document is missing from inventory.");
             foreach (IntPtr key in DocumentIds.Keys.Where(k => !live.Contains(k)).ToList())
                 DocumentIds.Remove(key);
+            // A scope whose document is closed can never be committed or rolled back, and the next
+            // begin releases it (BeginUndoScope), so it does not block anything and is not reported.
+            bool scopeOwnerOpen = _undoScopeActive &&
+                documents.Any(d => (string)d["document_id"] == _undoScopeDocumentId);
             return new Dictionary<string, object>
             {
                 ["stateVersion"] = _guard.GetCurrentStateVersion(),
                 ["documents"] = documents,
                 ["active_document"] = activeInfo,
-                ["undo_scope_active"] = _undoScopeActive
+                ["undo_scope_active"] = scopeOwnerOpen,
+                ["undo_scope_document"] = scopeOwnerOpen ? _undoScopeDocumentTitle : null
             };
         }
 
@@ -208,26 +215,77 @@ namespace SolidworksExecution.Services
 
         private static bool UndoScopeMatches(IModelDoc2 modelDoc)
         {
-            if (modelDoc == null || !_undoScopeActive) return false;
-            string title = modelDoc.GetTitle() ?? "";
-            string path = modelDoc.GetPathName() ?? "";
-            if (!string.IsNullOrEmpty(_undoScopeDocumentPath) &&
-                !string.IsNullOrEmpty(path))
-                return string.Equals(
-                    _undoScopeDocumentPath,
-                    path,
-                    StringComparison.OrdinalIgnoreCase);
-            return string.Equals(
-                _undoScopeDocumentTitle ?? "",
-                title,
-                StringComparison.OrdinalIgnoreCase);
+            return modelDoc != null && _undoScopeActive &&
+                StableDocumentId(modelDoc) == _undoScopeDocumentId;
         }
 
         private static void ClearUndoScope()
         {
             _undoScopeActive = false;
             _undoScopeDocumentTitle = null;
-            _undoScopeDocumentPath = null;
+            _undoScopeDocumentId = null;
+        }
+
+        // The open document that owns the undo scope, or null once it has been closed. Before
+        // 2026-11-06 a scope whose part was closed by hand (after an interrupted build) could never
+        // be released, and every later build failed with UNDO_SCOPE_ACTIVE until a restart.
+        private static IModelDoc2 FindUndoScopeOwner()
+        {
+            foreach (object item in _solidWorks.GetDocuments() as object[] ?? new object[0])
+            {
+                var doc = item as IModelDoc2;
+                if (doc != null && StableDocumentId(doc) == _undoScopeDocumentId)
+                    return doc;
+            }
+            return null;
+        }
+
+        // Brings the owner back to the front so commit/rollback act on it: the user may have
+        // clicked another window while a build ran. Null when it does not become active.
+        private static IModelDoc2 ActivateUndoScopeOwner(IModelDoc2 owner)
+        {
+            foreach (string name in new[] { owner.GetTitle(), owner.GetPathName() })
+            {
+                if (string.IsNullOrEmpty(name)) continue;
+                int errors = 0;
+                _solidWorks.ActivateDoc3(name, false, 1 /* swDontRebuildActiveDoc */, ref errors);
+                var active = _solidWorks.IActiveDoc2 as IModelDoc2;
+                if (UndoScopeMatches(active)) return active;
+            }
+            return null;
+        }
+
+        // Commit and rollback act on the owner wherever it is. Null when that is possible, with
+        // modelDoc then the owner; otherwise the failure, and a scope whose owner is closed is
+        // released. Call under UndoScopeSync.
+        private ExecutionResponse ResolveUndoScopeOwner(
+            ToolRequest request, ref IModelDoc2 modelDoc, out bool reactivated)
+        {
+            reactivated = false;
+            if (!_undoScopeActive)
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "NO_UNDO_SCOPE", "No active undo scope exists.");
+            if (UndoScopeMatches(modelDoc)) return null;
+
+            string title = _undoScopeDocumentTitle;
+            var owner = FindUndoScopeOwner();
+            if (owner == null)
+            {
+                ClearUndoScope();
+                ExecLog.Write($"undo scope released: its document '{title}' was closed");
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "UNDO_SCOPE_OWNER_CLOSED",
+                    $"The document that owned the undo scope ('{title}') was closed, so nothing is " +
+                    "left to commit or roll back. The scope has been released.");
+            }
+            modelDoc = ActivateUndoScopeOwner(owner);
+            if (modelDoc == null)
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "UNDO_SCOPE_OWNER_ACTIVATION_FAILED",
+                    $"The undo scope belongs to '{title}', which is open but could not be activated.");
+            reactivated = true;
+            ExecLog.Write($"undo scope owner '{title}' reactivated");
+            return null;
         }
 
         public ExecutionResponse BeginUndoScope(ToolRequest request)
@@ -248,31 +306,44 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
+                bool previousDropped = false;
                 lock (UndoScopeSync)
                 {
                     if (_undoScopeActive)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "UNDO_SCOPE_ACTIVE",
-                            "An undo scope is already active. Commit or roll it back before starting another.");
+                    {
+                        // Still open: a real conflict. Closed (typically by hand after an
+                        // interrupted build): nothing can ever commit or roll it back, so drop it.
+                        if (FindUndoScopeOwner() != null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "UNDO_SCOPE_ACTIVE",
+                                $"An undo scope is already open on '{_undoScopeDocumentTitle}' (often a " +
+                                "build that was interrupted). Commit or roll it back, or close that " +
+                                "document without saving, before starting another.");
+                        ExecLog.Write($"undo scope dropped: its document '{_undoScopeDocumentTitle}' was closed");
+                        ClearUndoScope();
+                        previousDropped = true;
+                    }
 
                     modelDoc.Extension.StartRecordingUndoObject();
                     _undoScopeDocumentTitle = modelDoc.GetTitle();
-                    _undoScopeDocumentPath = modelDoc.GetPathName();
+                    _undoScopeDocumentId = StableDocumentId(modelDoc);
                     _undoScopeActive = true;
                 }
 
                 var p = request.Params as JObject;
                 string name = p?.Value<string>("name") ?? "DSH SolidWorks operation";
+                var geometry = new JObject
+                {
+                    ["scope_active"] = true,
+                    ["document"] = modelDoc.GetTitle()
+                };
+                if (previousDropped) geometry["undo_scope_previous_dropped"] = true;
                 return BuildCompleted(
                     request,
                     modelDoc,
                     true,
                     new List<string> { "undo_scope=" + name },
-                    resultGeometry: new JObject
-                    {
-                        ["scope_active"] = true,
-                        ["document"] = modelDoc.GetTitle()
-                    });
+                    resultGeometry: geometry);
             }
             catch (COMException ex)
             {
@@ -299,37 +370,33 @@ namespace SolidworksExecution.Services
 
             try
             {
+                // No NO_ACTIVE_DOCUMENT check: with nothing active the owner may still be open
+                // behind, or closed, and ResolveUndoScopeOwner handles both.
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
-                if (modelDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
-
                 var p = request.Params as JObject;
                 string name = p?.Value<string>("name") ?? "DSH SolidWorks operation";
+                bool reactivated;
                 lock (UndoScopeSync)
                 {
-                    if (!_undoScopeActive)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "NO_UNDO_SCOPE", "No active undo scope exists.");
-                    if (!UndoScopeMatches(modelDoc))
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "UNDO_DOCUMENT_CHANGED",
-                            "The active document is not the document that owns the undo scope.");
+                    var unresolved = ResolveUndoScopeOwner(request, ref modelDoc, out reactivated);
+                    if (unresolved != null) return unresolved;
 
                     modelDoc.Extension.FinishRecordingUndoObject2(name, false);
                     ClearUndoScope();
                 }
 
+                var geometry = new JObject
+                {
+                    ["scope_active"] = false,
+                    ["committed"] = true
+                };
+                if (reactivated) geometry["undo_scope_owner_reactivated"] = true;
                 return BuildCompleted(
                     request,
                     modelDoc,
                     true,
                     new List<string> { "undo_scope_committed=" + name },
-                    resultGeometry: new JObject
-                    {
-                        ["scope_active"] = false,
-                        ["committed"] = true
-                    });
+                    resultGeometry: geometry);
             }
             catch (COMException ex)
             {
@@ -357,20 +424,11 @@ namespace SolidworksExecution.Services
             try
             {
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
-                if (modelDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
-
-                bool rebuilt;
+                bool rebuilt, reactivated;
                 lock (UndoScopeSync)
                 {
-                    if (!_undoScopeActive)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "NO_UNDO_SCOPE", "No active undo scope exists.");
-                    if (!UndoScopeMatches(modelDoc))
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "UNDO_DOCUMENT_CHANGED",
-                            "The active document is not the document that owns the undo scope.");
+                    var unresolved = ResolveUndoScopeOwner(request, ref modelDoc, out reactivated);
+                    if (unresolved != null) return unresolved;
 
                     modelDoc.Extension.FinishRecordingUndoObject2(
                         "DSH SolidWorks rollback", false);
@@ -393,17 +451,19 @@ namespace SolidworksExecution.Services
                     return failed;
                 }
 
+                var geometry = new JObject
+                {
+                    ["scope_active"] = false,
+                    ["rolled_back"] = true,
+                    ["rebuilt"] = true
+                };
+                if (reactivated) geometry["undo_scope_owner_reactivated"] = true;
                 return BuildCompleted(
                     request,
                     modelDoc,
                     true,
                     new List<string> { "undo_scope_rolled_back" },
-                    resultGeometry: new JObject
-                    {
-                        ["scope_active"] = false,
-                        ["rolled_back"] = true,
-                        ["rebuilt"] = true
-                    });
+                    resultGeometry: geometry);
             }
             catch (COMException ex)
             {

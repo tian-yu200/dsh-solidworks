@@ -274,11 +274,15 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
         response = _request_with_autostart(_do, tool_name)
     except httpx.TimeoutException:
         _log(f"<- {tool_name} TIMEOUT after {TOOL_EXEC_TIMEOUT}s")
+        # Only this side gave up: the service queues the call on its STA thread, which keeps
+        # running it for up to StaExecutor.StaTimeoutSeconds (300 s) and then commits the result.
         raise ExecutionLayerError(
             f"Request to solidworks-execution timed out after {TOOL_EXEC_TIMEOUT}s "
-            f"(tool={tool_name}, op={operation_id}). Large sketches and analyze payloads "
-            f"legitimately need longer — raise HTTP_TOOL_TIMEOUT in the adapter .env if "
-            f"this tool is known-good."
+            f"(tool={tool_name}, op={operation_id}). The outcome is UNKNOWN: the operation "
+            f"may still be running in SolidWorks and may yet complete, so read the state "
+            f"(/api/tool/state, the open documents) before retrying it. Large sketches and "
+            f"analyze payloads legitimately need longer — raise HTTP_TOOL_TIMEOUT in the "
+            f"adapter .env if this tool is known-good."
         )
 
     if response.status_code == 400:

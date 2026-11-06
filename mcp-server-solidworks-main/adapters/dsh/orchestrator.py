@@ -528,7 +528,10 @@ class CadOrchestrator:
         elif chain and self._foreign_discarded_chain(job, ledger) is None:
             reasons.append("上次新建执行链尚未解决；本次不是完整自动重建，需确认另行执行")
         if inventory.get("undo_scope_active"):
-            reasons.append("上次执行的 Undo scope 仍活动；确认后只新建，不关闭残留文档")
+            # Reported only while the scope's document is open. Closing that document releases the
+            # scope (the next begin drops it); confirming alone does not, the begin would refuse.
+            reasons.append("上次执行的 Undo scope 仍挂在打开的「%s」上：先在 SolidWorks 里关掉它（不保存）再确认，否则新建模会被拒绝"
+                           % (inventory.get("undo_scope_document") or "上次未完成的文档"))
         return list(dict.fromkeys(reasons)), key
 
 
@@ -828,6 +831,51 @@ class CadOrchestrator:
             backup_path=backup_path,
             created_identity=created_identity,
         )
+
+    def _uncertain_attempt_response(self, job, payload, risk, progress, exc):
+        """Recover a Feature Graph attempt that RAISED (transport error, timeout) instead of answering.
+
+        Until 2026-11-06 this recorded rollback_failed without trying anything, so the attempt's
+        undo scope stayed open and every later build failed with UNDO_SCOPE_ACTIVE. Only a scope
+        this attempt asked for and has not closed is rolled back: before begin, or after a refused
+        begin, an open scope is another document's, and after commit a rollback would throw away
+        a finished part. Those cases are left as they are and reported recovery_unverified.
+        """
+        fresh = payload["fresh_document"]
+        scope = progress.get("scope")
+        previous_identity = progress.get("previous_identity") or {}
+        created_identity = progress.get("created_identity") if fresh else None
+        recovery_status, state, recovery = "recovery_unverified", job.get("last_state") or {}, None
+        try:
+            if scope == "requested":
+                recovery_status, state, recovery = self._recover_transaction(
+                    job, kind="feature_graph", previous_identity=previous_identity, newly_created=fresh)
+            elif scope is None and created_identity:
+                recovery_status, state, recovery = self._close_created_document(
+                    job, kind="feature_graph", created_identity=created_identity,
+                    previous_identity=previous_identity)
+        except Exception as recovery_exc:  # noqa: BLE001 - the recovery itself must not escape
+            recovery_status, recovery = "rollback_failed", {
+                "error": {"code": "RECOVERY_RAISED", "message": str(recovery_exc)}}
+        if recovery is None:
+            recovery = {"recovery_method": "none"}
+        recovery.setdefault("at", utc_now())
+        recovery.setdefault("kind", "feature_graph")
+        recovery.setdefault("recovery_status", recovery_status)
+        recovery["undo_scope"] = scope or "not_requested"
+        error = {"code": "EXECUTION_UNCERTAIN", "message": str(exc)}
+        discarded = recovery_status == "discarded"
+        self._record_failure(
+            job, kind="feature_graph", phase="uncertain_execution", error=error,
+            execution_status="failed" if discarded else "partial",
+            verification_status_value="unavailable", recovery_status=recovery_status,
+            recovery=recovery)
+        extras, discarded_target = self._discard_report(
+            recovery_status, recovery, created_identity, state)
+        return envelope(
+            status="failed" if discarded else "partial", risk=risk, job_id=job["job_id"],
+            target_document=discarded_target or self._target(state), partial_state=state,
+            error=error, **extras, **self._job_metadata(job))
 
     def status(self):
         try:
@@ -1727,16 +1775,13 @@ class CadOrchestrator:
         if stale:
             return self._queue_refreshed_recovery(job, "feature_graph", payload, risk,
                 self._feature_graph_summary(job, payload["graph"], payload["fresh_document"]))
-        if not payload["fresh_document"]:
-            return self._run_feature_graph_attempt(job, payload, risk)
+        progress = {}
         try:
-            response = self._run_feature_graph_attempt(job, payload, risk)
+            response = self._run_feature_graph_attempt(job, payload, risk, progress)
         except Exception as exc:
-            self._record_failure(job, kind="feature_graph", phase="uncertain_execution",
-                error={"code": "EXECUTION_UNCERTAIN", "message": str(exc)}, execution_status="partial",
-                verification_status_value="unavailable", recovery_status="rollback_failed")
-            response = envelope(status="partial", risk=risk, job_id=job["job_id"],
-                target_document=(job.get("created_document_identity") or {}).get("title"), error=job["error"], **self._job_metadata(job))
+            response = self._uncertain_attempt_response(job, payload, risk, progress, exc)
+        if not payload["fresh_document"]:
+            return response
         with job_store.recovery_chain() as ledger:
             chain = ledger.get("active")
             if not chain or chain["chain_id"] != chain_id:
@@ -1750,12 +1795,15 @@ class CadOrchestrator:
                 ledger["active"] = None
         return response
 
-    def _run_feature_graph_attempt(self, job, payload, risk):
+    def _run_feature_graph_attempt(self, job, payload, risk, progress=None):
+        # progress: how far the attempt got, for _uncertain_attempt_response if it raises.
+        progress = {} if progress is None else progress
         self._plan_features(job, payload["graph"])
         fresh_document = payload["fresh_document"]
         job["current_graph_fresh"] = fresh_document
         backup_path = None
         previous_identity = dict(job.get("expected_document") or {})
+        progress["previous_identity"] = previous_identity
         before = {}
 
         if fresh_document:
@@ -1806,11 +1854,13 @@ class CadOrchestrator:
                 self._identity(before),
                 (opened.get("result_geometry") or {}).get("created_document_id"),
             )
+            progress["created_identity"] = created_identity
             if (
                 verified.get("status") != "COMPLETED"
                 or not created_identity.get("document_id")
                 or not same_document(created_identity, current)
             ):
+                progress["scope"] = "recovered"
                 recovery_status, recovered_state, recovery = (
                     self._close_created_document(
                         job,
@@ -1874,11 +1924,17 @@ class CadOrchestrator:
         else:
             # Recovery/override authorization already ran before entering this attempt.
             before, _ = self._verify_job_document(job)
+            progress["previous_identity"] = self._identity(before)
             backup_path = self._backup_once(job, before)
 
         transaction_name = "DSH Feature Graph"
+        # Set before the request: a begin that timed out on this side may still have opened the
+        # scope in the execution service.
+        progress["scope"] = "requested"
         begin_error = self._begin_transaction(job, transaction_name)
         if begin_error:
+            # Refused, often UNDO_SCOPE_ACTIVE: any open scope is another document's, never roll it back.
+            progress["scope"] = "refused"
             recovery_status = "backup_only" if backup_path else "not_needed"
             recovery = None
             state = before
@@ -1935,6 +1991,7 @@ class CadOrchestrator:
             if item.get("status") == "COMPLETED"
         ]
         if response.get("status") != "COMPLETED":
+            progress["scope"] = "recovered"
             recovery_status, state, recovery = self._recover_transaction(
                 job,
                 kind="feature_graph",
@@ -1990,6 +2047,7 @@ class CadOrchestrator:
                 "available": False,
             }
         if not verification.get("all_completed"):
+            progress["scope"] = "recovered"
             recovery_status, recovered_state, recovery = (
                 self._recover_transaction(
                     job,
@@ -2034,6 +2092,7 @@ class CadOrchestrator:
             # verification, so the repair runs on a clean slate and counts against the budget.
             verification["all_completed"] = False
             job.pop("verification_stamp", None)
+            progress["scope"] = "recovered"
             recovery_status, recovered_state, recovery = self._recover_transaction(
                 job, kind="feature_graph", previous_identity=previous_identity, newly_created=True)
             return self._transaction_failure_response(
@@ -2057,6 +2116,7 @@ class CadOrchestrator:
 
         committed = backend.commit_transaction(transaction_name)
         if committed.get("status") != "COMPLETED":
+            progress["scope"] = "recovered"
             recovery_status, recovered_state, recovery = (
                 self._recover_transaction(
                     job,
@@ -2085,6 +2145,7 @@ class CadOrchestrator:
                 else None,
             )
 
+        progress["scope"] = "committed"
         job["completed_steps"].append(
             {
                 "kind": "feature_graph",

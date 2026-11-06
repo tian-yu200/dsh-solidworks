@@ -298,6 +298,24 @@ def test_large_fresh_repair_needs_no_batch_confirmation_but_still_counts(cad_env
     assert "设计有改动" in pending["action_summary"]
 
 
+def test_an_open_undo_scope_names_the_document_to_close(cad_env, monkeypatch):
+    # The service reports a scope only while its document is open, and then confirming alone
+    # cannot help (the begin would refuse), so the prompt has to say what to close.
+    real = cad_env.backend.documents
+
+    def inventory():
+        result = real()
+        result.update(undo_scope_active=True, undo_scope_document="零件18")
+        return result
+
+    monkeypatch.setattr(cad_env.backend, "documents", inventory)
+    calls = len(cad_env.backend.calls)
+    pending = submit(cad_env, GRAPH)
+    assert pending["status"] == "pending_confirmation"
+    assert "「零件18」" in pending["action_summary"] and "关掉" in pending["action_summary"]
+    assert len(cad_env.backend.calls) == calls
+
+
 @pytest.mark.parametrize("problem", ["still_open", "old_changed", "undo_active", "missing_inventory"])
 def test_discard_requires_complete_inventory_and_released_scope(cad_env, monkeypatch, problem):
     fail_graph(cad_env)

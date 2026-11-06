@@ -9,7 +9,15 @@ ADAPTER_DIR = Path(__file__).resolve().parents[1]
 if str(ADAPTER_DIR) not in sys.path:
     sys.path.insert(0, str(ADAPTER_DIR))
 
+import adapter_log  # noqa: E402
 import execution_client  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _private_log(tmp_path, monkeypatch):
+    """Keep these tests' fake timeouts out of the real adapter.log: by 2026-11-06 they were 243
+    of its 270 TIMEOUT lines and read exactly like live incidents."""
+    monkeypatch.setattr(adapter_log, "LOG_PATH", str(tmp_path / "adapter.log"))
 
 
 @pytest.fixture(autouse=True)
