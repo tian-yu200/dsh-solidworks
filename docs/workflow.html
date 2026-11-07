@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-solidwork · 工作流总览</title>
+<style>
+  :root{
+    --bg:#0a0f1c;
+    --bg2:#0f1626;
+    --panel:#131c2e;
+    --panel2:#182238;
+    --line:#243049;
+    --txt:#dbe4f3;
+    --dim:#8b9ab5;
+    --cyan:#38bdf8;
+    --teal:#2dd4bf;
+    --amber:#f59e0b;
+    --red:#f87171;
+    --green:#4ade80;
+    --violet:#a78bfa;
+    --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:
+      radial-gradient(1200px 600px at 12% -10%, #16233c 0%, transparent 60%),
+      radial-gradient(900px 500px at 95% 0%, #1b1830 0%, transparent 55%),
+      var(--bg);
+    color:var(--txt);
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--cyan);text-decoration:none}
+  code{font-family:var(--mono);font-size:.88em;background:#1b2537;border:1px solid var(--line);
+    border-radius:5px;padding:1px 5px;color:#cfe3ff;white-space:nowrap}
+  .wrap{max-width:1240px;margin:0 auto;padding:0 22px 90px}
+
+  /* ---------- header ---------- */
+  header.hero{padding:54px 0 26px;border-bottom:1px solid var(--line);margin-bottom:34px}
+  .kicker{font:600 12px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--cyan);opacity:.9}
+  h1{font-size:34px;line-height:1.25;margin:14px 0 10px;letter-spacing:-.4px}
+  h1 span{background:linear-gradient(92deg,#38bdf8,#a78bfa 55%,#2dd4bf);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--dim);max-width:78ch}
+  .metabar{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .pill{font:600 11.5px/1 var(--mono);padding:7px 11px;border-radius:999px;
+    border:1px solid var(--line);background:#101a2b;color:#a9bad6}
+  .pill b{color:var(--cyan);font-weight:700}
+
+  /* ---------- layout ---------- */
+  .shell{display:grid;grid-template-columns:206px minmax(0,1fr);gap:34px;align-items:start}
+  .shell>*{min-width:0}
+  nav.toc{position:sticky;top:18px;font-size:13px}
+  nav.toc .t{font:700 10.5px/1 var(--mono);letter-spacing:.18em;color:var(--dim);
+    text-transform:uppercase;margin:0 0 12px 10px}
+  nav.toc a{display:block;padding:7px 10px;border-radius:8px;color:#9db0cd;border-left:2px solid transparent}
+  nav.toc a:hover{background:#141e31;color:#e7eefb;border-left-color:var(--cyan)}
+
+  section{margin:0 0 54px;scroll-margin-top:18px}
+  h2{font-size:21px;margin:0 0 6px;letter-spacing:-.2px;display:flex;align-items:center;gap:10px}
+  h2 .n{font:700 11px/1 var(--mono);color:var(--cyan);border:1px solid #24405c;
+    background:#0f1e2e;border-radius:6px;padding:5px 7px}
+  h3{font-size:15px;margin:26px 0 10px;color:#e8f0fc}
+  .lead{color:var(--dim);margin:0 0 20px;max-width:82ch}
+
+  .card{background:linear-gradient(180deg,var(--panel) 0%,var(--bg2) 100%);
+    border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .card + .card{margin-top:14px}
+
+  /* ---------- architecture layers ---------- */
+  .layers{display:flex;flex-direction:column;gap:0}
+  .layer{display:grid;grid-template-columns:132px 1fr;gap:16px;align-items:center;
+    background:linear-gradient(90deg,#131d30,#0f1626);
+    border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .layer .role{font:700 11px/1.4 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--cyan)}
+  .layer .name{font-weight:650;font-size:15.5px}
+  .layer .desc{color:var(--dim);font-size:13px;margin-top:2px}
+  .layer.deny{border-color:#4a2230;background:linear-gradient(90deg,#221420,#150f1c)}
+  .layer.deny .role{color:var(--red)}
+  .arrow{height:26px;display:grid;place-items:center;color:#33507a}
+  .arrow::before{content:"";width:2px;height:11px;background:#2b4066}
+  .arrow::after{content:"";width:0;height:0;border:5px solid transparent;border-top:7px solid #2b4066;margin-top:-1px}
+  .badge{display:inline-block;font:600 10.5px/1 var(--mono);padding:4px 7px;border-radius:5px;
+    border:1px solid var(--line);background:#0d1728;color:#9fb3d1;margin-left:8px;vertical-align:middle}
+
+  /* ---------- steps ---------- */
+  .steps{counter-reset:s;display:flex;flex-direction:column;gap:12px}
+  .step{position:relative;padding:16px 18px 16px 56px;border-radius:12px;
+    background:linear-gradient(180deg,#131d30,#101827);border:1px solid var(--line)}
+  .step::before{counter-increment:s;content:counter(s);position:absolute;left:16px;top:15px;
+    width:26px;height:26px;border-radius:8px;display:grid;place-items:center;
+    font:700 12px/1 var(--mono);color:#06121e;background:linear-gradient(135deg,#38bdf8,#2dd4bf)}
+  .step .h{font-weight:650;margin-bottom:4px}
+  .step .h em{font-style:normal;font:600 11px/1 var(--mono);color:var(--cyan);
+    background:#0d1e2c;border:1px solid #21405a;border-radius:5px;padding:4px 6px;margin-left:8px;vertical-align:2px}
+  .step p{margin:4px 0 0;color:var(--dim);font-size:13.5px}
+  .step.gate::before{background:linear-gradient(135deg,#f59e0b,#f97316);color:#1a0f00}
+
+  /* ---------- decision flow ---------- */
+  .flow{display:flex;flex-direction:column;gap:0}
+  .fnode{position:relative;display:grid;grid-template-columns:30px 1fr auto;gap:12px;
+    align-items:center;background:#111a2b;border:1px solid var(--line);border-radius:11px;
+    padding:12px 14px}
+  .fnode .id{font:700 11px/1 var(--mono);color:#0a1523;background:#7f9dc4;border-radius:6px;
+    width:22px;height:22px;display:grid;place-items:center}
+  .fnode .txt{font-size:14px}
+  .fnode .kind{font:600 10px/1 var(--mono);color:#8fa5c4;border:1px solid var(--line);
+    border-radius:5px;padding:4px 6px;background:#0c1524}
+  .fnode.q{border-color:#3b4a1f;background:linear-gradient(90deg,#1a1d16,#121a22)}
+  .fnode.q .kind{color:var(--amber);border-color:#4a3a12}
+  .fnode.term{border-color:#1f4a35;background:linear-gradient(90deg,#10231c,#101a26)}
+  .fnode.term .kind{color:var(--green);border-color:#1f5a3d}
+  .fnode .loop{margin-top:6px;display:inline-flex;align-items:center;gap:6px;
+    font:600 11px/1 var(--mono);color:var(--amber);background:#241a08;
+    border:1px solid #4a3a12;border-radius:999px;padding:5px 9px}
+  .fnode .loop b{color:#ffd48a}
+  .fsep{height:18px;display:grid;place-items:center;color:#2b4066}
+  .fsep::before{content:"";width:2px;height:9px;background:#2b4066}
+  .fsep::after{content:"";width:0;height:0;border:5px solid transparent;border-top:7px solid #2b4066;margin-top:-1px}
+
+  /* ---------- pipeline ---------- */
+  .pipe{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px}
+  .pipe .box{flex:1 1 150px;min-width:150px;background:#111a2b;border:1px solid var(--line);
+    border-radius:10px;padding:12px 13px}
+  .pipe .box .t{font-weight:650;font-size:13.5px}
+  .pipe .box .d{color:var(--dim);font-size:12px;margin-top:3px}
+  .pipe .gt{display:grid;place-items:center;color:#33507a;font-size:18px;padding:0 2px}
+
+  /* ---------- tables ---------- */
+  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:420px}
+  th,td{text-align:left;padding:10px 13px;border-bottom:1px solid #1b2537;vertical-align:top}
+  th{background:#101a2b;font:700 11px/1.4 var(--mono);letter-spacing:.08em;color:#93a7c6;
+    text-transform:uppercase;position:sticky;top:0}
+  tr:last-child td{border-bottom:none}
+  td code{background:#0e1726}
+  tbody tr:hover{background:#121c2d}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid2>*,.grid3>*{min-width:0}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media (max-width:900px){
+    .shell{grid-template-columns:1fr}
+    nav.toc{position:static;display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+    nav.toc .t{display:none}
+    nav.toc a{border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:12px}
+    .grid2,.grid3{grid-template-columns:1fr}
+    .layer{grid-template-columns:1fr;gap:6px}
+    h1{font-size:26px}
+  }
+
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+  .chip{font:600 11.5px/1 var(--mono);padding:6px 9px;border-radius:6px;
+    background:#0e1a29;border:1px solid #23324c;color:#a8c4e6}
+  .chip.w{background:#1d1526;border-color:#3d2a4d;color:#c9b0e8}
+  .chip.r{background:#241318;border-color:#4d2831;color:#f0a9a9}
+  .chip.g{background:#0f231c;border-color:#1f4a37;color:#8ee0b6}
+
+  .note{border-left:3px solid var(--cyan);background:#0e1a29;border-radius:0 10px 10px 0;
+    padding:12px 16px;color:#b9cbe4;font-size:13.5px}
+  .note.warn{border-left-color:var(--amber);background:#1c1708}
+  .note.bad{border-left-color:var(--red);background:#1e1116}
+  .note b{color:#fff}
+
+  ul.tight{margin:8px 0 0;padding-left:20px;color:var(--dim);font-size:13.5px}
+  ul.tight li{margin:4px 0}
+  ul.tight li b{color:#dbe4f3;font-weight:600}
+
+  footer{border-top:1px solid var(--line);margin-top:20px;padding-top:22px;color:var(--dim);font-size:12.5px}
+  footer code{white-space:normal}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="kicker">dsh-solidwork · workflow map</div>
+  <h1>把三视图变成 <span>可验证的 SolidWorks 实体</span></h1>
+  <p class="sub">
+    这个项目的核心不是"让模型调用 CAD"，而是把一次建模拆成<strong>可复核的证据链</strong>：
+    先读图并锁定尺寸台账 → 出计划并取得批准 → 用一次完整的 Feature Graph 构建 →
+    用客观测量（投影、剖视、体积、质量属性）验证 → 才允许说"完成"。
+    模型全程看不到 COM / Shell / 宏 / 脚本，只有 12 个高层工具。
+  </p>
+  <div class="metabar">
+    <span class="pill"><b>12</b> 高层工具</span>
+    <span class="pill"><b>5</b> 条受控回环 L1–L5</span>
+    <span class="pill"><b>4</b> 级 trust_level</span>
+    <span class="pill"><b>18</b> 种 Feature Graph 节点</span>
+    <span class="pill"><b>0</b> 底层工具回退</span>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="toc">
+    <p class="t">目录</p>
+    <a href="#arch">1 · 分层架构</a>
+    <a href="#main">2 · 主工作流</a>
+    <a href="#intake">3 · 图纸识读</a>
+    <a href="#flow">4 · 重构决策图</a>
+    <a href="#fg">5 · Feature Graph 流水线</a>
+    <a href="#safety">6 · 事务与信任</a>
+    <a href="#tools">7 · 工具边界</a>
+    <a href="#files">8 · 事实来源</a>
+  </nav>
+
+  <main>
+
+    <!-- ============ 1 ============ -->
+    <section id="arch">
+      <h2><span class="n">01</span>分层架构</h2>
+      <p class="lead">自上而下六层，每一层只依赖下一层的契约。模型能改的只有最上面一层。</p>
+
+      <div class="layers">
+        <div class="layer">
+          <div class="role">Client</div>
+          <div>
+            <div class="name">DSH web / <code>--profile solidworks</code> 浏览器会话<span class="badge">preset: solidworks-cad</span></div>
+            <div class="desc">选择 preset 决定 CAD 指令与技能；profile 额外挂载 policy 插件。</div>
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="layer">
+          <div class="role">Boundary</div>
+          <div>
+            <div class="name">宿主侧 MCP client · 12 个高层工具</div>
+            <div class="desc">由宿主进程拥有，不随会话/preset 代际变化；工具返回紧凑单行 JSON 信封。</div>
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="layer">
+          <div class="role">Instruction</div>
+          <div>
+            <div class="name">solidworks-cad skill + references</div>
+            <div class="desc">SKILL.md（≤550 行）+ 5 份参考文档，通过 <code>read_mcp_resource</code> 分页读取。</div>
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="layer">
+          <div class="role">Orchestration</div>
+          <div>
+            <div class="name">Python 编排层 · 作业策略 · 事务 · 备份 · 确认</div>
+            <div class="desc"><code>orchestrator.py</code> / <code>policy.py</code> / <code>job_store.py</code>：job_token 鉴权、白名单编辑、undo 事务、写前备份。</div>
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="layer">
+          <div class="role">Compiler</div>
+          <div>
+            <div class="name">SolidPilot 确定性编译器 + C# 执行服务</div>
+            <div class="desc">Feature Graph IR → 节点日志 → 低层 CAD 调用。编译器内<b>没有 LLM</b>，可复现。</div>
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="layer">
+          <div class="role">CAD</div>
+          <div>
+            <div class="name">SolidWorks COM</div>
+            <div class="desc">真正的几何内核。只被 C# 执行服务触碰。</div>
+          </div>
+        </div>
+        <div class="arrow"></div>
+
+        <div class="layer deny">
+          <div class="role">Denied</div>
+          <div>
+            <div class="name">模型不可达：COM / Shell / 宏 / 脚本 / REST / 桌面自动化 / 旧低层 MCP</div>
+            <div class="desc">无回退路径。表达不了的操作必须报 <code>CAPABILITY_GAP</code>，工具面缺失报 <code>MCP_UNAVAILABLE</code>。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 2 ============ -->
+    <section id="main">
+      <h2><span class="n">02</span>主工作流</h2>
+      <p class="lead">任何 CAD 任务的固定骨架。带琥珀色编号的是<strong>门</strong>：不通过就不许写模型。</p>
+
+      <div class="steps">
+        <div class="step">
+          <div class="h">读状态<em>inspect_state · scope=state</em></div>
+          <p>确认 SolidWorks 就绪、当前活动文档、是否有被锁定的文档。此步不需要凭据。</p>
+        </div>
+        <div class="step">
+          <div class="h">按需读参考<em>inspect_state · scope=reference</em></div>
+          <p>只读这次任务需要的 topic：<code>contract</code>、<code>mapping_part</code>、<code>verification</code>、<code>feature_graph_quickref</code>…
+             大文档分页返回，用 <code>reference_offset</code> 续读，不要重复同一个调用。</p>
+        </div>
+        <div class="step">
+          <div class="h">（仅图纸/图片任务）完成有界识读</div>
+          <p>见 <a href="#intake">§3 图纸识读</a>。产出：尺寸台账 + 问题清单，交给用户确认。</p>
+        </div>
+        <div class="step gate">
+          <div class="h">出计划并取得批准<em>PLAN.md · inline</em></div>
+          <p>计划写在回复里（本 preset 没有文件工具），≤70 行 / ≤4 KB，用 <code>todo_write</code> 跟踪进度。
+             任何拓扑、方向、尺寸、特征顺序的变化都会产生新版本，必须重新批准。</p>
+        </div>
+        <div class="step">
+          <div class="h">开作业<em>start_job</em></div>
+          <p>拿到 <code>job_id</code> + 私密 <code>job_token</code>，并锁定目标文档身份。之后每次深层检查与写操作都要带这对凭据。
+             用户中途切换文档 → 作业目标失效，下一次写入被拦截。</p>
+        </div>
+        <div class="step">
+          <div class="h">建模<em>submit_feature_graph</em></div>
+          <p>新模型优先用<b>一次完整</b>的 <code>submit_feature_graph(fresh_document=true)</code>；不为了"造检查点"而把一张图拆开。
+             大而复杂的不对称件按里程碑推进（见 §5）。</p>
+        </div>
+        <div class="step">
+          <div class="h">看响应 + 看客观状态<em>inspect_state</em></div>
+          <p>不信返回码，信测量：特征树、几何、体积、质量属性、面/边索引。拓扑一变，旧索引立刻作废，必须重新读。</p>
+        </div>
+        <div class="step gate">
+          <div class="h">逐视图/剖视校验</div>
+          <p>主视图、俯视图、左视图、每一个给出的剖视图都要对得上。对不上就进 L5 回环，而不是"看起来差不多"。</p>
+        </div>
+        <div class="step">
+          <div class="h">产出与收尾<em>save_or_export · finish_job</em></div>
+          <p>保存/导出受策略约束（指定路径的保存必须确认）。<code>finish_job</code> 跑最终客观验证并关闭作业——写操作流程中它是强制的。</p>
+        </div>
+        <div class="step">
+          <div class="h">最终报告</div>
+          <p>文档与产物、实际完成的操作、做过的客观验证、<code>status</code> / <code>verification_status</code> / <code>recovery_status</code> / <code>trust_level</code>、
+             假设与不可用检查。<b>绝不</b>凭外观或返回码宣称成功。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 3 ============ -->
+    <section id="intake">
+      <h2><span class="n">03</span>图纸识读（intake）</h2>
+      <p class="lead">
+        整张图纸塞进模型视野时，小尺寸文字只剩几个像素——"猜尺寸"正是这套流程要消灭的失败模式。
+        识读是只读的，不碰 CAD、不需要 job，因此发生在 <code>start_job</code> 之前。
+      </p>
+
+      <div class="grid2">
+        <div class="card">
+          <h3 style="margin-top:0">三轮读取，然后必须收敛</h3>
+          <ul class="tight">
+            <li><b>Round 0 — 一次 OCR</b>：<code>read_drawing_text</code> 用 Windows 内置引擎整张扫描，约 3 秒，<b>不计入裁剪预算</b>。
+                结果当作候选表：确定性高但小符号会错读。</li>
+            <li><b>Round 1 — 一次总览</b>：<code>read_drawing_region</code> 空 region，返回带网格的整图，<b>免费</b>。
+                记下每个视图、投影制式、比例、标题栏，以及<b>完整的待读尺寸簇清单</b>（单元格 <code>C4</code> 或像素框）。</li>
+            <li><b>Round 2 — 一次调用读完所有簇</b>：<code>regions=["B2","C4",…]</code>，一次最多 12 个，共用一个 zoom。
+                一次调用，而不是每个簇一次。</li>
+            <li><b>Round 3 — 至多再一次</b>：只为仍然看不清的值，用更紧的框或更高 zoom。</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0">硬约束</h3>
+          <ul class="tight">
+            <li>每步 45–90 秒，所以<b>步数</b>和裁剪数一样重要：批量才是重点。</li>
+            <li>预算 <b>15 次裁剪 / 张图</b>（总览免费）。<code>INTAKE_BUDGET_EXHAUSTED</code> = 现在就把识读结果发出去。</li>
+            <li>同一框重复读被工具拒绝：<code>REGION_ALREADY_READ</code>（按图片 SHA-256 记忆）。</li>
+            <li><code>reset_budget=true</code> 只能在<b>用户明确要求继续读</b>之后使用。</li>
+            <li>禁止：量像素、开浏览器、跑脚本、用别的工具估尺寸。图纸没写的值就是 <code>UNKNOWN</code>，要问，不要算。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h3 style="margin-top:0">识读结果 = 台账 + 问题清单</h3>
+        <p style="margin:0;color:var(--dim);font-size:13.5px">
+          尺寸台账字段：<code>id</code>、数值、类型、所属视图、单元格/框、是否清晰可读。
+          连同问题清单一并通过 <code>ask_user_question</code> 发给用户；候选读数可以提（"看着像 26，确认？"），
+          但在用户回答前<b>绝不</b>进入台账成为事实。用户回答之前不许再放大、不许出 PLAN.md、不许出 Feature Graph。
+        </p>
+      </div>
+
+      <div class="note warn" style="margin-top:14px">
+        <b>证据优先级</b>：显式标注尺寸 &gt; 剖视图（材料/空腔/内部过渡）&gt; 轴测图（拓扑、特征存在性、左右手、前后关系，<i>不给真实尺寸</i>）
+        &gt; 正交视图交叉核对 &gt; 像素测量与视觉比例（最低，永不覆盖显式值）。冲突要记录并采用最高级证据。
+      </div>
+    </section>
+
+    <!-- ============ 4 ============ -->
+    <section id="flow">
+      <h2><span class="n">04</span>重构决策图</h2>
+      <p class="lead">
+        与 SKILL.md 里的 mermaid 图等价：N=19 节点、E=23 边、单连通、独立回环秩 5、McCabe 路径复杂度 6。
+        五条回环都必须有次数上限，超限即 <code>RETRY_EXHAUSTED</code> 并停下来问人。
+      </p>
+
+      <div class="flow">
+        <div class="fnode"><div class="id">A</div><div class="txt">读状态并取得图纸证据</div><div class="kind">read</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">B</div><div class="txt">分析提供的视图</div><div class="kind">analyze</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode q">
+          <div class="id">Q</div>
+          <div>
+            <div class="txt">证据读取成功？</div>
+            <span class="loop">否 · <b>L1</b> 缩小读取范围并递增 L1 → 回到 B</span>
+          </div>
+          <div class="kind">gate</div>
+        </div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">P</div><div class="txt">找到并分析轴测 3D 视图</div><div class="kind">analyze</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">S</div><div class="txt">分类剖视图并推断切除几何</div><div class="kind">analyze</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">O</div><div class="txt">识别视图并锁定方向契约（第一/第三角）</div><div class="kind">analyze</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">C</div><div class="txt">跨视图匹配边与角点</div><div class="kind">analyze</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">D</div><div class="txt">在回复中给出紧凑计划 + 里程碑 todo</div><div class="kind">plan</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode q">
+          <div class="id">E</div>
+          <div>
+            <div class="txt">当前版本计划已就绪且被批准？</div>
+            <span class="loop">否 · <b>L2</b> 修订计划 → 回到 D</span>
+          </div>
+          <div class="kind">gate</div>
+        </div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">F</div><div class="txt">开/复用作业；执行下一个 MCP 里程碑</div><div class="kind">write</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">G</div><div class="txt">检查响应与客观模型状态</div><div class="kind">verify</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode q">
+          <div class="id">H</div>
+          <div>
+            <div class="txt">里程碑与计划一致？</div>
+            <span class="loop">否 · <b>L4</b> 置 REPLAN_REQUIRED、修订计划 → 回到 E</span>
+          </div>
+          <div class="kind">gate</div>
+        </div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">I</div><div class="txt">勾 todo 并重新呈现计划</div><div class="kind">plan</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode q">
+          <div class="id">J</div>
+          <div>
+            <div class="txt">还有更多建模里程碑？</div>
+            <span class="loop">是 · <b>L3</b> → 回到 F</span>
+          </div>
+          <div class="kind">gate</div>
+        </div>
+        <div class="fsep"></div>
+
+        <div class="fnode"><div class="id">K</div><div class="txt">校验投影与所有给出的剖视</div><div class="kind">verify</div></div>
+        <div class="fsep"></div>
+
+        <div class="fnode q">
+          <div class="id">L</div>
+          <div>
+            <div class="txt">所有可用视图与剖视都吻合？</div>
+            <span class="loop">否 · <b>L5</b> → 走 X 修订</span>
+          </div>
+          <div class="kind">gate</div>
+        </div>
+        <div class="fsep"></div>
+
+        <div class="fnode term"><div class="id">M</div><div class="txt">发布产物、结束作业、出报告</div><div class="kind">done</div></div>
+
+        <div class="fsep"></div>
+        <div class="fnode" style="border-color:#4d2831;background:linear-gradient(90deg,#1e1116,#121a22)">
+          <div class="id" style="background:#f0a9a9">X</div>
+          <div>
+            <div class="txt">超限或需要重新规划：置 <code>REPLAN_REQUIRED</code> / 停止变更并请求决定性输入</div>
+            <span class="loop" style="color:var(--red);background:#241318;border-color:#4d2831">回环耗尽时输出 <b>STATUS: RETRY_EXHAUSTED</b> + LOOP_ID + ATTEMPTS + LAST_CAUSE + ACTION</span>
+          </div>
+          <div class="kind" style="color:var(--red);border-color:#4d2831">stop</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 5 ============ -->
+    <section id="fg">
+      <h2><span class="n">05</span>Feature Graph 流水线</h2>
+      <p class="lead">
+        模型产出的是<b>特征意图</b>（IR），不是一串工具调用。编译器确定性地把它降级成 SolidWorks 操作，再逐节点验证。
+      </p>
+
+      <div class="pipe">
+        <div class="box"><div class="t">用户意图 + 图纸证据</div><div class="d">尺寸台账 / 视图契约</div></div>
+        <div class="gt">→</div>
+        <div class="box"><div class="t">Feature Graph IR</div><div class="d">CAD 中立，节点引用 + 锚点</div></div>
+        <div class="gt">→</div>
+        <div class="box"><div class="t">确定性编译器</div><div class="d">schema 校验、计划期拒绝重叠轮廓</div></div>
+        <div class="gt">→</div>
+        <div class="box"><div class="t">C# 执行服务</div><div class="d">undo 事务内逐节点构建</div></div>
+        <div class="gt">→</div>
+        <div class="box"><div class="t">写后验证</div><div class="d">节点日志 + CAD 状态 + 测量</div></div>
+        <div class="gt">→</div>
+        <div class="box"><div class="t">失败回滚</div><div class="d">rollback_failed 需人工立即复核</div></div>
+      </div>
+
+      <h3>节点词汇（18 种）</h3>
+      <div class="chips">
+        <span class="chip">box</span><span class="chip">sketch</span><span class="chip">extrude</span>
+        <span class="chip">revolve</span><span class="chip">sweep</span><span class="chip">loft</span>
+        <span class="chip">rib</span><span class="chip">hole</span><span class="chip">fillet</span>
+        <span class="chip">chamfer</span><span class="chip">shell</span><span class="chip">mirror</span>
+        <span class="chip">linear_pattern</span><span class="chip">circular_pattern</span>
+        <span class="chip w">sheet_metal</span><span class="chip w">sketched_bend</span><span class="chip w">edge_flange</span>
+        <span class="chip w">cosmetic_thread</span>
+      </div>
+
+      <h3>里程碑策略（不对称铸件 / 交叉孔阀体 / 支架类）</h3>
+      <div class="card">
+        <ul class="tight" style="margin-top:0">
+          <li>超大图会在中途失败，而恢复结果可能是<b>被悄悄简化</b>的零件——所以拆成有序里程碑，而不是一张巨图。</li>
+          <li>按形状顺序推进：最不对称的真实轮廓 → 法向边界面 → 内部孔槽 → 斜面 → 曲面/回转特征。</li>
+          <li>每个里程碑之后，只校验约束它的那些视图，再规划下一个。</li>
+          <li>有证据的每个特征都必须落在某个里程碑里；<b>为了塞进一张图而丢特征属于计划缺陷，不是简化</b>。</li>
+          <li>草图尽量简单并完全约束：先几何关系，再位置尺寸，再形状尺寸；首个基准/草图尽量锚到原点。</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 6 ============ -->
+    <section id="safety">
+      <h2><span class="n">06</span>事务、失败与信任</h2>
+      <p class="lead">写操作永远在 undo 事务里；已有文件尽量做首次写入备份。备份是恢复证据，不是"文档已还原"的证明。</p>
+
+      <div class="grid2">
+        <div>
+          <h3 style="margin-top:0">响应状态处理</h3>
+          <div class="tw">
+            <table>
+              <thead><tr><th>status</th><th>动作</th></tr></thead>
+              <tbody>
+                <tr><td><code>completed</code></td><td>核对 <code>verification</code>、<code>partial_state</code>、<code>completed_steps</code> 后才继续</td></tr>
+                <tr><td><code>pending_confirmation</code></td><td>进入确认流程并暂停</td></tr>
+                <tr><td><code>failed</code></td><td>停止，检查 <code>error</code> 与 <code>recovery_status</code></td></tr>
+                <tr><td><code>partial</code></td><td>停止；部分状态可能残留，报告步骤/备份/恢复结果</td></tr>
+                <tr><td><code>verification_failed</code></td><td>停止；已执行但客观验证未通过</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3 style="margin-top:0">信任等级</h3>
+          <div class="tw">
+            <table>
+              <thead><tr><th>trust_level</th><th>含义</th></tr></thead>
+              <tbody>
+                <tr><td><code>unverified</code></td><td>未验证，不能宣称完成</td></tr>
+                <tr><td><code>built_unverified</code></td><td>已构建，关键客观证据不可用</td></tr>
+                <tr><td><code>drawing_consistent</code></td><td>工程图方向证据一致，但无参考实体比较</td></tr>
+                <tr><td><code>verified</code></td><td>最终客观验证通过</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <h3>确认协议（一次性令牌）</h3>
+      <div class="steps" style="counter-reset:s 0">
+        <div class="step gate">
+          <div class="h">暂停并请求<em>request_confirmation</em></div>
+          <p>用同一 job 与 action ID 请求；原样展示返回的 <code>action_summary</code>。原始请求不构成危险动作的批准。</p>
+        </div>
+        <div class="step gate">
+          <div class="h">等一条<b>新的</b>明确批准消息</div>
+          <p>MCP 无法在密码学上证明批准来自人类；preset 与 skill 要求必须是一条全新的用户消息。</p>
+        </div>
+        <div class="step gate">
+          <div class="h">执行<em>confirm_action</em></div>
+          <p>只接受<b>未变化</b>的 action、token、确认文本与摘要。令牌不可复用；风险或摘要一变就必须重新确认。</p>
+        </div>
+      </div>
+
+      <h3>操作限制</h3>
+      <div class="grid3">
+        <div class="card"><b>文档身份</b><div class="desc" style="color:var(--dim);font-size:13px">用户切换文档会使作业目标失效，并拦下下一次写入。</div></div>
+        <div class="card"><b>只读锁定</b><div class="desc" style="color:var(--dim);font-size:13px">对非本作业拥有的文档写入会返回 <code>JOB_DOCUMENT_READ_ONLY</code>。</div></div>
+        <div class="card"><b>回滚边界</b><div class="desc" style="color:var(--dim);font-size:13px">跨文档与外部文件动作仍超出恢复能力；<code>rollback_failed</code> 必须人工复核。</div></div>
+      </div>
+    </section>
+
+    <!-- ============ 7 ============ -->
+    <section id="tools">
+      <h2><span class="n">07</span>工具边界</h2>
+      <p class="lead">调用前缀 <code>mcp__solidworks__</code>。没有低层回退路径。</p>
+
+      <div class="tw">
+        <table>
+          <thead><tr><th style="width:210px">工具</th><th style="width:120px">风险</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td><code>start_job</code></td><td>读/打开</td><td>连接 SolidWorks，按需打开文件，锁定活动文档并返回 <code>job_id</code> + <code>job_token</code></td></tr>
+            <tr><td><code>inspect_state</code></td><td>只读</td><td>就绪状态、文档分析（特征/几何/质量属性/面/边/选择集）、受控 recipe/schema 参考</td></tr>
+            <tr><td><code>submit_feature_graph</code></td><td>写/批量</td><td>用确定性编译器执行一张完整的 Feature Graph</td></tr>
+            <tr><td><code>apply_document_edits</code></td><td>写/破坏性/批量</td><td>对已锁定文档执行白名单参数化编辑</td></tr>
+            <tr><td><code>drawing_workflow</code></td><td>写</td><td>生成生产工程图：视图、剖视、局部、标注、BOM/孔表、标准检查</td></tr>
+            <tr><td><code>save_or_export</code></td><td>写/输出</td><td>保存、导出、批量导出、关闭（受安全策略约束）</td></tr>
+            <tr><td><code>request_confirmation</code></td><td>控制</td><td>轮换一次性令牌，返回用户必须原样批准的摘要</td></tr>
+            <tr><td><code>confirm_action</code></td><td>控制</td><td>在新批准之后执行<b>恰好一个</b>动作</td></tr>
+            <tr><td><code>cancel_action</code></td><td>控制</td><td>取消排队中的确认动作（用于释放待定 Feature Graph）</td></tr>
+            <tr><td><code>finish_job</code></td><td>验证</td><td>跑最终客观验证并关闭作业；写流程中强制</td></tr>
+            <tr><td><code>read_drawing_text</code></td><td>只读</td><td>整张图纸 OCR：每个文本 + 位置 + 网格单元，识读第 0 轮</td></tr>
+            <tr><td><code>read_drawing_region</code></td><td>只读</td><td>按网格单元或像素框放大读小尺寸；无需 job，不碰 CAD</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid2" style="margin-top:16px">
+        <div class="card">
+          <h3 style="margin-top:0">放行的支撑工具（同一策略插件）</h3>
+          <div class="chips">
+            <span class="chip g">ask_user_question</span>
+            <span class="chip g">todo_write</span>
+            <span class="chip g">skill</span>
+            <span class="chip g">modlens_read_image</span>
+            <span class="chip g">list_mcp_resources</span>
+            <span class="chip g">read_mcp_resource</span>
+          </div>
+          <p style="color:var(--dim);font-size:13px;margin:10px 0 0">
+            图片只接受<b>本地路径</b>；<code>http://</code>、<code>https://</code>、<code>ftp://</code>、<code>file://</code> 一律拒绝。
+            本 preset 没有文件工具，所以技能参考只能通过 <code>read_mcp_resource</code>（<code>solidworks://skill/references/&lt;file&gt;.md</code>）读取；
+            带 <code>..</code> 的 URI 报 <code>SKILL_RESOURCE_TRAVERSAL_REFUSED</code>，不在清单内的名字报 <code>SKILL_RESOURCE_NOT_FOUND</code>。
+          </p>
+        </div>
+        <div class="card">
+          <h3 style="margin-top:0">编辑白名单（apply_document_edits）</h3>
+          <div class="chips">
+            <span class="chip">modify_dimension</span><span class="chip">edit_feature</span>
+            <span class="chip">set_part_material</span><span class="chip">add_edge_feature</span>
+            <span class="chip">create_pattern</span><span class="chip">add_reference_geometry</span>
+            <span class="chip">add_sketch_constraint</span><span class="chip">insert_toolbox_component</span>
+            <span class="chip">create_exploded_view</span>
+          </div>
+          <p style="color:var(--dim);font-size:13px;margin:10px 0 0">
+            用当前特征名与刚读到的几何引用；拓扑一变必须重新检查。删除与大批量编辑进入确认流程。
+          </p>
+        </div>
+      </div>
+
+      <div class="note bad" style="margin-top:16px">
+        <b>编排器内部低层命令</b>（<code>begin_undo_scope</code>、<code>rollback_undo_scope</code>、<code>export_document</code> 等）
+        不是模型接口。模型需要的能力必须由 12 个高层工具表达出来，否则报 <code>CAPABILITY_GAP</code>。
+      </div>
+    </section>
+
+    <!-- ============ 8 ============ -->
+    <section id="files">
+      <h2><span class="n">08</span>事实来源</h2>
+      <p class="lead">这张图只是索引；真正的契约在下面这些文件里。</p>
+      <div class="tw">
+        <table>
+          <thead><tr><th style="width:44%">文件</th><th>内容</th></tr></thead>
+          <tbody>
+            <tr><td><code>.dsh/skills/solidworks-cad/SKILL.md</code></td><td>工具边界、主流程、决策图、确认、事务、验证、PLAN.md 模板</td></tr>
+            <tr><td><code>.dsh/skills/solidworks-cad/references/drawing-intake.md</code></td><td>三轮识读协议、预算、禁止事项</td></tr>
+            <tr><td><code>…/references/reconstruction-reasoning.md</code></td><td>证据顺序、缺失尺寸门、投影与坐标、里程碑策略</td></tr>
+            <tr><td><code>…/references/part-drawing-evidence.md</code></td><td>尺寸、标题栏、孔/螺纹标注、公差、材料、表面处理</td></tr>
+            <tr><td><code>…/references/assembly-reconstruction.md</code></td><td>多零件装配体的证据处理</td></tr>
+            <tr><td><code>…/references/feature-graph-capability-map.md</code></td><td>IR 节点 ↔ SolidWorks 能力映射</td></tr>
+            <tr><td><code>mcp-server-solidworks-main/adapters/dsh/server.py</code></td><td>模型可见工具面的<b>事实源</b></td></tr>
+            <tr><td><code>mcp-server-solidworks-main/cad-planner/contracts/feature-graph.schema.json</code></td><td>IR 与能力注册表（单一事实源）</td></tr>
+            <tr><td><code>docs/SolidWorks-MCP工具清单.md</code></td><td>逐工具入参/出参、响应与恢复、trust level</td></tr>
+            <tr><td><code>dsh-integration/README.md</code></td><td>安装面、preset 选择、安全模型、操作限制</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="color:var(--dim);font-size:12.5px;margin-top:14px">
+        注：<code>docs/SolidWorks-MCP工具清单.md</code> 仍写作"11 个工具"，<code>read_drawing_text</code> 是后续新增的第十二个。
+      </p>
+    </section>
+
+    <footer>
+      由 <code>dsh-solidwork</code> 的 SKILL.md / references / 工具清单整理而成 ·
+      工作流以 <code>.dsh/skills/solidworks-cad/SKILL.md</code> 为准，本页仅为可视化索引。
+    </footer>
+
+  </main>
+</div>
+</div>
+</body>
+</html>
