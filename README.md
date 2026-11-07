@@ -1,5 +1,8 @@
 # dsh-solidworks
 
+[![CI](https://github.com/tian-yu200/dsh-solidworks/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tian-yu200/dsh-solidworks/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tian-yu200/dsh-solidworks)](https://github.com/tian-yu200/dsh-solidworks/releases/latest)
+
 这是一个面向 SolidWorks 的 DeepSeek Harness 集成，把自然语言 CAD 任务收敛到受控的高层 MCP 工具、Python 编排器和 SolidPilot 执行层。
 
 项目目前是 Windows-only public alpha。它基于并修改了上游 [SolidPilot](https://github.com/eyfel/mcp-server-solidworks)，保留原作者版权并使用 AGPL-3.0，详见 [NOTICE.md](NOTICE.md) 和 [LICENSE](LICENSE)。
