@@ -1130,12 +1130,14 @@ class CadOrchestrator:
 
     @staticmethod
     def _pending_feature_graph(job):
+        # An expired graph can no longer be confirmed, so it must not hold the job's writes either.
         return next(
             (
                 action
                 for action in (job.get("pending_actions") or {}).values()
                 if action.get("kind") == "feature_graph"
                 and not action.get("consumed")
+                and not action_expired(action)
             ),
             None,
         )

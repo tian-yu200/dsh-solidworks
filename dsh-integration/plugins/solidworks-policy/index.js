@@ -390,6 +390,24 @@ function filterSkillCatalog(decision, diag) {
   return changed ? { ...decision, messages } : decision;
 }
 
+/**
+ * The session's approval policy ("ask" | "never"), or undefined when it cannot be read.
+ *
+ * confirm_action is raised to an ask so the user approves it in the DSH dialog. Under "never"
+ * (the danger-full-access preset) no dialog exists: before the 2026-11-04 desktop update that ask
+ * was granted at once (15 of 15, 2026-10-30..11-02); core 0.2.1-rc.5 rejects it before any
+ * answerer runs, so every repair after a failed build became unconfirmable (session 3b10ed57,
+ * 2026-11-06). Such a session keeps the grant; the user's consent is the question round the
+ * persona requires before a design change.
+ */
+function approvalPolicy(ctx, agent) {
+  try {
+    return agent?.session ? ctx.get("approval")?.effectivePolicy(agent.session) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function apply(ctx) {
   const progress = createIntakeProgress(ctx.logger);
   const diag = createDiagnostics();
@@ -481,6 +499,12 @@ function apply(ctx) {
     }
     if (exec.name !== CONFIRM_TOOL) {
       return next();
+    }
+    if (approvalPolicy(ctx, exec.agent) === "never") {
+      return Promise.resolve(next()).then((result) => {
+        if (result?.kind === "allow") diag("confirm-allowed", { policy: "never" });
+        return result;
+      });
     }
     const summary = exec.arguments?.action_summary;
     const reason =

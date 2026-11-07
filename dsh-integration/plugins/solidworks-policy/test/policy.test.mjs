@@ -424,6 +424,42 @@ test("confirm_action becomes a user prompt carrying its own summary", async () =
   assert.equal(refused.kind, "deny", "a denial from next() is not turned into an ask");
 });
 
+test("confirm_action is not turned into an ask the session's 'never' policy would reject", async () => {
+  // DSH 0.2.1-rc.5 rejects every ask under approval policy "never" before any answerer sees it:
+  // session 3b10ed57 (2026-11-06) had 4 of 4 repair confirmations rejected in 0 ms.
+  const env = harness();
+  const policies = new Map();
+  env.ctx.get = (service) =>
+    service === "approval" ? { effectivePolicy: (session) => policies.get(session) } : undefined;
+  apply(env.ctx);
+  const never = { session: {} };
+  const ask = { session: {} };
+  policies.set(never.session, "never");
+  policies.set(ask.session, "ask");
+  const confirm = (agent, next) => env.preExecute({
+    name: "mcp__solidworks__confirm_action",
+    arguments: { action_summary: "Build 42 Feature Graph nodes in a new document." },
+    agent,
+  }, next);
+
+  assert.equal((await confirm(never)).kind, "allow");
+  assert.equal((await confirm(ask)).kind, "ask", "a session that can answer still gets the prompt");
+  const refused = await confirm(never, async () => ({ kind: "deny", reason: "already denied" }));
+  assert.equal(refused.kind, "deny", "a denial from next() stays a denial");
+});
+
+test("confirm_action keeps its prompt when the approval policy cannot be read", async () => {
+  const env = harness();
+  env.ctx.get = () => { throw new Error("approval service not ready"); };
+  apply(env.ctx);
+  const asked = await env.preExecute({
+    name: "mcp__solidworks__confirm_action",
+    arguments: { action_summary: "Overwrite Bracket.SLDPRT" },
+    agent: { session: {} },
+  });
+  assert.equal(asked.kind, "ask");
+});
+
 test("a pending user question blocks SolidWorks calls until its tool settles", async () => {
   const env = harness();
   apply(env.ctx);

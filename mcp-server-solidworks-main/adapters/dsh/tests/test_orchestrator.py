@@ -2389,6 +2389,33 @@ def test_pending_graph_blocks_all_job_writes_until_cancelled(cad_env, tmp_path):
     assert env.backend.state["activeDocumentPath"] == str(env.source)
 
 
+def test_expired_pending_graph_no_longer_blocks_job_writes(cad_env):
+    # Session 3b10ed57 (2026-11-06): request_confirmation answered "Pending action has expired",
+    # yet the next submit_feature_graph was refused GRAPH_PENDING_CONFIRMATION by that same action.
+    env = cad_env
+    started = env.orchestrator.begin_job("edit explicitly targeted part", str(env.source))
+    pending = env.orchestrator.feature_graph(
+        started["job_id"], started["job_token"], json.dumps(_batch_graph()),
+        fresh_document=False,
+    )
+    assert pending["status"] == "pending_confirmation"
+    job = env.store.load(started["job_id"], started["job_token"])
+    job["pending_actions"][pending["action_id"]]["created_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat()
+    env.store.save(job)
+
+    with pytest.raises(ValueError, match="Pending action has expired"):
+        env.orchestrator.request_confirmation(
+            started["job_id"], started["job_token"], pending["action_id"]
+        )
+    built = env.orchestrator.feature_graph(
+        started["job_id"], started["job_token"], json.dumps(_minimal_graph()),
+        fresh_document=False,
+    )
+    assert built["status"] == "completed", built
+
+
 def test_targetless_preexisting_document_is_read_only(cad_env, tmp_path):
     env = cad_env
     started = env.orchestrator.begin_job("inspect active user part")
