@@ -1,0 +1,41 @@
+# Runs every test that needs no SolidWorks: the Python orchestrator/compiler/intake suite and the
+# Node tests of the DSH policy plugin and install scripts. Windows, because the project is
+# Windows-only (COM, msvcrt, backslash paths) and a Linux run would hide exactly those bugs.
+# Real SolidWorks builds cannot run here (no licence on a hosted runner); those stay local.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: mcp-server-solidworks-main/adapters/claude/requirements*.txt
+
+      - name: Install Python dependencies
+        # requirements-dev.txt installs the compiler with "-e ../../compiler/solidworks",
+        # a path pip resolves from the working directory.
+        working-directory: mcp-server-solidworks-main/adapters/claude
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Python tests
+        working-directory: mcp-server-solidworks-main
+        run: python -m pytest -q
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Node tests
+        run: node --test "dsh-integration/plugins/solidworks-policy/test/*.test.mjs" "dsh-integration/scripts/test/*.test.mjs"
