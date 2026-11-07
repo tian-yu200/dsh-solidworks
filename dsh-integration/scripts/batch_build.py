@@ -6,7 +6,12 @@ Drives the existing orchestrator directly (no DSH host needed):
 
 Usage:
     python batch_build.py --graph g.json --name ValveBody [--out DIR] [--repeat N]
-                          [--intent "..."] [--keep-open] [--force]
+                          [--intent "..."] [--keep-open] [--force] [--pace SECONDS]
+
+--pace replays a graph slowly enough to film: after each feature the view goes to
+isometric + zoom-to-fit and the build waits SECONDS; each sketch entity waits a fraction
+of that. It is the same graph through the same compiler, only slower — a live DSH build
+of the 44-node 阀体 took 28 s, too fast to watch.
 
 The graph JSON is the same schema submit_feature_graph accepts. Every build is a
 NEW document; the output file is never overwritten (numeric suffix is added).
@@ -24,6 +29,7 @@ import argparse
 import json
 import msvcrt
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -72,6 +78,143 @@ def acquire_batch_lock():
     return handle
 
 
+# Compiler calls that leave a new feature in the tree (revolve and sweep go through extrude_feature).
+FEATURE_TOOLS = frozenset({"extrude_feature", "add_edge_feature", "add_cosmetic_thread", "create_pattern",
+                           "create_shell", "create_rib", "sheet_metal_feature", "sketched_bend",
+                           "edge_flange", "add_reference_geometry", "insert_component", "add_mate"})
+SKETCH_TOOLS = frozenset({"add_sketch_entity"})
+
+
+def _com(obj, name, *args):
+    """Late-bound COM call. pywin32 already runs a no-argument method on attribute lookup and hands
+    back its result (an int, or a CDispatch that is itself callable), so only a bound method is called."""
+    member = getattr(obj, name)
+    return member(*args) if type(member).__name__ == "method" else member
+
+
+def _view_fitter():
+    """Show the SolidWorks the execution layer drives, and fit each step's view through its COM object.
+
+    That instance is the first one in the Running Object Table, the same one GetActiveObject
+    returns here. It can be running without a window: on 2026-11-02 the replay built and saved
+    in a SolidWorks that had been hidden since noon, while the user watched a second instance.
+    So it is made visible and brought to the front before the countdown. View only: nothing in
+    the model changes. Returns a no-op when SolidWorks cannot be reached (press F to fit by hand)."""
+    try:
+        import win32com.client
+        import win32gui
+        sw = win32com.client.GetActiveObject("SldWorks.Application")
+        pid = _com(sw, "GetProcessID")
+        if not sw.Visible:
+            log(f"SolidWorks PID {pid} was running without a window; showing it")
+        sw.Visible = True
+        sw.UserControl = True
+        hwnd = _com(_com(sw, "Frame"), "GetHWnd")
+        win32gui.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:  # noqa: BLE001 — Windows may refuse focus stealing; the window is still shown
+            pass
+        others = sorted(p for p in _solidworks_pids() if p != pid)
+        if others:
+            log(f"note: the build runs in SolidWorks PID {pid}; PID {', '.join(map(str, others))} "
+                "is another SolidWorks window that will NOT change")
+    except Exception as exc:  # noqa: BLE001 — any COM failure only costs the auto view
+        log(f"could not reach SolidWorks over COM ({exc}); show its window yourself and press F to fit")
+        return lambda: None
+
+    def fit():
+        try:
+            doc = sw.ActiveDoc
+            if doc is not None:
+                _com(doc, "ShowNamedView2", "*Isometric", 7)
+                _com(doc, "ViewZoomtofit2")
+        except Exception:  # noqa: BLE001
+            pass
+    return fit
+
+
+def _solidworks_pids():
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq SLDWORKS.exe", "/FO", "CSV", "/NH"],
+                         capture_output=True, text=True, timeout=30).stdout
+    return [int(row.split('","')[1]) for row in out.splitlines() if row.count('","') >= 2]
+
+
+def pace_builds(seconds):
+    """Slow every compiler call down for filming: a pause after each feature, a short one per sketch entity."""
+    import ir_execution_port
+
+    fit = _view_fitter()
+    original = ir_execution_port.AdapterExecutionPort.execute
+
+    def execute(self, tool, params, state_version):
+        response = original(self, tool, params, state_version)
+        if response.get("status") == "COMPLETED":
+            if tool in FEATURE_TOOLS:
+                fit()
+                time.sleep(seconds)
+            elif tool in SKETCH_TOOLS:
+                time.sleep(min(seconds / 5, 0.4))
+        return response
+
+    ir_execution_port.AdapterExecutionPort.execute = execute
+
+
+class StopAfterThisPart:
+    """Ctrl+C during a build finishes the current part first, then ends the batch.
+
+    A build killed halfway leaves the execution layer's undo scope open and a half-built part,
+    and every later build then fails at its first step with UNDO_SCOPE_ACTIVE (2026-11-02,
+    twice while filming). A second Ctrl+C still aborts at once, with that warning."""
+
+    def __init__(self):
+        self.requested = False
+        self._previous = None
+
+    def __enter__(self):
+        self._previous = signal.signal(signal.SIGINT, self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        signal.signal(signal.SIGINT, self._previous)
+
+    def _handler(self, signum, frame):
+        if self.requested:
+            signal.signal(signal.SIGINT, self._previous)
+            log("second Ctrl+C: aborting now; the half-built part is left open")
+            raise KeyboardInterrupt
+        self.requested = True
+        log("Ctrl+C: finishing this part first so SolidWorks is left clean, then stopping "
+            "(press Ctrl+C again to abort at once)")
+
+
+INTERRUPT = StopAfterThisPart()
+
+
+def clear_stale_undo_scope():
+    """Restart the execution service when an interrupted build left its undo scope open.
+
+    Only the scope's own document can close it, and an interrupted build's half-built part is
+    usually closed by hand afterwards, so the open scope can only be dropped by restarting the
+    service. Safe here: the batch lock is held and no DSH server is running, so no build of
+    anyone else's is in flight. begin_job starts the service again and reattaches SolidWorks."""
+    from backend import backend
+
+    if not backend.documents().get("undo_scope_active"):
+        return
+    log("an interrupted build left the execution service's undo scope open; restarting the service")
+    subprocess.run(["taskkill", "/IM", "SolidworksExecution.exe", "/F"], capture_output=True, timeout=30)
+    time.sleep(2)
+
+
+def countdown(seconds):
+    for left in range(seconds, 0, -1):
+        if INTERRUPT.requested:
+            raise Stop("cancelled with Ctrl+C before anything was built")
+        log(f"building in {left} s — bring SolidWorks to the front and start recording")
+        time.sleep(1)
+
+
 def validate_graph(graph):
     from pycompiler.ir_schema import validate
 
@@ -115,7 +258,7 @@ def unique_path(directory, name, suffix):
     return candidate if not candidate.exists() else directory / f"{name}_{next_index(directory, name, suffix)}{suffix}"
 
 
-def build_once(orch, graph_json, intent, out_path, keep_open):
+def build_once(orch, graph_json, intent, out_path, keep_open, lead_in=0):
     t = {"begin": 0.0, "build": 0.0, "save": 0.0, "finish": 0.0}
     t0 = time.time()
     r = unwrap(orch.begin_job(intent, ""))  # brings the execution layer and SolidWorks up
@@ -124,6 +267,7 @@ def build_once(orch, graph_json, intent, out_path, keep_open):
     job_id, token = r["job_id"], r["job_token"]
     t["begin"] = time.time() - t0
     log(f"job {job_id[:8]} begun ({t['begin']:.1f}s)")
+    countdown(lead_in)
 
     t0 = time.time()
     r = unwrap(orch.feature_graph(job_id, token, graph_json, fresh_document=True))
@@ -168,7 +312,12 @@ def main():
     ap.add_argument("--keep-open", action="store_true", help="finish each job but leave its document open")
     ap.add_argument("--force", action="store_true",
                     help="run even though a DSH SolidWorks server is running (you are sure it is idle)")
+    ap.add_argument("--pace", type=float, default=0.0,
+                    help="demo replay for filming: seconds to pause after each feature (e.g. 2)")
+    ap.add_argument("--lead-in", type=int, default=None,
+                    help="seconds of countdown before the build starts (default 10 with --pace, else 0)")
     args = ap.parse_args()
+    lead_in = args.lead_in if args.lead_in is not None else (10 if args.pace > 0 else 0)
 
     graph = json.loads(Path(args.graph).read_text(encoding="utf-8"))
     out_dir = Path(args.out)
@@ -192,6 +341,10 @@ def main():
     import orchestrator
 
     orch = orchestrator.orchestrator
+    clear_stale_undo_scope()
+    if args.pace > 0:
+        pace_builds(args.pace)
+        log(f"demo replay: {args.pace:g} s after each feature, view fitted to isometric")
     runs = []
     first = next_index(out_dir, args.name, ".SLDPRT") if args.repeat > 1 else None
     total0 = time.time()
@@ -201,7 +354,9 @@ def main():
                     else out_dir / f"{args.name}_{first + i}{suffix}")
         log(f"=== run {i + 1}/{args.repeat} -> {out_path.name}")
         try:
-            t, verif, trust, warnings = build_once(orch, graph_json, args.intent, out_path, args.keep_open)
+            with INTERRUPT:
+                t, verif, trust, warnings = build_once(orch, graph_json, args.intent, out_path,
+                                                       args.keep_open, lead_in)
             runs.append({"file": str(out_path), "ok": True, "timing": t, "verification": verif, "trust": trust, "warnings": warnings})
         except Stop as exc:
             runs.append({"file": str(out_path), "ok": False, "error": str(exc)})
@@ -210,6 +365,9 @@ def main():
         except Exception as exc:
             runs.append({"file": str(out_path), "ok": False, "error": str(exc)})
             log(f"FAILED: {exc}")
+        if INTERRUPT.requested:
+            log("stopped after this part, as asked with Ctrl+C")
+            break
     total = time.time() - total0
     lock.close()
 
