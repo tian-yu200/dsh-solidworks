@@ -147,8 +147,13 @@ def parse_region(region, width, height):
                   f"{text} lies outside the {width}x{height} source image. A region is never "
                   "clipped silently: a clipped crop hides what it left out.")
         return (int(x0), int(y0), int(x1), int(y1)), "box", text
+    # 2026-11-02 (e1125898): five view names with no box cost a whole step. Say what a view
+    # needs and give the image size, so the retry carries the boxes at once.
     _fail("INVALID_REGION",
-          f"'{text}' is not a grid cell (A–H then 1–{GRID_ROWS}) or a box 'x0,y0,x1,y1'.")
+          f"'{text}' is not a region: a view name alone cannot be cropped. Frame the whole view "
+          f"with its source-pixel box, optionally after the name — e.g. '主视: 20,70,600,650' "
+          f"(this image is {width}x{height} px). The box only frames the crop; dimensions are "
+          "read from the drawing's numbers, never measured in pixels.")
 
 
 def _default_font(size):

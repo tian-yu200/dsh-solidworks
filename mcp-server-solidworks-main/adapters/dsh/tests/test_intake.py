@@ -236,6 +236,16 @@ def test_a_view_label_in_front_of_the_box_is_dropped():
         intake.parse_region("front/profile + dimensions", 1293, 909)
 
 
+def test_a_view_name_without_a_box_says_how_to_frame_it():
+    # 2026-11-02 (e1125898): five names like "A-A剖视（中上）" with no box cost a whole step.
+    with pytest.raises(RuntimeError) as raised:
+        intake.parse_region("A-A剖视（中上）", 1293, 909)
+    message = str(raised.value)
+    assert message.startswith("INVALID_REGION")
+    assert "'主视: 20,70,600,650'" in message and "1293x909 px" in message
+    assert "never measured in pixels" in message and "grid cell" not in message
+
+
 def test_a_region_with_no_area_is_rejected(intake_root, sheet):
     with pytest.raises(RuntimeError, match="REGION_TOO_SMALL"):
         intake.read_region(str(sheet), "0,0,4,4")
