@@ -2632,12 +2632,27 @@ def test_expect_zero_means_none_and_is_not_an_error():
     assert _expect_errors({"bbox_mm": [50, 50, 50], "features": {"fillet": 0, "chamfer": 0}}) == []
 
 
+def test_expect_counts_fillet_edges_and_sketch_fillets_like_a_plan_does():
+    # 2026-11-09: a plan's "four R10 fillets" was one fillet node with four edges, and was rejected.
+    box = {"id": "b1", "type": "box", "width": 0.05, "depth": 0.05, "height": 0.05}
+    four_edges = {"id": "f1", "type": "fillet", "radius": 0.003,
+                  "edges": [{"near": [0.025, 0.025, z]} for z in (-0.02, -0.01, 0.01, 0.02)]}
+    assert _expect_errors({"bbox_mm": [50, 50, 50], "features": {"fillet": 4}}, [box, four_edges]) == []
+    line = lambda a, b, c, d: {"kind": "line", "x1": a, "y1": b, "x2": c, "y2": d}
+    sketch = {"id": "s", "type": "sketch", "ref": {"datum": "front"}, "profile": [
+        line(0, 0, .04, 0), {"kind": "fillet", "radius": .005}, line(.04, 0, .04, .04),
+        {"kind": "fillet", "radius": .005}, line(.04, .04, 0, .04), line(0, .04, 0, 0)]}
+    plate = {"id": "e", "type": "extrude", "sketch": "s", "operation": "boss", "depth": 0.01}
+    assert _expect_errors({"bbox_mm": [40, 40, 10], "features": {"fillet": 2}}, [sketch, plate]) == []
+    assert _expect_errors({"bbox_mm": [40, 40, 10], "features": {"fillet": 3}}, [sketch, plate])
+
+
 @pytest.mark.parametrize("expect, fragment", [
     ({"bbox_mm": [0.09, 0.093, 0.157]}, "MILLIMETRES"),
     ({"bbox_mm": [90, 93]}, "three positive numbers"),
     ({"bbox_mm": [90, 93, 157], "volume": 1}, "expect.volume is not a plan check"),
     ({"bbox_mm": [90, 93, 157], "volume_mm3": -1}, "volume_mm3 must be a positive"),
-    ({"bbox_mm": [90, 93, 157], "features": {"fillet": 1, "chamfer": 1}}, "graph has 0 fillet"),
+    ({"bbox_mm": [90, 93, 157], "features": {"fillet": 1, "chamfer": 1}}, "graph makes 0 fillet"),
     ({"bbox_mm": [90, 93, 157], "features": {"sketch": 1}}, "not a feature node type"),
     ({"bbox_mm": [90, 93, 157], "features": {"box": True}}, "whole count"),
     ({"bbox_mm": [90, 93, 157], "features": {"fillet": -1}}, "whole count"),

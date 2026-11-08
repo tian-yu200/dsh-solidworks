@@ -490,7 +490,7 @@ def test_the_dsh_tool_requires_the_plan_envelope_on_a_new_part(cad_env):
     with pytest.raises(RuntimeError, match="VALIDATION_FAILED: a fresh_document graph must carry graph.expect.bbox_mm"):
         cad_env.orchestrator.feature_graph("job-1", cad_env.token, json.dumps(GRAPH), True, "{}",
                                            require_expect=True)
-    with pytest.raises(RuntimeError, match="graph has 0 fillet"):
+    with pytest.raises(RuntimeError, match="graph makes 0 fillet"):
         cad_env.orchestrator.feature_graph(
             "job-1", cad_env.token, json.dumps(dict(PLANNED, expect={"bbox_mm": [90, 80, 117],
                                                                      "features": {"fillet": 1}})),

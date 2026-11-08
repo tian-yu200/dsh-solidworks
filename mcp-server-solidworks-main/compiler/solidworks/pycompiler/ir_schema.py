@@ -373,6 +373,30 @@ def _check_thread_block(block, label, errors, declared_pilot=None, declared_pilo
 EXPECT_KEYS = ("bbox_mm", "volume_mm3", "features")
 
 
+def _planned_feature_counts(nodes):
+    """How many of each feature the graph makes, as a plan counts them.
+
+    A plan says "four R10 fillets" for one fillet node with four edges, or for four corners rounded
+    by sketch `fillet` primitives; counting nodes only rejected both (zct01 and t101 on 2026-11-09:
+    "fillet = 4 but the graph has 1 fillet node"). Fillets and chamfers count the larger of their
+    node and edge-anchor totals, and fillets also count sketch fillet primitives."""
+    counts, edges, sketch_fillets = {}, {}, 0
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("type"), str):
+            continue
+        kind = node["type"]
+        counts[kind] = counts.get(kind, 0) + 1
+        if kind in ("fillet", "chamfer") and isinstance(node.get("edges"), list):
+            edges[kind] = edges.get(kind, 0) + len(node["edges"])
+        if kind == "sketch" and isinstance(node.get("profile"), list):
+            sketch_fillets += sum(1 for p in node["profile"] if isinstance(p, dict) and p.get("kind") == "fillet")
+    for kind, n in edges.items():
+        counts[kind] = max(counts.get(kind, 0), n)
+    if sketch_fillets:
+        counts["fillet"] = counts.get("fillet", 0) + sketch_fillets
+    return counts
+
+
 def _check_expect(expect, nodes, errors):
     """Graph-level `expect`: what the approved plan says the part will be, checked against the
     build. Never lowered: the compiler builds nodes only; the DSH orchestrator compares the
@@ -409,10 +433,7 @@ def _check_expect(expect, nodes, errors):
         errors.append("graph.expect.features must be {node type: count}, e.g. {\"fillet\": 1, "
                       "\"chamfer\": 1}.")
         return
-    counts = {}
-    for node in nodes:
-        if isinstance(node, dict) and isinstance(node.get("type"), str):
-            counts[node["type"]] = counts.get(node["type"], 0) + 1
+    counts = _planned_feature_counts(nodes)
     for kind in sorted(features):
         want = features[kind]
         if kind not in NODE_TYPES or kind == "sketch":
@@ -422,7 +443,7 @@ def _check_expect(expect, nodes, errors):
             # first 10 bench runs a wasted submit (2026-11-08, findings H1).
             errors.append("graph.expect.features.%s must be a whole count (0 = none)." % kind)
         elif counts.get(kind, 0) < want:
-            errors.append("graph.expect.features.%s = %d but the graph has %d %s node(s): the approved "
+            errors.append("graph.expect.features.%s = %d but the graph makes %d %s(s): the approved "
                           "plan has it — add the node(s), do not drop them from expect."
                           % (kind, want, counts.get(kind, 0), kind))
 

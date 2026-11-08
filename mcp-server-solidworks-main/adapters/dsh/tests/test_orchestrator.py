@@ -2564,3 +2564,20 @@ def test_validation_failure_says_nothing_was_built_and_to_resubmit(cad_env):
         cad_env.orchestrator.feature_graph("job-1", cad_env.token, json.dumps(graph), fresh_document=True)
     assert str(err.value).startswith("VALIDATION_FAILED: ")
     assert "不占修复次数" in str(err.value) and "马上重新提交" in str(err.value)
+
+
+def test_sketch_fillets_count_as_planned_and_built_fillets(cad_env):
+    # 2026-11-09: a repair that moves R10 corners from a fillet node into the sketch must not leave
+    # PLANNED_FEATURES_MISSING behind (the bench scores that warning as a failure).
+    line = lambda a, b, c, d: {"kind": "line", "x1": a, "y1": b, "x2": c, "y2": d}
+    graph = {"units": "meters", "nodes": [
+        {"id": "s", "type": "sketch", "ref": {"datum": "front"}, "profile": [
+            line(0, 0, .04, 0), {"kind": "fillet", "radius": .005}, line(.04, 0, .04, .04),
+            {"kind": "fillet", "radius": .005}, line(.04, .04, 0, .04), line(0, .04, 0, 0)]},
+        {"id": "e", "type": "extrude", "sketch": "s", "operation": "boss", "depth": .01}]}
+    job = {"planned_feature_types": {"fillet": 1}}  # an earlier graph had one fillet node
+    cad_env.orchestrator._plan_features(job, graph)
+    compiler = {"node_log": [{"id": "s", "status": "COMPLETED"}, {"id": "e", "status": "COMPLETED"}]}
+    cad_env.orchestrator._record_built_features(job, compiler, graph)
+    assert job["planned_feature_types"]["fillet"] == 2
+    assert job["built_feature_types"]["fillet"] == 2

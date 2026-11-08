@@ -49,6 +49,13 @@ ORIGIN_UNBOUND = "unbound"          # the job has no document of its own yet
 CLOSEABLE_ORIGINS = (ORIGIN_CREATED, ORIGIN_OPENED)
 
 
+def _sketch_fillets(node):
+    """Corners a sketch node rounds with `fillet` profile primitives (2026-11-09)."""
+    if node.get("type") != "sketch" or not isinstance(node.get("profile"), list):
+        return 0
+    return sum(1 for p in node["profile"] if isinstance(p, dict) and p.get("kind") == "fillet")
+
+
 # Said on the failures that leave the model free to go on (findings M3, 2026-11-08): with repairs or
 # a cheap resubmit left, models often stopped and reported "no part was built".
 NOTHING_BUILT = ("（什么都没建，也不占修复次数：把上面每一条都改掉，马上重新提交整张图，不要因此结束本轮。）")
@@ -320,6 +327,9 @@ class CadOrchestrator:
             kind = node.get("type")
             if isinstance(kind, str) and kind != "sketch":
                 counts[kind] = counts.get(kind, 0) + 1
+            rounded = _sketch_fillets(node)  # a corner rounded in the sketch is a fillet too
+            if rounded:
+                counts["fillet"] = counts.get("fillet", 0) + rounded
         planned = job.setdefault("planned_feature_types", {})
         for kind, count in counts.items():
             planned[kind] = max(planned.get(kind, 0), count)
@@ -330,10 +340,15 @@ class CadOrchestrator:
     def _record_built_features(job, compiler, graph):
         built = job.setdefault("built_feature_types", {})
         type_by_id = {n.get("id"): n.get("type") for n in (graph or {}).get("nodes") or []}
+        node_by_id = {n.get("id"): n for n in (graph or {}).get("nodes") or []}
         for node in (compiler or {}).get("node_log") or []:
             kind = node.get("type") or type_by_id.get(node.get("id"))
             if node.get("status") == "COMPLETED" and isinstance(kind, str) and kind != "sketch"                     and node.get("id") in type_by_id:
                 built[kind] = built.get(kind, 0) + 1
+            if node.get("status") == "COMPLETED" and kind == "sketch":
+                rounded = _sketch_fillets(node_by_id.get(node.get("id")) or {})
+                if rounded:
+                    built["fillet"] = built.get("fillet", 0) + rounded
 
     @staticmethod
     def _plan_check(graph, verification):
