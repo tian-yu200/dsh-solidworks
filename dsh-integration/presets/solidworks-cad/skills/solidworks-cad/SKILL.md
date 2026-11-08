@@ -522,9 +522,9 @@ Validate independently:
   stated, engagement length, through/blind extent, and nut open/closed topology.
 
 Write `PASS`, `FAIL`, or `UNAVAILABLE` with evidence in each Validation Matrix
-row. Before the final save, call `inspect_state(scope="views")`: images of the part (front, top,
-left, isometric; hidden edges grey). Compare each with the drawing's matching view; a feature in one
-and not the other, or a misplaced one, is a FAIL even when every measured number agrees.
+row. A completed build returns images of the part (front, top, left, isometric; hidden edges grey;
+again via `inspect_state(scope="views")`). Compare each with the drawing's view feature by feature and
+pass that list to finish_job as view_review_json; a FAIL there means fix the graph, even when numbers agree.
 
 On any directional or sectional `FAIL`, stop final save/export, traverse `L5`,
 reinspect the pictorial view first when one was found, update PLAN before repair,

@@ -447,15 +447,22 @@ def cancel_action(job_id: str, job_token: str, action_id: str) -> str:
 
 
 @mcp.tool(structured_output=False)
-def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
+def finish_job(job_id: str, job_token: str, keep_open: bool = False, view_review_json: str = "") -> str:
     """Run final objective verification and mark the authenticated CAD job completed.
+
+    For a part this job built, view_review_json is required: one entry per view
+    {"view": "front"|"top"|"left"|..., "drawing": what the drawing's view shows, "model": what
+    the part's image shows, "differences": missing/extra/misplaced or "none", "verdict":
+    "PASS"|"FAIL"|"N/A"}, covering front, top and a side view. A FAIL refuses the finish: fix the
+    graph first.
 
     After a verified finish the job's own document is closed, freeing SolidWorks memory,
     when the job created or opened it, it is saved to a path and it is not dirty. Pass
     keep_open=true to leave it open. Anything left open is reported with the reason.
     """
     return _json_result(
-        lambda: orchestrator.finish_job(job_id, job_token, keep_open)
+        lambda: orchestrator.finish_job(job_id, job_token, keep_open, view_review_json,
+                                        require_view_review=True)
     )
 
 

@@ -74,6 +74,51 @@ VIEW_GUIDE = {
     "isometric": "轴测图：只看整体形状",
 }
 
+# The planner looked at its part's views and called a solid block "drawing-consistent" against a
+# domed bearing housing (zct01 bc30aa2e, 2026-11-09, findings M6). A per-view list of what the
+# drawing shows and what the image shows makes that comparison an explicit act.
+VIEW_REVIEW_HELP = (
+    "finish_job 需要 view_review_json：对照 inspect_state(scope=\"views\")（或建模结果里附的图）和原图，"
+    "逐个视图写一条 {\"view\": \"front\"|\"top\"|\"left\"|\"right\"|\"back\"|\"bottom\", \"drawing\": \"图纸该视图"
+    "里有哪些轮廓/台阶/孔/槽/凸台\", \"model\": \"模型图里对应看到什么\", \"differences\": \"缺的、多的、"
+    "位置不对的（没有写 无）\", \"verdict\": \"PASS\"|\"FAIL\"|\"N/A\"}。至少覆盖主视、俯视和一个侧视；"
+    "图纸没有的视图写 N/A 并在 differences 里说明。")
+
+
+def check_view_review(raw):
+    """The parsed per-view review, or RuntimeError VIEW_REVIEW_REQUIRED / VIEW_REVIEW_FAILED."""
+    try:
+        review = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+    except ValueError:
+        review = None
+    if not isinstance(review, list) or not review:
+        raise RuntimeError("VIEW_REVIEW_REQUIRED: " + VIEW_REVIEW_HELP)
+    problems, failed, covered = [], [], set()
+    for i, item in enumerate(review):
+        if not isinstance(item, dict) or item.get("view") not in VIEW_GUIDE                 or item.get("verdict") not in ("PASS", "FAIL", "N/A"):
+            problems.append("第 %d 条缺 view（%s）或 verdict（PASS/FAIL/N/A）" % (i + 1, "/".join(VIEW_GUIDE)))
+            continue
+        if item["verdict"] == "N/A":
+            if not str(item.get("differences") or "").strip():
+                problems.append("%s 写 N/A 时要在 differences 里说明图纸为什么没有这个视图" % item["view"])
+            continue
+        if len(str(item.get("drawing") or "").strip()) < 6 or len(str(item.get("model") or "").strip()) < 6:
+            problems.append("%s 的 drawing / model 要逐项写出看到的特征，不能只写一两个字" % item["view"])
+            continue
+        covered.add(item["view"])
+        if item["verdict"] == "FAIL":
+            failed.append("%s：%s" % (item["view"], item.get("differences") or "未写差异"))
+    if problems:
+        raise RuntimeError("VIEW_REVIEW_REQUIRED: " + "；".join(problems) + "。" + VIEW_REVIEW_HELP)
+    if failed:
+        raise RuntimeError("VIEW_REVIEW_FAILED: 视图核对不通过——" + "；".join(failed)
+                           + "。先改特征图把差异修掉，重建后重新核对；确属图纸与模型都正确的显示差异才可改判 PASS。")
+    if not ({"front", "top"} <= covered and covered & {"left", "right"}):
+        raise RuntimeError("VIEW_REVIEW_REQUIRED: 至少要核对主视、俯视和一个侧视（图纸确实没有的写 N/A 也不能顶替这三个中的两个以上）。"
+                           + VIEW_REVIEW_HELP)
+    return review
+
+
 class CadOrchestrator:
     def __init__(self):
         self._write_lock = threading.RLock()
@@ -3506,12 +3551,18 @@ class CadOrchestrator:
         job_store.save(job)
         return state, result
 
-    def finish_job(self, job_id, job_token, keep_open=False):
+    def finish_job(self, job_id, job_token, keep_open=False, view_review_json="",
+                   require_view_review=False):
+        """require_view_review: the DSH tool sets it — a part this job built must come with the
+        planner's per-view comparison against the drawing (findings M6)."""
         with self._write_lock:
             job = self._load_job(
                 job_id, job_token, allow_closed_target=True
             )
             self._require_no_pending_feature_graph(job, "finish_job")
+            if require_view_review and job.get("document_origin") == ORIGIN_CREATED                     and job.get("built_feature_types"):
+                job["view_review"] = check_view_review(view_review_json)
+                job_store.save(job)
             if job.get("target_closed"):
                 state = {}
                 verification = {

@@ -120,3 +120,51 @@ def test_a_failed_build_renders_nothing(tmp_path, monkeypatch, cad_env):
     payload = json.loads(server.submit_feature_graph("job-1", cad_env.token, _graph(), True))
     assert payload["status"] != "completed"
     assert not [c for c in cad_env.backend.calls if c[0] == "render_views"]
+
+
+GOOD_REVIEW = json.dumps([
+    {"view": "front", "drawing": "20x20 square outline, no holes", "model": "20x20 square outline",
+     "differences": "none", "verdict": "PASS"},
+    {"view": "top", "drawing": "20x20 square, plain top face", "model": "20x20 square face",
+     "differences": "none", "verdict": "PASS"},
+    {"view": "left", "drawing": "20x20 square side outline", "model": "20x20 square side",
+     "differences": "none", "verdict": "PASS"}])
+
+
+def _built(tmp_path, monkeypatch, cad_env):
+    _render(tmp_path, monkeypatch, cad_env)
+    server = _dsh_server()
+    server.submit_feature_graph("job-1", cad_env.token, _graph(), True)
+    return server
+
+
+def test_finishing_a_built_part_needs_a_per_view_review(tmp_path, monkeypatch, cad_env):
+    # zct01 bc30aa2e (2026-11-09): views were "checked" while a solid block stood for a domed housing.
+    server = _built(tmp_path, monkeypatch, cad_env)
+    missing = json.loads(server.finish_job("job-1", cad_env.token))
+    assert missing["error"]["code"] == "VIEW_REVIEW_REQUIRED", missing
+    thin = json.dumps([{"view": v, "drawing": "ok", "model": "ok", "differences": "none", "verdict": "PASS"}
+                       for v in ("front", "top", "left")])
+    assert json.loads(server.finish_job("job-1", cad_env.token, False, thin))["error"]["code"] == "VIEW_REVIEW_REQUIRED"
+    two = json.dumps(json.loads(GOOD_REVIEW)[:2])
+    assert json.loads(server.finish_job("job-1", cad_env.token, False, two))["error"]["code"] == "VIEW_REVIEW_REQUIRED"
+
+
+def test_a_failed_view_refuses_the_finish(tmp_path, monkeypatch, cad_env):
+    server = _built(tmp_path, monkeypatch, cad_env)
+    review = json.loads(GOOD_REVIEW)
+    review[0].update(verdict="FAIL", differences="drawing shows a domed housing, the model is a block")
+    payload = json.loads(server.finish_job("job-1", cad_env.token, False, json.dumps(review)))
+    assert payload["error"]["code"] == "VIEW_REVIEW_FAILED" and "domed housing" in payload["error"]["message"]
+
+
+def test_a_complete_review_passes_the_gate_and_is_kept(tmp_path, monkeypatch, cad_env):
+    server = _built(tmp_path, monkeypatch, cad_env)
+    payload = json.loads(server.finish_job("job-1", cad_env.token, False, GOOD_REVIEW))
+    assert (payload.get("error") or {}).get("code") not in ("VIEW_REVIEW_REQUIRED", "VIEW_REVIEW_FAILED"), payload
+    assert cad_env.store.load("job-1", cad_env.token)["view_review"][0]["view"] == "front"
+
+
+def test_a_job_that_built_nothing_needs_no_review(cad_env):
+    payload = json.loads(_dsh_server().finish_job("job-1", cad_env.token))
+    assert (payload.get("error") or {}).get("code") not in ("VIEW_REVIEW_REQUIRED", "VIEW_REVIEW_FAILED"), payload
