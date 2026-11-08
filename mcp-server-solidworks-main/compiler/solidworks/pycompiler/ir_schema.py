@@ -1262,7 +1262,32 @@ def _check_contour_closure(nodes):
         # checks — a profile may mix chains and composites.
         errors.extend("nodes[%d] (%s): %s" % (pos, label, msg)
                       for msg in _loop_conflict_errors(profile, consumers))
+        if not gaps:
+            errors.extend("nodes[%d] (%s): %s" % (pos, label, msg)
+                          for msg in _chain_conflict_errors(profile, consumers))
     return errors
+
+
+def _chain_conflict_errors(profile, consumers):
+    """VALIDATION_FAILED text for a closed chain that crosses or retraces itself."""
+    conflicts = contours.chain_conflicts(profile)
+    if not conflicts:
+        return []
+    parts = []
+    for c in conflicts[:4]:
+        where = "(%.6g, %.6g)" % c["point"]
+        if c["how"] == "collinear":
+            parts.append("profile[%d] (%s) and profile[%d] (%s) run along the same line near %s"
+                         % (c["a"], c["a_kind"], c["b"], c["b_kind"], where))
+        else:
+            parts.append("profile[%d] (%s) crosses profile[%d] (%s) at %s"
+                         % (c["a"], c["a_kind"], c["b"], c["b_kind"], where))
+    return [
+        "self-intersecting contour for %s — %s. Every endpoint is paired, but a contour must be "
+        "a simple loop: each segment meets only its two neighbours, at shared endpoints. Delete "
+        "the segment that retraces another, or fix the one that crosses (an arc whose dir is "
+        "wrong sweeps the long way round, through the rest of the outline)."
+        % (consumers, "; ".join(parts))]
 
 
 def _loop_conflict_errors(profile, consumers):

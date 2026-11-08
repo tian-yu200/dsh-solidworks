@@ -804,3 +804,169 @@ def loop_conflicts(profile, tol=CONTOUR_WELD_TOL):
                 continue  # disjoint or properly nested: both build
             out.append(found)
     return out
+
+
+# ------------------------------------------------------- chains that cross or retrace themselves
+
+def _curves(prim):
+    """A primitive as exact curves: ("seg", (x1, y1), (x2, y2)) and ("arc", (cx, cy), r, start
+    angle, signed sweep). Lines, arcs, circles and rectangles only; anything else -> [] (not
+    checked, so never falsely reported)."""
+    kind = prim.get("kind")
+    if kind == "line":
+        ends = [(x, y) for _w, x, y in _iter_endpoints(prim)]
+        if len(ends) == 2 and all(_is_finite(v) for p in ends for v in p) and ends[0] != ends[1]:
+            return [("seg", ends[0], ends[1])]
+        return []
+    if kind == "arc":
+        vals = [_as_float(prim.get(k)) for k in ("cx", "cy", "x1", "y1", "x2", "y2")]
+        d = prim.get("dir")
+        if any(v is None for v in vals) or d not in (1, -1):
+            return []
+        cx, cy, x1, y1, x2, y2 = vals
+        r = math.hypot(x1 - cx, y1 - cy)
+        if r <= 0.0:
+            return []
+        a1, a2 = math.atan2(y1 - cy, x1 - cx), math.atan2(y2 - cy, x2 - cx)
+        sweep = (a2 - a1) % (2.0 * math.pi) if d > 0 else -((a1 - a2) % (2.0 * math.pi))
+        if sweep == 0.0:
+            sweep = 2.0 * math.pi * d  # start == end: the execution layer draws a full circle
+        return [("arc", (cx, cy), r, a1, sweep)]
+    if kind == "circle":
+        centre, diameter = _centre(prim), _pos(prim.get("diameter"))
+        if centre is None or diameter is None:
+            return []
+        return [("arc", centre, diameter / 2.0, 0.0, 2.0 * math.pi)]
+    if kind == "rectangle":
+        ring = closed_loop(prim)
+        if not ring or len(ring) != 4:
+            return []
+        return [("seg", ring[k], ring[(k + 1) % 4]) for k in range(4)]
+    return []
+
+
+def _on_arc(curve, pt, tol):
+    """Whether a point already ON the arc's circle lies inside its sweep, more than `tol` of arc
+    length from either end (a full circle has no ends)."""
+    _k, (cx, cy), r, a0, sweep = curve
+    if abs(sweep) >= 2.0 * math.pi:
+        return True
+    theta = math.atan2(pt[1] - cy, pt[0] - cx)
+    phi = (theta - a0) % (2.0 * math.pi) if sweep > 0 else (a0 - theta) % (2.0 * math.pi)
+    return phi * r > tol and (abs(sweep) - phi) * r > tol
+
+
+def _seg_inner(seg, pt, tol):
+    """Whether a point already ON the segment's line lies inside it, more than `tol` from both ends."""
+    _k, (x1, y1), (x2, y2) = seg
+    ln = math.hypot(x2 - x1, y2 - y1)
+    t = ((pt[0] - x1) * (x2 - x1) + (pt[1] - y1) * (y2 - y1)) / (ln * ln)
+    return t * ln > tol and (1.0 - t) * ln > tol
+
+
+def _row(p, q, pos):
+    """One segment as an edge row in `_ring_index`'s layout, so `_cross_at` and
+    `_collinear_overlap` read it unchanged."""
+    (x1, y1), (x2, y2) = p, q
+    dx, dy = x2 - x1, y2 - y1
+    return (x1, y1, x2, y2, dx, dy, math.hypot(dx, dy),
+            min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2), pos)
+
+
+def _crossing(c1, c2, tol):
+    """("cross" | "collinear", point) when two exact curves cross properly or retrace each other,
+    else None. A tangency, or a contact within `tol` of an end, is not a crossing."""
+    if c1[0] == "arc" and c2[0] == "seg":
+        c1, c2 = c2, c1
+    if c1[0] == "seg" and c2[0] == "seg":
+        e1, e2 = _row(c1[1], c1[2], 0), _row(c2[1], c2[2], 0)
+        point = _cross_at(e1, e2, tol)
+        if point is not None:
+            return "cross", point
+        if _collinear_overlap(e1, e2, tol):
+            box = (max(e1[7], e2[7]), max(e1[8], e2[8]), min(e1[9], e2[9]), min(e1[10], e2[10]))
+            return "collinear", ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+        return None
+    if c1[0] == "seg":
+        (x1, y1), (x2, y2) = c1[1], c1[2]
+        (cx, cy), r = c2[1], c2[2]
+        dx, dy = x2 - x1, y2 - y1
+        ln = math.hypot(dx, dy)
+        dist = abs((cx - x1) * dy - (cy - y1) * dx) / ln
+        if dist >= r - tol:
+            return None  # misses, or tangent
+        foot = ((cx - x1) * dx + (cy - y1) * dy) / (ln * ln)
+        half = math.sqrt(r * r - dist * dist) / ln
+        for t in (foot - half, foot + half):
+            pt = (x1 + t * dx, y1 + t * dy)
+            if _seg_inner(c1, pt, tol) and _on_arc(c2, pt, tol):
+                return "cross", pt
+        return None
+    (ax, ay), ra = c1[1], c1[2]
+    (bx, by), rb = c2[1], c2[2]
+    dcc = math.hypot(bx - ax, by - ay)
+    if dcc <= tol and abs(ra - rb) <= tol:
+        # One circle: the arcs retrace each other when their sweeps share more than `tol`.
+        steps = 64
+        for k in range(1, steps):
+            theta = c1[3] + c1[4] * k / steps
+            pt = (ax + ra * math.cos(theta), ay + ra * math.sin(theta))
+            if _on_arc(c2, pt, tol):
+                return "collinear", pt
+        return None
+    if not (abs(ra - rb) + tol < dcc < ra + rb - tol):
+        return None  # apart, nested, or tangent
+    along = (ra * ra - rb * rb + dcc * dcc) / (2.0 * dcc)
+    h = math.sqrt(max(ra * ra - along * along, 0.0))
+    mx, my = ax + along * (bx - ax) / dcc, ay + along * (by - ay) / dcc
+    for sign in (1.0, -1.0):
+        pt = (mx - sign * h * (by - ay) / dcc, my + sign * h * (bx - ax) / dcc)
+        if _on_arc(c1, pt, tol) and _on_arc(c2, pt, tol):
+            return "cross", pt
+    return None
+
+
+def chain_conflicts(profile, tol=CONTOUR_WELD_TOL):
+    """Line/arc chain primitives that cross, or retrace, another primitive of the same sketch.
+
+    Every chain endpoint can be paired (open_gaps finds nothing) and the outline still be no
+    region SolidWorks can extrude: the 缺口块 bench run (2026-11-08) closed its upright outline with
+    a bottom line that retraced the first line for 10 mm, and SolidWorks returned a null boss twice
+    while the repair only reversed an arc. A simple loop meets each neighbour at one shared endpoint
+    and nothing else, so a PROPER crossing or a retraced stretch between two primitives is never
+    legal. Chain primitives are also tested against circles and rectangles (a hole that cuts through
+    the outline). The geometry is exact (line/circle intersection, not sampled chords), so a
+    tangency or a touch at a point stays legal, as in loop_conflicts. Splines, slots, rounded
+    rectangles and ellipses are not checked here; closed-vs-closed pairs belong to loop_conflicts.
+
+    Returns [{a, b, a_kind, b_kind, how ("cross" | "collinear"), point}], the first conflict per
+    pair, at most 8.
+    """
+    welded, _ = weld_profile(profile or [], tol)
+    prims = []
+    for i, prim in enumerate(welded):
+        if isinstance(prim, dict) and prim.get("construction") is not True:
+            curves = _curves(prim)
+            if curves:
+                prims.append((i, prim.get("kind"), curves))
+    out = []
+    for x in range(len(prims)):
+        i, kind_i, curves_i = prims[x]
+        for y in range(x + 1, len(prims)):
+            j, kind_j, curves_j = prims[y]
+            if kind_i in _CLOSED_LOOP_KINDS and kind_j in _CLOSED_LOOP_KINDS:
+                continue
+            hit = None
+            for c1 in curves_i:
+                for c2 in curves_j:
+                    hit = _crossing(c1, c2, tol)
+                    if hit:
+                        break
+                if hit:
+                    break
+            if hit:
+                out.append({"a": i, "b": j, "a_kind": kind_i, "b_kind": kind_j,
+                            "how": hit[0], "point": hit[1]})
+                if len(out) >= 8:
+                    return out
+    return out
