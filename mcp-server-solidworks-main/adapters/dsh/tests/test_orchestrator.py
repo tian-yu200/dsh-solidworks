@@ -1682,8 +1682,10 @@ def test_fresh_feature_graph_failure_reports_the_discarded_created_document(cad_
     )
     # completed steps still list the nodes that ran (in the discarded part)
     assert result["completed_steps"] == ["n1", "n2"]
-    # reporting-only change: nothing else was added to or removed from the envelope
-    assert set(result) == _FAILURE_ENVELOPE_KEYS
+    # reporting-only change: nothing else was added to or removed from the envelope, except the
+    # repair instruction a discarded part with repairs left carries (findings M3, 2026-11-08)
+    assert set(result) == _FAILURE_ENVELOPE_KEYS | {"next_step"}
+    assert "自动修复还剩 2 次" in result["next_step"]
     job = cad_env.store.load("job-1", cad_env.token)
     assert job["expected_document"] == {}
     assert job["document_write_allowed"] is False
@@ -1837,7 +1839,7 @@ def test_material_not_found_reported_as_a_failure_still_rolls_back(cad_env):
     assert "warnings" not in result
     assert result["created_document_discarded"] is True
     assert result["active_document_after_recovery"] == str(cad_env.source)
-    assert set(result) == _FAILURE_ENVELOPE_KEYS
+    assert set(result) == _FAILURE_ENVELOPE_KEYS | {"next_step"}
 
 
 def test_document_edit_material_failure_is_unchanged(cad_env):
@@ -2551,3 +2553,14 @@ def test_complete_saved_build_finishes_without_warnings(cad_env, tmp_path):
     assert saved["status"] == "completed", saved
     finished = env.orchestrator.finish_job(started["job_id"], started["job_token"])
     assert "warnings" not in finished, finished
+
+
+def test_validation_failure_says_nothing_was_built_and_to_resubmit(cad_env):
+    # 2026-11-08 bench (findings M3): after one VALIDATION_FAILED a model reported "no part" and
+    # stopped, though nothing had run and no repair was used.
+    graph = _minimal_graph()
+    graph["units"] = "inches"
+    with pytest.raises(RuntimeError) as err:
+        cad_env.orchestrator.feature_graph("job-1", cad_env.token, json.dumps(graph), fresh_document=True)
+    assert str(err.value).startswith("VALIDATION_FAILED: ")
+    assert "不占修复次数" in str(err.value) and "马上重新提交" in str(err.value)

@@ -48,6 +48,13 @@ ORIGIN_UNBOUND = "unbound"          # the job has no document of its own yet
 CLOSEABLE_ORIGINS = (ORIGIN_CREATED, ORIGIN_OPENED)
 
 
+# Said on the failures that leave the model free to go on (findings M3, 2026-11-08): with repairs or
+# a cheap resubmit left, models often stopped and reported "no part was built".
+NOTHING_BUILT = ("（什么都没建，也不占修复次数：把上面每一条都改掉，马上重新提交整张图，不要因此结束本轮。）")
+REPAIR_NEXT_STEP = ("新建的零件已丢弃，可以直接修复：按 error.message 写明的原因改特征图，"
+                    "repair_evidence_json 写清 error_code / cause / readback / change，重新提交整张图。"
+                    "自动修复还剩 %d 次，还有次数时不要结束本轮。")
+
 class CadOrchestrator:
     def __init__(self):
         self._write_lock = threading.RLock()
@@ -754,6 +761,11 @@ class CadOrchestrator:
         extras, discarded_target = self._discard_report(
             recovery_status, recovery_event, created_identity, target_state
         )
+        metadata = self._job_metadata(job)
+        if kind == "feature_graph" and response_status == "failed" and metadata["automatic_retry_allowed"]:
+            # 2026-11-08 bench (findings M3): with repairs left, models often stopped after one
+            # failed build and reported "no part". Say plainly that the next move is a repair.
+            extras["next_step"] = REPAIR_NEXT_STEP % (2 - metadata["repair_attempts_used"])
         return envelope(
             status=response_status,
             risk=risk,
@@ -765,7 +777,7 @@ class CadOrchestrator:
             verification=verification,
             error=error,
             **extras,
-            **self._job_metadata(job),
+            **metadata,
         )
 
     def _post_verify_failure_response(
@@ -1329,7 +1341,7 @@ class CadOrchestrator:
 
         errors = validate(graph)
         if errors:
-            raise RuntimeError("VALIDATION_FAILED: " + "; ".join(errors))
+            raise RuntimeError("VALIDATION_FAILED: " + "; ".join(errors) + NOTHING_BUILT)
 
     def _drawing_summary(self, job, count):
         return (
@@ -1709,7 +1721,8 @@ class CadOrchestrator:
                     raise RuntimeError(
                         "VALIDATION_FAILED: a fresh_document graph must carry graph.expect.bbox_mm — the "
                         "overall envelope in millimetres stated in the approved plan (plus volume_mm3 and "
-                        "features when the plan has them); the server checks the build against it.")
+                        "features when the plan has them); the server checks the build against it."
+                        + NOTHING_BUILT)
                 self._validate_feature_graph_before_confirmation(graph)
             except RuntimeError:
                 if payload["fresh_document"]:
