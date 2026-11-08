@@ -1,8 +1,7 @@
 # Feature Graph — common part card
 
-Default: this card + mapping_part. For sheet metal/assembly use its mapping;
-lookup quickref/indexed schema only for missing constructs. Never page full schema
-as a ritual. This is a grammar example, not permission to invent drawing dimensions.
+Default: this card + mapping_part. Use sheet metal/assembly mappings; quickref/schema
+only for missing constructs. Example is grammar, never a source of drawing dimensions.
 
 Units: graph.units="meters"; all lengths m, all angles radians. Convert mm /1000.
 Each node needs unique id and type; order is dependency/feature-tree order.
@@ -10,6 +9,7 @@ ref is an OBJECT, never a string. Node IDs are graph IDs, not runtime face indic
 Omit graph.material when unspecified. Save a new working-directory file; no overwrite.
 A new part REQUIRES graph.expect from the approved plan: bbox_mm:[a,b,c] (envelope, MM,
 any order), volume_mm3?, features?:{"fillet":n,"chamfer":n}. Off-plan build: PLAN_MISMATCH.
+Optional dimension_ledger: optional drawing-dimension-to-node checks; format and checks in quickref (warnings only).
 
 Datum frames (sketch x,y; positive extrusion normal):
 front = +X,+Y; +Z. top = +X,-Z; +Y. right = -Z,+Y; +X.
@@ -52,8 +52,7 @@ hole, 1 mm round on the +X/+Y edge; submit_feature_graph(fresh_document=true).
 }
 ```
 
-A completed status is not dimensional verification: compare readback with all views,
-report unavailable checks honestly, keep EXPLICIT/DERIVED/USER/UNKNOWN sources.
+Completed is not verified: compare readback and all views; report missing checks and EXPLICIT/DERIVED/USER/UNKNOWN sources.
 
 ## Execution recovery and L4
 

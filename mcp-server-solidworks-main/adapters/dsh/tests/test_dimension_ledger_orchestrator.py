@@ -1,0 +1,126 @@
+import json
+
+import pytest
+
+
+def _graph(ledger):
+    return {
+        "units": "meters",
+        "nodes": [{"id": "base", "type": "box", "width": .02, "depth": .02, "height": .02}],
+        "dimension_ledger": ledger,
+    }
+
+
+def _dimension(dim_id, value, check):
+    return {"id": dim_id, "label": dim_id, "value": value, "source_kind": "explicit",
+            "view": "front", "node_ids": ["base"], "check": check}
+
+
+def test_ledger_warnings_are_returned_after_commit_without_rollback(cad_env):
+    def reads(tool, params):
+        if tool != "analyze_model":
+            return None
+        state = dict(cad_env.backend.state)
+        if params["analysis_type"] == "geometry":
+            state["features"] = ["bodies=1", "bbox_size=[0.02,0.02,0.02]"]
+        elif params["analysis_type"] == "mass_properties":
+            state["features"] = ["volume=0.000008"]
+        elif params["analysis_type"] == "faces":
+            state["features"] = [json.dumps({"face_count": 1, "faces": [
+                {"kind": "cylinder", "origin": [0.01, 0.01, 0],
+                 "axis": [0, 0, 1], "radius": 0.003},
+            ]})]
+        return {"status": "COMPLETED", "stateVersion": state["stateVersion"],
+                "cadState": state, "error": None}
+
+    cad_env.backend.call_handler = reads
+    graph = _graph([
+        _dimension("D-width", 30, {"kind": "bbox_extent", "axis": "x"}),
+        _dimension("D-bore", 10, {"kind": "cylinder", "axis": [0, 0, 1],
+                                  "through": [0.01, 0.01, 0]}),
+    ])
+
+    result = cad_env.orchestrator.feature_graph(
+        cad_env.job["job_id"], cad_env.token, json.dumps(graph), fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    assert [warning["code"] for warning in result["warnings"]] == [
+        "LEDGER_MISMATCH", "LEDGER_MISMATCH",
+    ]
+    assert result["warnings"][0]["dimension_id"] == "D-width"
+    assert result["warnings"][1]["dimension_id"] == "D-bore"
+    calls = [name for name, _ in cad_env.backend.calls]
+    assert "commit_undo_scope" in calls
+    assert "rollback_undo_scope" not in calls
+    assert calls.count("analyze_model") == 3  # geometry, mass properties, one batched faces read
+
+    finished = cad_env.orchestrator.finish_job(cad_env.job["job_id"], cad_env.token)
+    assert finished["status"] == "completed", finished
+    assert finished["trust_level"] == "built_unverified"
+    assert [w["code"] for w in finished["warnings"] if w["code"].startswith("LEDGER_")] == [
+        "LEDGER_MISMATCH", "LEDGER_MISMATCH",
+    ]
+
+
+def test_an_invalid_optional_ledger_warns_and_never_blocks_the_build(cad_env):
+    # An extra field rejecting the whole graph would be the expect.features trap again (H1).
+    item = _dimension("D-width", 20, {"kind": "bbox_extent", "axis": "x"})
+    item["extra"] = "not in v4's seven-field entry"
+    graph = _graph([item])
+
+    result = cad_env.orchestrator.feature_graph(
+        cad_env.job["job_id"], cad_env.token, json.dumps(graph), fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    warning = next(w for w in result["warnings"] if w["code"] == "LEDGER_INVALID")
+    assert "fields must be exactly" in warning["message"]
+    assert not [p for name, p in cad_env.backend.calls
+                if name == "analyze_model" and p.get("analysis_type") == "faces"]
+
+
+def test_faces_readback_from_a_different_state_is_unmeasured(cad_env):
+    def reads(tool, params):
+        if tool != "analyze_model":
+            return None
+        state = dict(cad_env.backend.state)
+        if params["analysis_type"] == "geometry":
+            state["features"] = ["bodies=1", "bbox_size=[0.02,0.02,0.02]"]
+        elif params["analysis_type"] == "mass_properties":
+            state["features"] = ["volume=0.000008"]
+        elif params["analysis_type"] == "faces":
+            state["features"] = ['{"faces":[]}']
+            return {"status": "COMPLETED", "stateVersion": state["stateVersion"] + 10,
+                    "cadState": state, "error": None}
+        return {"status": "COMPLETED", "stateVersion": state["stateVersion"],
+                "cadState": state, "error": None}
+
+    cad_env.backend.call_handler = reads
+    graph = _graph([_dimension("D-bore", 10, {
+        "kind": "cylinder", "axis": [0, 0, 1], "through": [0.01, 0.01, 0],
+    })])
+
+    result = cad_env.orchestrator.feature_graph(
+        cad_env.job["job_id"], cad_env.token, json.dumps(graph), fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    warning = next(w for w in result["warnings"] if w["code"] == "LEDGER_UNMEASURED")
+    assert warning["reason"] == "document_state_changed_during_measurement"
+
+
+def test_ledger_is_optional_and_adds_no_faces_read(cad_env):
+    result = cad_env.orchestrator.feature_graph(
+        cad_env.job["job_id"], cad_env.token,
+        json.dumps({"units": "meters", "nodes": [
+            {"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02},
+        ]}),
+        fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    assert "warnings" not in result
+    analyses = [params["analysis_type"] for name, params in cad_env.backend.calls
+                if name == "analyze_model"]
+    assert analyses == ["geometry", "mass_properties"]

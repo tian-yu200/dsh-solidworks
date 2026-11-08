@@ -468,8 +468,59 @@ class CadOrchestrator:
         return result
 
     @staticmethod
+    def _dimension_ledger_warnings(graph, verification):
+        """Measure an optional ledger from the completed model; findings are warnings only."""
+        if graph.get("dimension_ledger") is None:
+            return []
+        from dimension_ledger import evaluate_graph_ledger, validate_graph_ledger
+
+        # The ledger is optional diagnostics. A malformed one must not block a build: an extra
+        # or missing field rejecting the whole graph is the expect.features trap again (H1).
+        problems = validate_graph_ledger(graph)
+        if problems:
+            return [{"code": "LEDGER_INVALID",
+                     "message": "；".join(problems[:4]) + "。零件照常建好，这张尺寸表没有核对；"
+                                "按 quickref 的格式改好后，下次提交时会核对。"}]
+
+        ledger = graph.get("dimension_ledger") or []
+        needs_faces = any(
+            item.get("source_kind") != "unknown"
+            and isinstance(item.get("check"), dict)
+            and item["check"].get("kind") in {"cylinder", "plane_distance"}
+            for item in ledger
+        )
+        faces_response = None
+        if needs_faces:
+            try:
+                faces_response = backend.call("analyze_model", {"analysis_type": "faces"})
+            except Exception as exc:  # noqa: BLE001 - this cannot undo a valid build
+                faces_response = {"status": "FAILED", "error": {"code": type(exc).__name__}}
+        expected_state = cad_state((verification or {}).get("state"))
+        expected_version = expected_state.get("stateVersion")
+        observed_versions = [
+            check.get("stateVersion")
+            for check in (verification or {}).get("deep_checks") or []
+            if check.get("status") == "COMPLETED"
+        ]
+        if faces_response is not None and faces_response.get("status") == "COMPLETED":
+            observed_versions.append(faces_response.get("stateVersion"))
+        if expected_version is not None and any(v != expected_version for v in observed_versions):
+            return [{"code": "LEDGER_UNMEASURED", "reason": "document_state_changed_during_measurement",
+                     "dimension_id": item.get("id"), "label": item.get("label"),
+                     "view": item.get("view"), "node_ids": item.get("node_ids") or [],
+                     "expected": item.get("value"),
+                     "check": (item.get("check") or {}).get("kind")}
+                    for item in ledger if isinstance(item, dict)]
+        try:
+            return evaluate_graph_ledger(graph, verification, faces_response)
+        except Exception as exc:  # noqa: BLE001 - diagnostic problems fail closed as a warning
+            return [{"code": "LEDGER_UNMEASURED", "reason": "ledger_check_error",
+                     "message": str(exc)[:240]}]
+
+    @staticmethod
     def _completeness_warnings(job, state):
         warnings = list((job.get("plan_check") or {}).get("warnings") or [])
+        warnings.extend(job.get("dimension_ledger_warnings") or [])
         planned = job.get("planned_feature_types") or {}
         built = job.get("built_feature_types") or {}
         missing = {kind: count - built.get(kind, 0) for kind, count in planned.items()
@@ -2230,6 +2281,10 @@ class CadOrchestrator:
                 created_identity=job.get("created_document_identity"),
             )
 
+        # Optional ledger diagnostics are sampled against the same locked job document.
+        # They can add warnings, but never enter the transaction failure / rollback path.
+        ledger_warnings = self._dimension_ledger_warnings(payload["graph"], verification)
+
         committed = backend.commit_transaction(transaction_name)
         if committed.get("status") != "COMPLETED":
             progress["scope"] = "recovered"
@@ -2270,13 +2325,16 @@ class CadOrchestrator:
             }
         )
         self._record_built_features(job, compiler, payload["graph"])
+        job["dimension_ledger_warnings"] = ledger_warnings
         self._record_success(job, "feature_graph", "built_unverified")
         job.pop("previous_document_write_allowed", None)
         job_store.save(job)
         # A non-fatal compiler finding (today: MATERIAL_NOT_FOUND) — the geometry is committed and
         # the document just lacks the requested property. Emitted only when there IS one, and
         # never as `error`: a warning that reads as a failure invites a rollback of good work.
-        warnings = list(compiler.get("warnings") or []) + list((plan or {}).get("warnings") or [])
+        warnings = (list(compiler.get("warnings") or [])
+                    + list((plan or {}).get("warnings") or [])
+                    + ledger_warnings)
         extras = {"warnings": warnings} if warnings else {}
         return envelope(
             status="completed",
@@ -3629,7 +3687,11 @@ class CadOrchestrator:
             job["execution_status"] = "completed"
             job["verification_status"] = "passed"
             job["recovery_status"] = "not_needed"
-            job["trust_level"] = "verified"
+            ledger_warning = any(
+                warning.get("code") in {"LEDGER_MISMATCH", "LEDGER_UNMEASURED"}
+                for warning in finish_warnings
+            )
+            job["trust_level"] = "built_unverified" if ledger_warning else "verified"
             job["error"] = None
             if close_report is None:
                 # Memory hygiene, AFTER the verdict exists: SolidWorks holds every open

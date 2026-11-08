@@ -408,6 +408,8 @@ def render_quickref(schema=None):
         "legend: R=required O=optional | m=meters rad=radians deg=degrees |"
         " IP=immediately preceding node | AM=analyze_model | AA=analyze_assembly |"
         " dflt=default",
+        "Optional dimension_ledger: [{id,label,value,source_kind,view,node_ids,check}]. Derived callout in label; unknown: null value/check.",
+        "Checks (warnings only): bbox_extent(axis x|y|z); cylinder(axis+through m-point); plane_distance(normal+2 m-points). Length value/tolerance mm.",
     ]
     # One line per vocabulary, `key=v1|v2|...` — a COMPACT block, because six "label: a, b, c"
     # lines cost ~90 characters of pure label/comma overhead and the card is char-bound at two
