@@ -1187,3 +1187,31 @@ def axis_sides(profile, axis, tol=CONTOUR_WELD_TOL):
             if high is None or d > high[0]:
                 high = (d, i)
     return (low, high) if low is not None else None
+
+
+# ------------------------------------------------------- sweep: where the path meets the profile
+
+def chain_ends(profile, tol=CONTOUR_WELD_TOL):
+    """The open ends of a line/arc chain (after fillets are resolved): endpoints no other
+    primitive shares. A sweep path has two; a closed loop none."""
+    resolved, problems = resolve_fillets(profile)
+    if problems:
+        return []
+    pts = []
+    for prim in resolved:
+        if isinstance(prim, dict) and prim.get("construction") is not True and prim.get("kind") in ("line", "arc"):
+            pts.extend((x, y) for _w, x, y in _iter_endpoints(prim))
+    return [p for i, p in enumerate(pts)
+            if not any(j != i and math.hypot(p[0] - q[0], p[1] - q[1]) <= tol for j, q in enumerate(pts))]
+
+
+def smallest_bend(profile):
+    """The smallest arc radius along a path (sketch fillets resolved), or None for a straight path."""
+    resolved, problems = resolve_fillets(profile)
+    radii = []
+    for prim in resolved if not problems else []:
+        if isinstance(prim, dict) and prim.get("kind") == "arc" and prim.get("construction") is not True:
+            rr = arc_radii(prim)
+            if rr and rr[0] > 0:
+                radii.append(rr[0])
+    return min(radii) if radii else None

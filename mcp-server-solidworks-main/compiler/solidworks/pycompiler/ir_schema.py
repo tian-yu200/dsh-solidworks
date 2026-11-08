@@ -854,6 +854,9 @@ def _validate(graph):
                 errors.append("%s: 'path' must reference an earlier sketch node (got '%s')." % (label, path))
             elif path == sk:
                 errors.append("%s: 'path' and 'sketch' (profile) must be two DIFFERENT sketch nodes." % label)
+            elif isinstance(prev, dict) and prev.get("id") == sk:
+                path_node = next((n for n in nodes[:pos] if isinstance(n, dict) and n.get("id") == path), None)
+                errors.extend("%s: %s" % (label, msg) for msg in _sweep_geometry_errors(prev, path_node))
 
         elif ntype == "linear_pattern":
             # Linear pattern (v0.7.0): canonical axis direction + flip; SINGLE direction by
@@ -1441,6 +1444,60 @@ def _check_datum(node, label, errors):
     offset = ref.get("offset")
     if offset is not None and not _is_number(offset):
         errors.append("%s: ref.offset must be a signed number (meters)." % label)
+
+
+def _sweep_geometry_errors(profile_node, path_node):
+    """Plan-time checks of where a sweep path meets its profile (2026-11-09).
+
+    SolidWorks starts a sweep where the path pierces the profile's plane, and a profile wider than
+    the path's tightest bend folds into itself; both come back as a null sweep mid-build with
+    nothing to learn from. Checked only when both sketches sit on datum planes (their frames are
+    known before anything runs); a face sketch is left to the build."""
+    if not (isinstance(path_node, dict) and isinstance(profile_node.get("profile"), list)
+            and isinstance(path_node.get("profile"), list)):
+        return []
+    pf = canonical_sketch_frame(profile_node.get("ref") or {}) if profile_node.get("frame") is None         else profile_node.get("frame")
+    qf = canonical_sketch_frame(path_node.get("ref") or {}) if path_node.get("frame") is None         else path_node.get("frame")
+    if not (isinstance(pf, dict) and isinstance(qf, dict)):
+        return []
+    try:
+        po, px, py = (pf[k] for k in ("origin", "xdir", "ydir"))
+        qo, qx, qy = (qf[k] for k in ("origin", "xdir", "ydir"))
+    except KeyError:
+        return []
+    normal = (px[1] * py[2] - px[2] * py[1], px[2] * py[0] - px[0] * py[2], px[0] * py[1] - px[1] * py[0])
+    ends = contours.chain_ends(path_node["profile"])
+    if len(ends) != 2:
+        return []  # a closed or branching path is reported elsewhere / left to the build
+    world = [tuple(qo[k] + u * qx[k] + v * qy[k] for k in range(3)) for u, v in ends]
+    off = [sum((w[k] - po[k]) * normal[k] for k in range(3)) for w in world]
+    near = min(range(2), key=lambda i: abs(off[i]))
+    if abs(off[near]) > contours.CONTOUR_WELD_TOL:
+        return ["the sweep path never reaches the profile's plane — its ends are %.2f mm and %.2f mm "
+                "from it. SolidWorks starts a sweep where the path pierces the profile plane: put the "
+                "profile sketch on a plane through one end of the path (normal to the path there)."
+                % (abs(off[0]) * 1000, abs(off[1]) * 1000)]
+    rel = [world[near][k] - po[k] for k in range(3)]
+    pierce = (sum(rel[k] * px[k] for k in range(3)), sum(rel[k] * py[k] for k in range(3)))
+    pts = []
+    for prim in contours.resolve_fillets(profile_node["profile"])[0]:
+        if not isinstance(prim, dict) or prim.get("construction") is True:
+            continue
+        ring = contours.closed_loop(prim)
+        pts += ring if ring else contours._prim_points(prim)  # the real outline, not its bounding box
+    if not pts:
+        return []
+    xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+    if not (min(xs) - 1e-6 <= pierce[0] <= max(xs) + 1e-6 and min(ys) - 1e-6 <= pierce[1] <= max(ys) + 1e-6):
+        return ["the sweep path meets the profile plane at (%.2f, %.2f) mm in the profile sketch, outside "
+                "the profile — draw the profile around the path's end." % (pierce[0] * 1000, pierce[1] * 1000)]
+    reach = max(math.hypot(q[0] - pierce[0], q[1] - pierce[1]) for q in pts)
+    bend = contours.smallest_bend(path_node["profile"])
+    if bend is not None and reach >= bend:
+        return ["the profile reaches %.2f mm from the path but the path bends at R%.2f mm: the swept "
+                "body would fold into itself at that bend. Use a bend radius larger than the profile "
+                "(the drawing's centreline radius), or check the profile size." % (reach * 1000, bend * 1000)]
+    return []
 
 
 def _check_profile_prim(prim, label, errors):
