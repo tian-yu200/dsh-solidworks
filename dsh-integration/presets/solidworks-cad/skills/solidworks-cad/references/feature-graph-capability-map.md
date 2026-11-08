@@ -21,7 +21,7 @@ selectors, or enum values not present in the runtime schema.
 | Drawing construct | Feature Graph expression |
 | --- | --- |
 | Rectangular boss/pad | `box` node, or rectangle sketch + `extrude` boss |
-| Free-form prismatic body | `sketch` (line/arc/circle/ellipse/spline/rectangle primitives, exact coordinates; `slot` and `rounded_rect` as one-node convenience contours) + `extrude` boss |
+| Free-form prismatic body | `sketch` (line/arc/circle/ellipse/spline/rectangle primitives, exact coordinates; `slot` and `rounded_rect` as one-node convenience contours; `fillet` {radius} between two segments for an exact tangent corner arc) + `extrude` boss |
 | Stepped shaft, flange, revolved body | `revolve` of a half-section sketch; `axis` is the axis segment's 2D sketch coordinates, `angle` in radians |
 | Through hole | `hole` node (`ref` = face + position, `through_all` only) or circle sketch + `extrude` cut `through_all` |
 | Blind hole, pocket, slot | circle/`slot`/closed-contour sketch + `extrude` cut with `end: "blind"` and a depth |

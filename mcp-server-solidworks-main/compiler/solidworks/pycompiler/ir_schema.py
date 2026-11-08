@@ -86,7 +86,7 @@ NODE_TYPES = frozenset(("box", "sketch", "extrude", "revolve", "sweep", "rib", "
                         "sheet_metal", "sketched_bend", "mirror", "edge_flange",
                         "cosmetic_thread")) \
     | ASSEMBLY_NODE_TYPES
-PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spline",
+PROFILE_KINDS = frozenset(("rectangle", "circle", "line", "arc", "ellipse", "spline", "fillet",
                            "slot", "rounded_rect"))
 # Optional boolean flags any profile primitive may carry (mirrors analyze_model's per-segment flag).
 PROFILE_FLAGS = frozenset(("construction",))
@@ -566,8 +566,12 @@ def _validate(graph):
             if not isinstance(profile, list) or len(profile) == 0:
                 errors.append("%s: 'profile' must be a non-empty array of primitives." % label)
             else:
+                before = len(errors)
                 for j, prim in enumerate(profile):
                     _check_profile_prim(prim, "%s.profile[%d]" % (label, j), errors)
+                if len(errors) == before:
+                    errors.extend("%s: %s" % (label, problem)
+                                  for problem in contours.resolve_fillets(profile)[1])
             frame = node.get("frame")
             if frame is not None:
                 problem = frame_error(frame)
@@ -1192,6 +1196,9 @@ def _check_contour_closure(nodes):
         profile = node.get("profile")
         if not isinstance(profile, list):
             continue  # shape errors already reported in the per-node pass
+        profile, fillet_problems = contours.resolve_fillets(profile)
+        if fillet_problems:
+            continue  # reported in the per-node pass; the corners are not resolved yet
         consumers = "/".join(consumer_of[key])
         # SolidWorks draws an arc from its START radius, so an end point off that circle opens
         # the contour mid-build (EXTRUSION_FAILED). Within the weld band lowering recentres the
@@ -1443,6 +1450,17 @@ def _check_profile_prim(prim, label, errors):
         if prim.get("dir") not in (1, -1):
             errors.append("%s: arc 'dir' must be 1 (CCW) or -1 (CW) — centre+start+end alone "
                           "describe two arcs." % label)
+    elif kind == "fillet":
+        # 2026-11-09: rounds the corner between its two list neighbours with an exact tangent arc
+        # (contours.resolve_fillets); the planner gives only the radius the drawing states.
+        if not _is_pos_number(prim.get("radius")):
+            errors.append("%s: fillet 'radius' must be a positive number (meters)." % label)
+        if prim.get("construction") is True:
+            errors.append("%s: a fillet rounds a real corner; it cannot be construction." % label)
+        extra = sorted(set(prim) - {"kind", "radius", "construction"})
+        if extra:
+            errors.append("%s: fillet takes only 'radius' (got %s); the corner comes from its two "
+                          "neighbours in the profile list." % (label, ", ".join(extra)))
     elif kind == "ellipse":
         # Centre + a point on the MAJOR axis + a point on the MINOR axis — exactly the reader's
         # shape and add_sketch_entity(ellipse)'s inputs (round-trips verbatim).

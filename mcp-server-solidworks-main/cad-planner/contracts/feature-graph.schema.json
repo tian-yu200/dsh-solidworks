@@ -87,7 +87,8 @@
    "ellipse",
    "spline",
    "slot",
-   "rounded_rect"
+   "rounded_rect",
+   "fillet"
   ],
   "profile_flags": [
    "construction"
@@ -307,6 +308,11 @@
      "cx": "number (optional, default 0 — centre X)",
      "cy": "number (optional, default 0 — centre Y)",
      "_note": "COVERED since v0.7.4. Centred like rectangle; lowering expands to 8 exact line/arc entities (4 edges + 4 CCW corner arcs) that close by construction — the 90x90 flange with R10 corners class."
+    },
+    "fillet": {
+     "kind": "fillet",
+     "radius": "number (m) — the corner radius the drawing states (R10 -> 0.01)",
+     "_note": "COVERED since 2026-11-09. Placed in the profile list BETWEEN the two line/arc primitives that meet at a sharp corner (cyclic: first or last rounds the corner with the other end). Draw the outline with sharp corners at the drawing's dimensioned intersection points; the compiler computes the exact tangent arc (centre where the neighbours' offset loci meet) and trims both neighbours to the tangent points. Works for line-line, line-arc and arc-arc corners (an R100 blend tangent to a hub circle). One fillet per corner; a radius too large for the segments is a VALIDATION_FAILED. Prefer it to an edge `fillet` node for corners of an extruded outline: no edge anchor to resolve."
     },
     "_common_flag": "any primitive may carry construction: true — created as CONSTRUCTION/reference geometry (mirrors analyze_model's per-segment flag)"
    }

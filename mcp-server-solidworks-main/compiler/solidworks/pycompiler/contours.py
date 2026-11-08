@@ -970,3 +970,180 @@ def chain_conflicts(profile, tol=CONTOUR_WELD_TOL):
                 if len(out) >= 8:
                     return out
     return out
+
+
+# ------------------------------------------------------- sketch fillets (exact tangent arcs)
+
+def _ends(prim):
+    """[(x, y), (x, y)] of a line/arc primitive, or None."""
+    pts = [(x, y) for _w, x, y in _iter_endpoints(prim)]
+    return pts if len(pts) == 2 and all(_is_finite(v) for p in pts for v in p) else None
+
+
+def _unit(v):
+    n = math.hypot(v[0], v[1])
+    return (v[0] / n, v[1] / n) if n > 0 else None
+
+
+def _into(prim, which, corner):
+    """Unit tangent at `corner` (endpoint `which` of prim) pointing INTO the primitive."""
+    if prim["kind"] == "line":
+        far = _ends(prim)[1 - which]
+        return _unit((far[0] - corner[0], far[1] - corner[1]))
+    c = (float(prim["cx"]), float(prim["cy"]))
+    d = int(prim["dir"])
+    perp = (-(corner[1] - c[1]), corner[0] - c[0])  # CCW tangent at the corner
+    sign = d if which == 0 else -d                   # leaves the start along dir, the end against it
+    return _unit((sign * perp[0], sign * perp[1]))
+
+
+def _locus(prim, corner, guess, r):
+    """The fillet centre's locus for one neighbour: ("line", point, direction) at distance r on the
+    guess's side, or ("circle", centre, radius) concentric at rho +/- r."""
+    if prim["kind"] == "line":
+        t = _unit((_ends(prim)[1][0] - _ends(prim)[0][0], _ends(prim)[1][1] - _ends(prim)[0][1]))
+        n = (-t[1], t[0])
+        side = 1.0 if (guess[0] - corner[0]) * n[0] + (guess[1] - corner[1]) * n[1] >= 0 else -1.0
+        return ("line", (corner[0] + side * r * n[0], corner[1] + side * r * n[1]), t)
+    c = (float(prim["cx"]), float(prim["cy"]))
+    rho = math.hypot(corner[0] - c[0], corner[1] - c[1])
+    inside = math.hypot(guess[0] - c[0], guess[1] - c[1]) < rho
+    return ("circle", c, rho - r if inside else rho + r)
+
+
+def _meet(a, b):
+    """Intersection points of two loci (line/circle)."""
+    if a[0] == "circle" and b[0] == "line":
+        a, b = b, a
+    if a[0] == "line" and b[0] == "line":
+        (p, u), (q, v) = (a[1], a[2]), (b[1], b[2])
+        den = u[0] * v[1] - u[1] * v[0]
+        if abs(den) < 1e-12:
+            return []
+        t = ((q[0] - p[0]) * v[1] - (q[1] - p[1]) * v[0]) / den
+        return [(p[0] + t * u[0], p[1] + t * u[1])]
+    if a[0] == "line":
+        (p, u), (c, rr) = (a[1], a[2]), (b[1], b[2])
+        if rr <= 0:
+            return []
+        fx, fy = p[0] - c[0], p[1] - c[1]
+        bq = fx * u[0] + fy * u[1]
+        disc = bq * bq - (fx * fx + fy * fy - rr * rr)
+        if disc < 0:
+            return []
+        return [(p[0] + t * u[0], p[1] + t * u[1]) for t in (-bq - math.sqrt(disc), -bq + math.sqrt(disc))]
+    (c1, r1), (c2, r2) = (a[1], a[2]), (b[1], b[2])
+    d = math.hypot(c2[0] - c1[0], c2[1] - c1[1])
+    if r1 <= 0 or r2 <= 0 or d == 0 or d > r1 + r2 or d < abs(r1 - r2):
+        return []
+    along = (r1 * r1 - r2 * r2 + d * d) / (2 * d)
+    h = math.sqrt(max(r1 * r1 - along * along, 0.0))
+    mx, my = c1[0] + along * (c2[0] - c1[0]) / d, c1[1] + along * (c2[1] - c1[1]) / d
+    return [(mx - s * h * (c2[1] - c1[1]) / d, my + s * h * (c2[0] - c1[0]) / d) for s in (1.0, -1.0)]
+
+
+def _touch(prim, centre):
+    """Where a circle about `centre` touches the neighbour (foot point on its line / circle)."""
+    if prim["kind"] == "line":
+        (p, q) = _ends(prim)
+        u = _unit((q[0] - p[0], q[1] - p[1]))
+        t = (centre[0] - p[0]) * u[0] + (centre[1] - p[1]) * u[1]
+        return (p[0] + t * u[0], p[1] + t * u[1])
+    c = (float(prim["cx"]), float(prim["cy"]))
+    rho = math.hypot(float(prim["x1"]) - c[0], float(prim["y1"]) - c[1])
+    u = _unit((centre[0] - c[0], centre[1] - c[1]))
+    return (c[0] + rho * u[0], c[1] + rho * u[1])
+
+
+def _keeps(prim, which, corner, point, tol):
+    """Whether moving endpoint `which` from the corner to `point` leaves a real, shorter piece."""
+    if prim["kind"] == "line":
+        far = _ends(prim)[1 - which]
+        full = math.hypot(far[0] - corner[0], far[1] - corner[1])
+        cut = math.hypot(point[0] - corner[0], point[1] - corner[1])
+        return tol < cut < full - tol
+    c = (float(prim["cx"]), float(prim["cy"]))
+    rho = math.hypot(corner[0] - c[0], corner[1] - c[1])
+    a0 = math.atan2(corner[1] - c[1], corner[0] - c[0])
+    a1 = math.atan2(point[1] - c[1], point[0] - c[0])
+    far = _ends(prim)[1 - which]
+    af = math.atan2(far[1] - c[1], far[0] - c[0])
+    into = _into(prim, which, corner)
+    turn = 1.0 if (corner[0] - c[0]) * into[1] - (corner[1] - c[1]) * into[0] > 0 else -1.0
+    cut = (turn * (a1 - a0)) % (2 * math.pi)
+    full = (turn * (af - a0)) % (2 * math.pi) or 2 * math.pi
+    return tol < cut * rho < full * rho - tol
+
+
+def resolve_fillets(profile, tol=CONTOUR_WELD_TOL):
+    """Replace each {"kind": "fillet", "radius": r} with the exact tangent arc of that radius.
+
+    A fillet sits in the profile list between the two primitives it rounds, which must be lines or
+    arcs sharing an endpoint (the sharp corner, as the drawing dimensions it). The arc's centre is
+    where the two neighbours' offset loci meet (a parallel line at r, or a concentric circle at
+    rho +/- r), nearest the bisector estimate; the neighbours are trimmed back to the tangent
+    points. Planners computed these points by hand and landed 0.75 mm off on the 脚踏座 R100 blend
+    (findings H15); an edge fillet instead needs an edge anchor (H12). Cyclic: a fillet first or
+    last in the list rounds the corner with the other end.
+
+    Returns (new_profile, problems); with problems the profile is returned unchanged.
+    """
+    profile = list(profile or [])
+    spots = [i for i, p in enumerate(profile) if isinstance(p, dict) and p.get("kind") == "fillet"]
+    if not spots:
+        return profile, []
+    out = [copy.deepcopy(p) for p in profile]
+    problems = []
+    n = len(out)
+    for i in spots:
+        r = _as_float(out[i].get("radius"))
+        prev_i, next_i = (i - 1) % n, (i + 1) % n
+        prev, nxt = out[prev_i], out[next_i]
+        label = "profile[%d] (fillet R%g mm)" % (i, (r or 0) * 1000)
+        if r is None or r <= 0:
+            problems.append("%s: 'radius' must be a positive number (meters)." % label)
+            continue
+        if n < 3 or any(not isinstance(p, dict) or p.get("kind") not in ("line", "arc") or p.get("construction") is True
+                        for p in (prev, nxt)):
+            problems.append("%s must sit between two (non-construction) line/arc primitives of the outline, "
+                            "the sharp corner it rounds; one fillet per corner." % label)
+            continue
+        e1, e2 = _ends(prev), _ends(nxt)
+        if e1 is None or e2 is None or (prev["kind"] == "arc" and prev.get("dir") not in (1, -1)) \
+                or (nxt["kind"] == "arc" and nxt.get("dir") not in (1, -1)):
+            continue  # the primitives' own checks report them
+        pair = min(((a, b) for a in (0, 1) for b in (0, 1)),
+                   key=lambda ab: math.hypot(e1[ab[0]][0] - e2[ab[1]][0], e1[ab[0]][1] - e2[ab[1]][1]))
+        if math.hypot(e1[pair[0]][0] - e2[pair[1]][0], e1[pair[0]][1] - e2[pair[1]][1]) > tol:
+            problems.append("%s: profile[%d] and profile[%d] around it share no endpoint — put the fillet "
+                            "between the two primitives that meet at the corner." % (label, prev_i, next_i))
+            continue
+        corner = e1[pair[0]]
+        t1, t2 = _into(prev, pair[0], corner), _into(nxt, pair[1], corner)
+        if t1 is None or t2 is None:
+            continue
+        cos_t = max(-1.0, min(1.0, t1[0] * t2[0] + t1[1] * t2[1]))
+        theta = math.acos(cos_t)
+        if theta < 1e-6 or math.pi - theta < 1e-6:
+            problems.append("%s: the corner is straight (or folds back), so there is nothing to round." % label)
+            continue
+        b = _unit((t1[0] + t2[0], t1[1] + t2[1]))
+        guess = (corner[0] + b[0] * r / math.sin(theta / 2), corner[1] + b[1] * r / math.sin(theta / 2))
+        found = _meet(_locus(prev, corner, guess, r), _locus(nxt, corner, guess, r))
+        if not found:
+            problems.append("%s: no circle of this radius touches both neighbours here — the radius is "
+                            "too large for the corner." % label)
+            continue
+        centre = min(found, key=lambda p: math.hypot(p[0] - guess[0], p[1] - guess[1]))
+        p1, p2 = _touch(prev, centre), _touch(nxt, centre)
+        if not (_keeps(prev, pair[0], corner, p1, tol) and _keeps(nxt, pair[1], corner, p2, tol)):
+            problems.append("%s: the tangent points fall outside profile[%d]/profile[%d] — the radius is too "
+                            "large for these segments." % (label, prev_i, next_i))
+            continue
+        for prim, which, point in ((prev, pair[0], p1), (nxt, pair[1], p2)):
+            _set_endpoint(prim, ("start", "end")[which], round(point[0], 9), round(point[1], 9))
+        cross = (p1[0] - centre[0]) * (p2[1] - centre[1]) - (p1[1] - centre[1]) * (p2[0] - centre[0])
+        out[i] = {"kind": "arc", "cx": round(centre[0], 9), "cy": round(centre[1], 9),
+                  "x1": round(p1[0], 9), "y1": round(p1[1], 9), "x2": round(p2[0], 9), "y2": round(p2[1], 9),
+                  "dir": 1 if cross > 0 else -1}
+    return (profile, problems) if problems else (out, [])

@@ -115,6 +115,14 @@ def lower_box(node):
     ]
 
 
+def _filleted(profile):
+    """The profile with every `fillet` primitive replaced by its exact tangent arc (validated)."""
+    out, problems = contours.resolve_fillets(profile)
+    if problems:
+        raise ValueError("; ".join(problems))
+    return out
+
+
 def lower_sketch(node, face_index=None):
     """sketch -> support op(s) + create_sketch + one entity per profile primitive (leaves the
     sketch active). Support preference for offset != 0 (decided with the user, 2026-07-05):
@@ -130,7 +138,7 @@ def lower_sketch(node, face_index=None):
     matching earlier anchor before the entities are emitted — validation already rejected
     anything still open, so the weld only closes micron-level arithmetic drift. The weld count
     rides the create_sketch op's note (visible in the node_log)."""
-    profile, welds = contours.weld_profile(node.get("profile") or [])
+    profile, welds = contours.weld_profile(_filleted(node.get("profile") or []))
     profile, arcs = contours.true_arcs(profile)
     weld_note = _weld_note(welds, arcs)
     offset = _offset(node)
@@ -549,7 +557,7 @@ def lower_edge_flange(node, edge_index):
                     "flange_length": float(node["length"]), "angle": angle_deg},
                    "edge flange (simple): length %g on edge #%d"
                    % (float(node["length"]), int(edge_index)))]
-    profile, welds = contours.weld_profile(node.get("profile") or [])
+    profile, welds = contours.weld_profile(_filleted(node.get("profile") or []))
     profile, arcs = contours.true_arcs(profile)
     gen = {"feature_type": "edge_flange_sketch", "edge_index": int(edge_index),
            "angle": angle_deg}
