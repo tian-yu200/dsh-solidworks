@@ -34,6 +34,7 @@ sweep-path sketches are open by design and never checked.
 """
 
 import math
+import traceback
 
 from . import contours
 from . import thread_table
@@ -427,7 +428,22 @@ def _check_expect(expect, nodes, errors):
 
 
 def validate(graph):
-    """Return a list of human-readable error strings ([] == structurally valid)."""
+    """Return a list of human-readable error strings ([] == structurally valid).
+
+    Never raises. A value of the wrong JSON type where a name belongs (e.g. a pattern
+    `direction` written as {"datum": "right"}) used to crash the checks below with
+    "unhashable type" instead of telling the planner which field was wrong (2026-11-09)."""
+    try:
+        return _validate(graph)
+    except (TypeError, AttributeError, KeyError, ValueError) as ex:
+        frame = traceback.extract_tb(ex.__traceback__)[-1]
+        return ["graph has a value of the wrong JSON type (%s: %s). The check that hit it: `%s`. "
+                "Enum-like fields (direction, end, operation, kind, datum, selector) take a plain "
+                "string; numbers take numbers; lists only where the schema shows a list."
+                % (type(ex).__name__, ex, (frame.line or "").strip())]
+
+
+def _validate(graph):
     errors = []
     if not isinstance(graph, dict):
         return ["graph must be a JSON object."]
