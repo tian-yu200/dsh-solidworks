@@ -117,6 +117,9 @@ namespace SolidworksExecution.Services
                 {
                     _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
                     _sessionVisibilityApplied = false;
+                    // A previous server that died mid-request may have left it set, which freezes
+                    // the user's window (see WithCommandInProgress).
+                    try { _solidWorks.CommandInProgress = false; } catch { }
                 }
                 IsConnected = true;
                 EnsureVisible(); // the user must ALWAYS see what the automation does
@@ -203,6 +206,45 @@ namespace SolidworksExecution.Services
                 return true;
             }
             return Connect();
+        }
+
+        // Runs one tool request with ISldWorks.CommandInProgress set, which tells SolidWorks an
+        // out-of-process caller is mid-command so it stops servicing its UI between our COM calls.
+        // Measured 2026-11-08 on a 73-face part, same face reads as ReadFaces: 1436 ms/face as is,
+        // 14.7 ms/face with it set; hiding the window or turning graphics updates off changed
+        // nothing. Without it, reads grew past the adapter's 120 s limit and whole parts were
+        // discarded (findings H3/H4/H5). Always cleared again on the SAME instance in `finally`:
+        // left set, the SolidWorks window would stop responding to the user.
+        public T WithCommandInProgress<T>(Func<T> work)
+        {
+            ISldWorks app = null;
+            if (EnsureConnected())
+            {
+                try
+                {
+                    _solidWorks.CommandInProgress = true;
+                    app = _solidWorks;
+                }
+                catch (Exception ex)
+                {
+                    ExecLog.Write($"command-in-progress: set failed {ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+                }
+            }
+            try
+            {
+                return work();
+            }
+            finally
+            {
+                if (app != null)
+                {
+                    try { app.CommandInProgress = false; }
+                    catch (Exception ex)
+                    {
+                        ExecLog.Write($"command-in-progress: clear failed {ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+                    }
+                }
+            }
         }
 
         private static string DocumentTypeName(IModelDoc2 modelDoc)

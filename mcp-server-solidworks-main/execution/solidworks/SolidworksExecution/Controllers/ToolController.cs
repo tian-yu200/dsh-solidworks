@@ -165,7 +165,7 @@ namespace SolidworksExecution.Controllers
             {
                 // All COM-touching work runs on the single dedicated STA thread (P0.1) — OWIN request
                 // threads are MTA, which made sheet-metal calls return null and add_edge_feature deadlock.
-                response = StaExecutor.Instance.Run(() => Dispatch(request));
+                response = StaExecutor.Instance.Run(() => _service.WithCommandInProgress(() => Dispatch(request)));
             }
             catch (System.Exception ex)
             {
