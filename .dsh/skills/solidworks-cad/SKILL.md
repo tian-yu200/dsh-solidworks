@@ -166,6 +166,9 @@ If a flow edit adds or removes a back edge, recompute the graph and table.
 Every unresolved modeling constraint is UNKNOWN after checking explicit dimensions,
 geometry, symmetry, concentricity, tangency, equalities and dimension chains. A unique
 DERIVED result needs no user confirmation. Never estimate a dimension from pixels.
+A revolve claims roundness: each radius it makes must appear as a full circle in the view along its axis.
+A different outline circle there, a band breaking it, or contours behind a full section that differ
+from the cut profile mean the form varies around the axis: revolve only what is round, extrude the rest, or ask.
 
 At exhaustion, stop mutation:
 
@@ -179,8 +182,7 @@ ACTION: Stop mutation and request decisive user input.
 
 ## Inspection
 
-Use `inspect_state` with no credentials only for `state` or `reference`.
-Document analysis requires the active job credentials.
+Use `inspect_state` with no credentials only for `state` or `reference`; document analysis requires the active job credentials.
 
 | Document | Supported scopes |
 | --- | --- |
@@ -212,9 +214,7 @@ do not invent unsupported flags. On another failure emit `RETRY_EXHAUSTED`.
 
 ## Feature Graph
 
-For a new part or assembly:
-
-See the [common part card](solidworks://skill/references/feature-graph-part-card.md).
+For a new part or assembly, see the [common part card](solidworks://skill/references/feature-graph-part-card.md).
 
 1. BEFORE the one question, in ONE parallel step: `start_job`, feature_graph_part_card
    (common part grammar + complete example), the matching mapping_part,
@@ -238,7 +238,6 @@ one it already had). `MATERIAL_NOT_APPLIED` — present in the library but not a
 that could not be read — is a real failure and rolls the graph back. Never substitute a
 similar-looking material to silence a warning: apply the exact library name, or add the specified
 material to the library, with `apply_document_edits`.
-
 Spell a material name exactly as the **loaded** library holds it, which on a localised install is
 the localised spelling (this install is Chinese: `1060 合金`, not `1060 Alloy`); the same material
 under its English spelling is positively absent from the loaded database and warns.
@@ -325,6 +324,7 @@ Handle response status as follows:
 | `failed` | Stop; inspect `error` and `recovery_status`. |
 | `partial` | Stop; some state may remain. Report `completed_steps`, `partial_state`, backup, and recovery result. |
 | `verification_failed` | Stop; execution occurred but objective verification did not pass. |
+| `Error: Request timed out` (no JSON envelope) | Not a failure: the call may still be running. Never resubmit or report failure; re-read `inspect_state(scope="state")` until it answers, then act on what it shows. |
 
 Only `discarded` permits automatic rebuilding. Existing-document Undo is unverified.
 `rollback_failed` or `recovery_unverified` requires user confirmation before continuing.
