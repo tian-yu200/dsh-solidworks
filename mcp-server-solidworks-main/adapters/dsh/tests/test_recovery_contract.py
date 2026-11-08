@@ -197,6 +197,27 @@ def test_repair_needs_specific_new_evidence_and_unchanged_context(cad_env):
     assert "文档有变化" in pending["action_summary"]
 
 
+def test_repair_evidence_may_give_readback_as_an_object(cad_env):
+    # 2026-11-08 bench: models wrote readback as the node log they had read; 4 of 5 automatic
+    # repairs were refused as "incomplete" and fell to a confirmation round trip.
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    fixed = copy.deepcopy(GRAPH)
+    fixed["nodes"][0]["frame"] = FRAME
+    why = json.dumps({"error_code": "EXTRUSION_FAILED", "cause": "cut plane missed the solid",
+                      "readback": {"completed_nodes": ["sketch"], "failed_node": "boss"},
+                      "change": ["declare the measured frame"]})
+    second = submit(cad_env, fixed, why)
+    assert second["status"] != "pending_confirmation", second
+    assert second["repair_attempts_used"] == 1
+    for empty in ({}, [], "  "):
+        fixed["nodes"][1]["end"] = "blind" if empty == {} else None
+        bare = json.dumps({"error_code": "EXTRUSION_FAILED", "cause": "x", "readback": empty, "change": "y"})
+        pending = submit(cad_env, fixed, bare)
+        assert "证据须完整" in pending["action_summary"], (empty, pending)
+        cad_env.orchestrator.cancel_action("job-1", cad_env.token, pending["action_id"])
+
+
 def test_a_new_job_for_another_part_is_not_held_by_an_old_discarded_chain(cad_env):
     # 2026-11-01: a discarded failure on one drawing made the NEXT drawing's first build (another
     # session) wait for "设计有改动" — models cancelled it and no part came out.

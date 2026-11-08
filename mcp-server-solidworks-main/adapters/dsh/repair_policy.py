@@ -213,6 +213,15 @@ def repair_evidence(raw):
 PRE_EXECUTION_CODES = {"VALIDATION_FAILED"}
 
 
+def _stated(value):
+    """Evidence text, or a non-empty object/list. Models write readback as the node log they read
+    ({"completed_nodes": [...], "failed_node": ...}); refusing that as "incomplete" turned 4 of 5
+    automatic repairs on the 2026-11-08 bench into a confirmation round trip (findings H13)."""
+    if isinstance(value,str):
+        return bool(value.strip())
+    return isinstance(value,(dict,list)) and bool(value)
+
+
 def admit(chain,graph,evidence):
     design,representation=graph_fingerprints(graph)
     if not chain:
@@ -241,8 +250,8 @@ def admit(chain,graph,evidence):
     if any(a.get("representation")==representation for a in chain["attempts"]):
         raise RuntimeError("REPAIR_IDENTICAL_REPLAY: 原样重放不属于自动修复，需用户确认")
     citable={last.get("error_code")} | (PRE_EXECUTION_CODES if last.get("validation_failures") else set())
-    if (any(not isinstance(evidence.get(k),str) or not evidence[k].strip() for k in ("error_code","cause","readback","change"))
-            or evidence["error_code"] not in citable):
+    if (not isinstance(evidence.get("error_code"),str) or evidence["error_code"] not in citable
+            or not all(_stated(evidence.get(k)) for k in ("cause","readback","change"))):
         raise RuntimeError("REPAIR_EVIDENCE_REQUIRED: 修复证据须完整且对应上次错误")
     digest=payload_hash(evidence)
     if any(a.get("evidence_hash")==digest for a in chain["attempts"]):
