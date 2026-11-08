@@ -38,7 +38,7 @@ def test_model_crop_schema_has_no_reset_or_task_identity_override():
     tree = ast.parse(source)
     fn = next(node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "read_drawing_region")
     names = {arg.arg for arg in fn.args.args}
-    assert names == {"image_path", "region", "zoom", "regions"}
+    assert names == {"image_path", "region", "zoom", "regions", "page"}
     doc = ast.get_docstring(fn) or ""
     assert "Optional" in doc and "reset" in doc and "no-progress" in doc
     text_fn = next(node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "read_drawing_text")

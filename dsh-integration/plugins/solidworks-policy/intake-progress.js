@@ -6,9 +6,15 @@ export const IMAGE_READ_TOOLS = new Set([
 ]);
 const REGION = 'mcp__solidworks__read_drawing_region';
 
+// A PDF page is its own sheet: page 2's overview after page 1's is new evidence, not a repeat.
+function sourceOf(exec) {
+  const args = exec.arguments ?? {};
+  return JSON.stringify([args.image_path ?? args.path, args.page ?? 1]);
+}
+
 function requestKey(exec) {
   const args = exec.arguments ?? {};
-  return JSON.stringify([exec.name, args.image_path ?? args.path, args.region ?? '', args.regions ?? null, args.zoom ?? 2]);
+  return JSON.stringify([exec.name, sourceOf(exec), args.region ?? '', args.regions ?? null, args.zoom ?? 2]);
 }
 
 function decoded(result) {
@@ -47,7 +53,7 @@ export function createIntakeProgress(logger) {
     const task = exec.agent && tasks.get(exec.agent);
     if (!task || !IMAGE_READ_TOOLS.has(exec.name)) return;
     const key = requestKey(exec);
-    const source = exec.arguments?.image_path ?? exec.arguments?.path;
+    const source = sourceOf(exec);
     const payloads = decoded(result);
     const failed = result?.isError || payloads.some(p => p.status === 'failed');
     let novel = false;
@@ -85,7 +91,7 @@ export function createIntakeProgress(logger) {
   function guard(exec) {
     const task = exec.agent && tasks.get(exec.agent);
     if (!task || !IMAGE_READ_TOOLS.has(exec.name) || task.stalled < STALL_LIMIT) return;
-    const source = exec.arguments?.image_path ?? exec.arguments?.path;
+    const source = sourceOf(exec);
     const earlier = task.boxes.get(source) ?? [];
     const redundantRegion = region => {
       if (!region) return task.facts.has('overview:' + source);

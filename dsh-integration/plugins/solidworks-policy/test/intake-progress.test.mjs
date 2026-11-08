@@ -45,6 +45,19 @@ test('state is isolated by exact host Agent and host turn, not image or model ar
   guard.dispose(second);
 });
 
+test('each PDF page is its own source: another page is new evidence, the same page is not', () => {
+  const guard = createIntakeProgress(), agent = {};
+  guard.begin(agent, 1);
+  const overview = { isError: false, content: [{ type: 'text', text: '{"status":"completed","action":"overview"}' }] };
+  const read = page => ({ agent, name, arguments: { image_path: 'sheet.pdf', region: '', page } });
+  guard.observe(read(undefined), overview);
+  for (let i = 0; i < STALL_LIMIT; i++) guard.observe(read(1), overview); // page omitted = page 1
+  assert.match(guard.guard(read(1)), /INTAKE_NO_PROGRESS/);
+  assert.equal(guard.guard(read(2)), undefined);
+  guard.observe(read(2), overview);
+  assert.equal(guard.guard(read(1)), undefined);
+});
+
 test('new crop batches count as progress; repeated OCR excludes elapsed-time noise', () => {
   const guard = createIntakeProgress(), agent = {};
   guard.begin(agent, 1);

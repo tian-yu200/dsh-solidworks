@@ -6,7 +6,8 @@ workflow had no other way to get — the SolidWorks preset forbids shell, and mo
 no crop. It is READ-ONLY, touches no CAD, and needs no job: it returns one PNG plus the
 source-pixel box it came from, so a crop is evidence and not a guess.
 
-Local paths and current-instance sha256 attachment IDs share the same resolver.
+Local paths and current-instance sha256 attachment IDs share the same resolver. A PDF source is
+rendered one page at a time (pdf_source) and then read exactly like an image.
 """
 import hashlib
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from mcp.server.mcpserver import Image as MCPImage
 
+import pdf_source
 from settings import INTAKE_ROOT
 from image_source import resolve_image_path
 
@@ -64,8 +66,18 @@ def _fail(code, message):
     raise RuntimeError(f"{code}: {message}")
 
 
-def _open_source(image_path):
-    """(Path, RGB image) for a LOCAL drawing file, with the decode bounded."""
+def _check_page(page):
+    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+        _fail("INVALID_PAGE", f"page must be an integer >= 1 (got {page!r}).")
+
+
+def _open_source(image_path, page=1):
+    """(Path, RGB image, pdf info or None) for a LOCAL drawing file, with the decode bounded.
+
+    A PDF is rendered to a PNG first (pdf_source) and the returned Path is that PNG, so every
+    reader below decodes pixels the same way; the info names the PDF and the page for the reply.
+    """
+    _check_page(page)
     path = resolve_image_path(image_path, INTAKE_ROOT.parent.parent)
     try:
         size_bytes = path.stat().st_size
@@ -75,6 +87,11 @@ def _open_source(image_path):
         _fail("IMAGE_FILE_TOO_LARGE",
               f"{path} is {size_bytes} B, over the {MAX_SOURCE_BYTES} B limit; ask for a smaller "
               "export of the drawing.")
+    pdf = None
+    if pdf_source.is_pdf(path):
+        path, pdf = pdf_source.render_page(path, page, INTAKE_ROOT / "pdf")
+    elif page != 1:
+        _fail("PAGE_NOT_APPLICABLE", f"{path} is an image, not a PDF; omit page.")
     try:
         image = Image.open(path)          # header only: no pixel decode yet
         width, height = image.size
@@ -89,7 +106,7 @@ def _open_source(image_path):
         image.load()
     except Exception as exc:  # noqa: BLE001
         _fail("IMAGE_UNREADABLE", f"{path}: {type(exc).__name__}: {exc}")
-    return path, image.convert("RGB")
+    return path, image.convert("RGB"), pdf
 
 
 def grid_geometry(width, height):
@@ -245,7 +262,7 @@ def _output_name(source_sha, kind, region, zoom):
     return f"{source_sha[:16]}_{kind}_{safe}_z{zoom}.png"
 
 
-def _read_region_from_source(path, image, source_sha, region="", zoom=DEFAULT_ZOOM):
+def _read_region_from_source(path, image, source_sha, region="", zoom=DEFAULT_ZOOM, pdf=None):
     """Read one region from an already opened source image.
 
     Batch reads call this helper so the source file is decoded and hashed once per MCP call rather
@@ -274,11 +291,15 @@ def _read_region_from_source(path, image, source_sha, region="", zoom=DEFAULT_ZO
     directory.mkdir(parents=True, exist_ok=True)
     out_path = directory / _output_name(source_sha, kind, region, zoom)
     out_path.write_bytes(data)
+    if pdf and kind != "overview":
+        # The page list rides on the overview only; a crop names its page and nothing more.
+        pdf = {k: v for k, v in pdf.items() if k != "pages"}
     meta = {
         "status": "completed",
         "risk": "read",
         "action": kind,
-        "image_path": str(path),
+        "image_path": pdf["path"] if pdf else str(path),
+        **({"pdf": pdf} if pdf else {}),
         "source_pixels": [width, height],
         "source_sha256_16": source_sha[:16],
         "output_path": str(out_path),
@@ -298,31 +319,31 @@ def _read_region_from_source(path, image, source_sha, region="", zoom=DEFAULT_ZO
     return data, meta
 
 
-def read_region(image_path, region="", zoom=DEFAULT_ZOOM):
+def read_region(image_path, region="", zoom=DEFAULT_ZOOM, page=1):
     """Crop one region or return the labelled overview; no per-image reading state."""
     if isinstance(zoom, bool) or not isinstance(zoom, int) or not MIN_ZOOM <= zoom <= MAX_ZOOM:
         _fail("INVALID_ZOOM", f"zoom must be an integer {MIN_ZOOM}-{MAX_ZOOM} (got {zoom!r}).")
-    path, image = _open_source(image_path)
+    path, image, pdf = _open_source(image_path, page)
     try:
         source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
-        return _read_region_from_source(path, image, source_sha, region, zoom)
+        return _read_region_from_source(path, image, source_sha, region, zoom, pdf)
     finally:
         image.close()
 
 
-def read_regions(image_path, regions, zoom=DEFAULT_ZOOM):
+def read_regions(image_path, regions, zoom=DEFAULT_ZOOM, page=1):
     """Decode/hash once; a malformed region does not discard valid siblings."""
     if not isinstance(regions, (list, tuple)) or not regions or len(regions) > MAX_BATCH_REGIONS:
         _fail("INVALID_REGIONS", f"regions must contain 1-{MAX_BATCH_REGIONS} cell labels or boxes.")
     if isinstance(zoom, bool) or not isinstance(zoom, int) or not MIN_ZOOM <= zoom <= MAX_ZOOM:
         _fail("INVALID_ZOOM", f"zoom must be an integer {MIN_ZOOM}-{MAX_ZOOM} (got {zoom!r}).")
-    path, image = _open_source(image_path)
+    path, image, pdf = _open_source(image_path, page)
     try:
         source_sha = hashlib.sha256(path.read_bytes()).hexdigest()
         results = []
         for region in regions:
             try:
-                data, meta = _read_region_from_source(path, image, source_sha, region, zoom)
+                data, meta = _read_region_from_source(path, image, source_sha, region, zoom, pdf)
                 results.append({"data": data, "meta": meta, "error": None})
             except RuntimeError as exc:
                 code, _sep, message = str(exc).partition(": ")
@@ -333,16 +354,17 @@ def read_regions(image_path, regions, zoom=DEFAULT_ZOOM):
         image.close()
 
 
-def result_payload(image_path, region="", zoom=DEFAULT_ZOOM):
+def result_payload(image_path, region="", zoom=DEFAULT_ZOOM, page=1):
     """(Image content block, one-line JSON) for a single optional crop."""
-    data, meta = read_region(image_path, region, zoom)
+    data, meta = read_region(image_path, region, zoom, page)
     return MCPImage(data=data, format="png"), json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
 
 
-def result_batch(image_path, regions, zoom=DEFAULT_ZOOM):
+def result_batch(image_path, regions, zoom=DEFAULT_ZOOM, page=1):
     """Return images in request order, plus explicit per-region errors."""
-    results = read_regions(image_path, regions, zoom)
+    results = read_regions(image_path, regions, zoom, page)
     blocks = [MCPImage(data=r["data"], format="png") for r in results if r["data"] is not None]
+    pdf = next((r["meta"]["pdf"] for r in results if r["data"] is not None and "pdf" in r["meta"]), None)
     listed = []
     for index, result in enumerate(results):
         if result["data"] is None:
@@ -355,6 +377,7 @@ def result_batch(image_path, regions, zoom=DEFAULT_ZOOM):
                            "budget": meta["budget"]})
     payload = {"status": "completed" if len(blocks) == len(regions) else ("partial" if blocks else "failed"),
                "risk": "read", "action": "batch", "image_path": str(image_path),
+               **({"pdf": pdf} if pdf else {}),
                "requested": len(regions), "returned": len(blocks), "regions": listed,
                "budget": {"max_pixels": MAX_OUTPUT_PIXELS, "max_bytes": MAX_OUTPUT_BYTES},
                "read_next": "Use returned evidence. Tool errors are not missing dimensions; "

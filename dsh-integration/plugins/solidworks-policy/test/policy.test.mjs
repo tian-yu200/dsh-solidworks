@@ -583,7 +583,7 @@ test("image readers reject URLs, accept local paths, and keep the tool allowlist
     ]) {
       const decision = await env.preExecute({ name: toolName, arguments: { [key]: url } }, next);
       assert.equal(decision.kind, "deny", `${toolName} must refuse ${url}`);
-      assert.match(decision.reason, /local image (file )?path/);
+      assert.match(decision.reason, /local image (file |or PDF )?path/);
     }
   }
   const ok = await env.preExecute(
@@ -592,6 +592,12 @@ test("image readers reject URLs, accept local paths, and keep the tool allowlist
   );
   assert.equal(ok.kind, "allow");
   assert.equal(reached, 1);
+  const pdf = await env.preExecute(
+    { name: "mcp__solidworks__read_drawing_region", arguments: { image_path: "D:/draw/a.pdf", page: 2 } },
+    next,
+  );
+  assert.equal(pdf.kind, "allow");
+  assert.equal(reached, 2);
 });
 
 

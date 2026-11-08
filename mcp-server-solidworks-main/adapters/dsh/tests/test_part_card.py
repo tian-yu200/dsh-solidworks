@@ -46,7 +46,7 @@ def test_registered_tool_schema_and_complete_card_envelope():
     tools = asyncio.run(server.mcp.list_tools())
     assert len(tools) == 12
     region = next(tool for tool in tools if tool.name == "read_drawing_region")
-    assert set(region.input_schema["properties"]) == {"image_path", "region", "zoom", "regions"}
+    assert set(region.input_schema["properties"]) == {"image_path", "region", "zoom", "regions", "page"}
     assert region.input_schema["additionalProperties"] is False
     payload = server.orchestrator.inspect_state(scope="reference", reference_topic="feature_graph_part_card")
     assert len(json.dumps(payload, ensure_ascii=False)) < 7000

@@ -195,14 +195,15 @@ def _to_source_box(box, scale, rotate, out_size, src_size):
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
-def read_text(image_path, rotations=(0, 90, 270)):
-    """OCR the whole sheet. Returns {"lang", "source_pixels", "texts": [...]}.
+def read_text(image_path, rotations=(0, 90, 270), page=1):
+    """OCR the whole sheet. Returns {"lang", "source_pixels", "texts": [...], "pdf"}.
 
     Every text is {text, raw, box, grid_cell, rotation, confidence}. The same text found in more
     than one rotation is merged (the 0-degree read wins; a rotation only contributes texts the
-    upright pass did not already cover in the same place).
+    upright pass did not already cover in the same place). A PDF page is OCR'd from its rendered
+    PNG; "pdf" names the page, else it is None.
     """
-    path, validated_image = _open_source(image_path)
+    path, validated_image, pdf = _open_source(image_path, page)
     src_size = validated_image.size
     validated_image.close()
     started = time.time()
@@ -233,6 +234,7 @@ def read_text(image_path, rotations=(0, 90, 270)):
             "source_pixels": list(src_size),
             "texts": _merge(merged, src_size),
             "elapsed_s": round(time.time() - started, 2),
+            "pdf": pdf,
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -316,20 +318,23 @@ def _merge(items, src_size):
     return kept
 
 
-def result_payload(image_path):
+def result_payload(image_path, page=1):
     """The one-line JSON the MCP tool returns (no image: the answer is the TEXT table).
 
     Kept deliberately small — one row per text, no per-character boxes. The model maps these
     values to features; anything it still cannot settle is asked, and a crop of the same area is
     then cheap because the OCR pass already told it WHERE to look.
     """
-    data = read_text(image_path)
+    data = read_text(image_path, page=page)
     texts = data["texts"]
+    pdf = data["pdf"]
     payload = {
         "status": "completed",
         "risk": "read",
         "action": "ocr",
         "image_path": str(Path(image_path)),
+        # The page list already came with the overview; OCR only names the page it read.
+        **({"pdf": {k: v for k, v in pdf.items() if k != "pages"}} if pdf else {}),
         "source_pixels": data["source_pixels"],
         "ocr_language": data["lang"],
         "text_count": len(texts),

@@ -3,3 +3,4 @@ httpx>=0.27.0
 python-dotenv>=1.0.0
 ezdxf>=1.4,<2        # DXF reading for analyze_drawing (MIT)
 Pillow>=10,<12       # read_drawing_region: crop/zoom of engineering-drawing images (MIT)
+pypdfium2>=4.30,<6   # read_drawing_region/text: render PDF drawing pages (Apache-2.0/BSD-3)

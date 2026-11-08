@@ -46,11 +46,19 @@ numbers remain absent, report BLOCKED without guessing or re-asking the same que
 
 ## Optional tool use and attachment IDs
 
-Both read_drawing_text and read_drawing_region accept a local image path OR
+Both read_drawing_text and read_drawing_region accept a local image or PDF path OR
 sha256:<64 hexadecimal characters>. The current instance resolves an attachment
 under DSH_HOME/attachments/v1/objects/<first two hex>/<hash> (default home ~/.dsh).
 An invalid ID or absent object produces one clear error; do not guess paths.
 URLs including file:// are refused. modlens_read_image remains local-path-only.
+
+A PDF drawing is the one case with no original image in view: DSH passes a PDF as a
+file handle (a saved path in the message text), and there is no file tool. Pass that
+path to read_drawing_region with an empty region; the overview renders page 1 and its
+`pdf.pages` list gives every page's size and title text. Choose the drawing's page,
+read that page's overview with page=N, then crop with the same page=N. One page can
+hold several part drawings: name the part you model. Never claim to have read a PDF
+the tools did not render.
 
 Read with ONE batch of whole-view boxes at zoom 2, e.g.
 regions=["45,45,430,610","65,610,635,905","690,80,1050,525"] (front, bottom, view A):

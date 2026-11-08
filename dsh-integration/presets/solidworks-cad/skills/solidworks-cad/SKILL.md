@@ -28,7 +28,7 @@ result is compact single-line JSON. `start_job` returns `job_id` and
 | `cancel_action` | Cancel a queued confirmation action without executing it — only when the user asks to cancel. |
 | `finish_job` | Run final objective verification and close the authenticated job. |
 | `read_drawing_text` | Optional OCR candidate table with positions; directly view the original drawing first. |
-| `read_drawing_region` | Zoom part of a drawing image (grid cell or pixel box) so small dimensions can be read; read-only, needs no job and touches no CAD. |
+| `read_drawing_region` | Zoom part of a drawing image or PDF page (grid cell or pixel box; `page` for a PDF) so small dimensions can be read; read-only, needs no job and touches no CAD. |
 
 There is no model-visible low-level fallback. Do not use SolidWorks COM, Shell,
 macros, scripts, REST endpoints, desktop automation, or legacy low-level CAD MCP

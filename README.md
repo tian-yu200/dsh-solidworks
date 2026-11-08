@@ -224,7 +224,7 @@ node --test "dsh-integration/plugins/solidworks-policy/test/*.test.mjs" "dsh-int
 
 ## 已知限制
 
-- 输入是图纸**图片**（PNG、JPG 等位图），还不能直接读取 DXF/DWG 或矢量 PDF。
+- 输入是图纸**图片**（PNG、JPG 等位图）或 **PDF**。PDF 按页渲染成图片再读，矢量线条和文字层不当作尺寸来源；还不能直接读取 DXF/DWG。
 - 方案自查只比对包络尺寸和体积，还没有做到逐个关键尺寸比对。
 - 修改已有零件失败时，SolidWorks 的撤销能否真正恢复原状还没有验证。这种情况会报告为 `recovery_unverified`，不会自动重试。
 - 实测数据来自作者本机的单次运行，还没有整理成可复跑的基准集。

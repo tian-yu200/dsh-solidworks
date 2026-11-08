@@ -252,8 +252,8 @@ foreach ($Module in @("intake-progress.js", "package.json")) {
 Add-Check "Installed policy synchronized" $PolicySynchronized "user plugin and resolved profile dependency"
 
 if (Test-Path -LiteralPath $Python) {
-    & $Python -c "import mcp,httpx,pydantic; print('ok')" *> $null
-    Add-Check "Python dependencies" ($LASTEXITCODE -eq 0) "mcp, httpx, pydantic"
+    & $Python -c "import mcp,httpx,pydantic,PIL,pypdfium2; print('ok')" *> $null
+    Add-Check "Python dependencies" ($LASTEXITCODE -eq 0) "mcp, httpx, pydantic, Pillow, pypdfium2 (PDF drawings)"
 
     Push-Location $AdapterDir
     try {

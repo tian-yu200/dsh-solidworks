@@ -82,7 +82,7 @@ const MODLENS_LOCAL_ONLY_REASON =
   "modlens_read_image accepts only a non-empty local image file path in the SolidWorks " +
   "profile; URL forms such as http://, https://, ftp:// and file:// are not allowed.";
 const REGION_LOCAL_ONLY_REASON =
-  "Drawing readers accept a local image path or sha256:<64 hexadecimal characters> in the current DSH home. " +
+  "Drawing readers accept a local image or PDF path, or sha256:<64 hexadecimal characters> in the current DSH home. " +
   "Malformed attachment IDs and URLs (including file://) are refused; do not guess a local path.";
 
 function beginUserQuestion(exec) {

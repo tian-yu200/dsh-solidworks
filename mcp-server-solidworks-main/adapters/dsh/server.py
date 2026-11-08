@@ -387,11 +387,12 @@ def finish_job(job_id: str, job_token: str, keep_open: bool = False) -> str:
 
 
 @mcp.tool(structured_output=False)
-def read_drawing_text(image_path: str) -> str:
+def read_drawing_text(image_path: str, page: int = 1) -> str:
     """Optional OCR aid after directly viewing the original drawing; not a required first step.
 
-    image_path accepts a local file path or sha256:<64 hex> in the current DSH home.
-    URLs are refused. Malformed/missing attachment objects fail once; do not guess paths.
+    image_path accepts a local image or PDF path, or sha256:<64 hex> in the current DSH home.
+    page: 1-based page of a PDF (omit for an image). URLs are refused.
+    Malformed/missing attachment objects fail once; do not guess paths.
     Returns candidate text, raw text, source-pixel boxes, grid cells, rotation and nullable
     confidence. Check OCR candidates visually before using them as EXPLICIT evidence.
     Use EXPLICIT / DERIVED (formula + source facts) / USER / UNKNOWN. Only genuinely missing
@@ -400,15 +401,18 @@ def read_drawing_text(image_path: str) -> str:
     do not ask again about the same matter unless those answers introduce a new contradiction.
     Tool failures are infrastructure failures, not missing dimensions.
     """
-    return _json_result(lambda: ocr.result_payload(image_path))
+    return _json_result(lambda: ocr.result_payload(image_path, page))
 
 
 @mcp.tool(structured_output=False)
 def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
-                        regions: list[str] | None = None):
+                        regions: list[str] | None = None, page: int = 1):
     """Optional crop/zoom aid after directly viewing the original drawing.
 
-    image_path: local image path OR sha256:<64 hex> in the current DSH home; URLs refused.
+    image_path: local image or PDF path OR sha256:<64 hex> in the current DSH home; URLs refused.
+    A PDF attachment arrives as a file path, not an image: read its overview (empty region)
+    first, then crop. page: 1-based PDF page (omit for an image); the overview lists every
+    page with its size and title text so the drawing's page can be chosen.
     region: empty for a gridded overview, A1-H6 cell, or source-pixel x0,y0,x1,y1 box.
     zoom: integer 1-4. regions: optional 1-12 labels/boxes sharing the zoom; returns one
     image per successful region and explicit per-region errors. Read with ONE batch of
@@ -426,8 +430,8 @@ def read_drawing_region(image_path: str, region: str = "", zoom: int = 2,
     technical failures, not missing dimensions. No CAD document or job is touched here.
     """
     if regions is not None:
-        return _image_result(lambda: intake.result_batch(image_path, regions, zoom))
-    return _image_result(lambda: intake.result_payload(image_path, region, zoom))
+        return _image_result(lambda: intake.result_batch(image_path, regions, zoom, page))
+    return _image_result(lambda: intake.result_payload(image_path, region, zoom, page))
 
 
 def read_skill_reference(name: str) -> str:
