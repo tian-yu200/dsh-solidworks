@@ -4,6 +4,7 @@ import re
 from typing import Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Image as MCPImage
 from mcp.server.mcpserver import ResourceSecurity
 
 import intake
@@ -101,6 +102,35 @@ def _image_result(func):
         return _compact(_error_payload(exc))
 
 
+VIEW_MAX_SIDE = 1024  # px; the graphics window can be 2000+ wide, and detail beyond this costs tokens
+
+
+def _view_images(result):
+    """(one image per rendered view, one-line JSON naming each view and what it shows)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    blocks = []
+    for item in result["views"]:
+        path = item.pop("path", None)
+        if not path:
+            continue
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((VIEW_MAX_SIDE, VIEW_MAX_SIDE))
+            buf = BytesIO()
+            im.save(buf, format="PNG", optimize=True)
+        blocks.append(MCPImage(data=buf.getvalue(), format="png"))
+        item["image"] = len(blocks)
+    payload = {"status": "completed", "risk": "read", "target_document": result["target_document"],
+               "views": result["views"],
+               "compare": "逐个视图和图纸的对应视图比：外轮廓、台阶高度、孔/槽/凸台的有无与位置、斜面。"
+                          "灰色细线是被挡住的边（图纸上的虚线）。一边有、另一边没有就是 FAIL，"
+                          "先改特征图重建，再保存。"}
+    return blocks, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 @mcp.tool(structured_output=False)
 def start_job(
     intent: str,
@@ -132,6 +162,7 @@ def inspect_state(
         "mates",
         "drawing",
         "selection",
+        "views",
         "reference",
     ] = "state",
     component: str = "",
@@ -167,7 +198,13 @@ def inspect_state(
     covered by the card; full schema and changelog are not a mandatory pre-build sequence.
     Deep document scopes require job credentials.
     Assembly faces/edges additionally require component.
+
+    scope=views returns IMAGES of the job's part: front, top, left and isometric, hidden edges in
+    grey (the drawing's dashed lines). Compare each with the drawing's matching view; a feature
+    in one and not the other is a FAIL to fix before saving.
     """
+    if scope == "views":
+        return _image_result(lambda: _view_images(orchestrator.render_views(job_id, job_token)))
     return _json_result(
         lambda: orchestrator.inspect_state(
             job_id,

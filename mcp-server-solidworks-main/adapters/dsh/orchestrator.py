@@ -2,6 +2,7 @@ import hmac
 import json
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ from policy import (
     validate_save_or_export_payload,
 )
 from references import page_reference, read_reference
-from settings import BACKUP_ROOT
+from settings import BACKUP_ROOT, VIEWS_ROOT
 from repair_policy import (admit as admit_repair, repair_evidence, design_contract, dimensions_equal,
                            graph_fingerprints)
 
@@ -54,6 +55,17 @@ NOTHING_BUILT = ("（什么都没建，也不占修复次数：把上面每一�
 REPAIR_NEXT_STEP = ("新建的零件已丢弃，可以直接修复：按 error.message 写明的原因改特征图，"
                     "repair_evidence_json 写清 error_code / cause / readback / change，重新提交整张图。"
                     "自动修复还剩 %d 次，还有次数时不要结束本轮。")
+
+# What each rendered view shows, in the skill's axis contract (Front looks -Z, Top -Y, Left +X).
+VIEW_GUIDE = {
+    "front": "主视图：沿 -Z 看",
+    "top": "俯视图：沿 -Y 从上往下看",
+    "left": "左视图：从零件左侧沿 +X 看；第一角画法（国标）画在主视图右边，第三角画在左边",
+    "right": "右视图：从零件右侧沿 -X 看",
+    "back": "后视图：沿 +Z 看",
+    "bottom": "仰视图：沿 +Y 从下往上看",
+    "isometric": "轴测图：只看整体形状",
+}
 
 class CadOrchestrator:
     def __init__(self):
@@ -1028,6 +1040,35 @@ class CadOrchestrator:
                 verification={"state": state_response, "analysis": response},
                 **self._job_metadata(job),
             )
+
+    def render_views(self, job_id, job_token, views="front,top,left,isometric"):
+        """PNG paths of the job's part in standard views, hidden edges grey (findings M5).
+
+        Numbers that agree can hide a missing feature: a 缺口块 build without its ramp still measured
+        42x30x30 and passed. These images are for comparing the build with the drawing view by view.
+        Read-only: the execution layer changes only the view orientation and restores the display."""
+        names = [v.strip().lower() for v in (views or "").split(",") if v.strip()]
+        unknown = [n for n in names if n not in VIEW_GUIDE]
+        if not names or unknown:
+            raise ValueError("views must be a comma list of %s (got %r)" % (", ".join(VIEW_GUIDE), views))
+        if not (job_id and job_token):
+            raise ValueError("A CAD job is required for document analysis")
+        with self._write_lock:
+            job = self._load_job(job_id, job_token)
+            state, _state_response = self._verify_job_document(job)
+            if state.get("documentType") not in ("PART", "ASSEMBLY"):
+                raise ValueError("scope 'views' needs a part or assembly document, not %s"
+                                 % (state.get("documentType") or "no document"))
+            out = VIEWS_ROOT / job_id / time.strftime("%Y%m%d-%H%M%S")
+            response = backend.call("render_views", {"output_dir": str(out), "views": names})
+        if response.get("status") != "COMPLETED":
+            error = self._response_error(response)
+            raise RuntimeError("RENDER_FAILED: %s" % (error.get("message") if isinstance(error, dict) else error))
+        features = (response.get("cadState") or {}).get("features") or ["{}"]
+        rendered = json.loads(features[0]).get("views") or []
+        for item in rendered:
+            item["shows"] = VIEW_GUIDE.get(item.get("view"), "")
+        return {"target_document": self._target(state), "views": rendered}
 
     def begin_job(self, intent, target_document="", as_assembly=False):
         with self._write_lock:

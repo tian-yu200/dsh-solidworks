@@ -522,9 +522,9 @@ Validate independently:
   stated, engagement length, through/blind extent, and nut open/closed topology.
 
 Write `PASS`, `FAIL`, or `UNAVAILABLE` with evidence in each Validation Matrix
-row. When useful and planned, make a working save and use `drawing_workflow` to
-create Front/Top/Side validation views. View creation alone is not a PASS; the
-returned evidence must support comparison.
+row. Before the final save, call `inspect_state(scope="views")`: images of the part (front, top,
+left, isometric; hidden edges grey). Compare each with the drawing's matching view; a feature in one
+and not the other, or a misplaced one, is a FAIL even when every measured number agrees.
 
 On any directional or sectional `FAIL`, stop final save/export, traverse `L5`,
 reinspect the pictorial view first when one was found, update PLAN before repair,

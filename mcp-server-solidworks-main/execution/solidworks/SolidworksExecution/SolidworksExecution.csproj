@@ -103,6 +103,7 @@
     <Compile Include="Services\SolidWorksService.Assembly.cs" />
     <Compile Include="Services\SolidWorksService.Threads.cs" />
     <Compile Include="Services\SolidWorksService.Draft.cs" />
+    <Compile Include="Services\SolidWorksService.Views.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

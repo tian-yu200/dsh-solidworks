@@ -227,6 +227,7 @@ namespace SolidworksExecution.Controllers
                 case "analyze_model":          return _service.AnalyzeModel(request);
                 case "analyze_slddrw_test":    return _service.AnalyzeDrawing(request);
                 case "get_selection":          return _service.GetSelection(request);
+                case "render_views":           return _service.RenderViews(request);
                 case "edit_sketch":            return _service.EditSketch(request);
                 case "add_reference_geometry": return _service.AddReferenceGeometry(request);
                 case "create_pattern":         return _service.CreatePattern(request);

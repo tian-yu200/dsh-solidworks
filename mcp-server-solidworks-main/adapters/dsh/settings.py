@@ -13,6 +13,8 @@ BACKUP_ROOT = Path(os.getenv("DSH_SOLIDWORKS_BACKUP_ROOT", WORKSPACE_ROOT / "bac
 
 # read_drawing_region output: one folder per source drawing (gitignored, under artifacts/).
 INTAKE_ROOT = Path(os.getenv("DSH_SOLIDWORKS_INTAKE_ROOT", WORKSPACE_ROOT / "artifacts" / "intake"))
+# inspect_state(scope="views") output: PNGs of the built part per job (gitignored, under artifacts/).
+VIEWS_ROOT = Path(os.getenv("DSH_SOLIDWORKS_VIEWS_ROOT", WORKSPACE_ROOT / "artifacts" / "views"))
 
 # The solidworks-cad skill's own reference files, served as read-only MCP resources. This is the
 # repository path: the installed preset keeps its `skills` child as a junction to exactly this
