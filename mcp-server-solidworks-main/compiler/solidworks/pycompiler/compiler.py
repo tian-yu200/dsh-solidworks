@@ -11,6 +11,7 @@ already had (possibly none). A present-but-not-applied material is MATERIAL_NOT_
 Public API (consumed by pycompiler/__init__.py and the adapter):
     compile_and_run(port, graph) -> CompileResult
 """
+import json
 import math
 
 from . import diagnosis
@@ -120,7 +121,7 @@ def _compile_and_run(port, graph):
     # What has been built so far, for a failed extrude's explanation (findings H11).
     material = diagnosis.MaterialLog(nodes)
     hole_placements = []
-    for node in nodes:
+    for position, node in enumerate(nodes):
         nid = node.get("id")
         ntype = node.get("type")
         rec = {"id": nid, "type": ntype, "status": "PENDING", "ops": []}
@@ -279,6 +280,16 @@ def _compile_and_run(port, graph):
             result.node_log.append(rec)
             result.nodes_completed += 1
         except FeatureError as fe:
+            if _edge_feature_can_be_skipped(node, fe, nodes[position + 1:]):
+                rec["status"] = "SKIPPED"
+                result.node_log.append(rec)
+                result.warnings.append({
+                    "code": "EDGE_FEATURE_SKIPPED", "node_id": nid, "node_type": ntype,
+                    "error_code": fe.code,
+                    "message": EDGE_FEATURE_SKIPPED_MESSAGE % (ntype, nid, fe.code),
+                    "detail": fe.message,
+                })
+                continue
             rec["status"] = "FAILED"
             result.node_log.append(rec)
             result.status = "FAILED"
@@ -358,6 +369,26 @@ def _compile_and_run(port, graph):
 
     result.final_state_version = sv
     return result
+
+
+# A fillet or chamfer whose edge cannot be resolved or made used to discard the whole part, though
+# such nodes come last and nothing is built on them: 脚踏座 1c5d366c (2026-11-08) gave up after three
+# unresolved fillet anchors, and d6bf7e51 lost 13 minutes of features to one null fillet (findings
+# H12/H6). Now the node is skipped and the rest of the part kept, unless a later node names it. The
+# planner adds it afterwards on the kept part, where it can read the real edges first.
+EDGE_FEATURE_CODES = frozenset(("REFERENCE_UNRESOLVED", "REFERENCE_AMBIGUOUS", "FEATURE_CREATION_FAILED"))
+EDGE_FEATURE_SKIPPED_MESSAGE = (
+    "%s '%s' 没建上（%s），其余特征已建好，零件保留。用 inspect_state(scope=\"edges\") 读出实际的边，"
+    "再提交一张只含这个节点的特征图（fresh_document=false）补上；补不上就在最终回复里如实说明缺了它。")
+
+
+def _edge_feature_can_be_skipped(node, error, later_nodes):
+    """Whether a failed fillet/chamfer node may be skipped: an edge-resolution or null-feature
+    failure, and no later node names it (a pattern or mirror of it would then fail instead)."""
+    if node.get("type") not in ("fillet", "chamfer") or error.code not in EDGE_FEATURE_CODES:
+        return False
+    quoted = json.dumps(node.get("id"))
+    return not any(quoted in json.dumps(later) for later in later_nodes)
 
 
 def _material_on_part(resp):

@@ -820,6 +820,14 @@ def test_fillet_edge_anchors_resolve_to_indices():
                               "edge_indices": "[0,3]"}  # sorted, JSON-string per the tool contract
 
 
+def _skipped(r):
+    """The edge failure of a run whose fillet/chamfer node was skipped (2026-11-09): the part is
+    kept and the resolver's code and message ride on the EDGE_FEATURE_SKIPPED warning."""
+    assert r.status == "COMPLETED", r.to_dict()
+    w = next(w for w in r.warnings if w["code"] == "EDGE_FEATURE_SKIPPED")
+    return {"code": w["error_code"], "message": w["detail"]}
+
+
 def test_fillet_anchor_ambiguous_and_unresolved_and_duplicate():
     # Two mids within the tolerance ball of one anchor -> AMBIGUOUS.
     tight = json.dumps({"edge_count": 2, "edges": [
@@ -831,17 +839,17 @@ def test_fillet_anchor_ambiguous_and_unresolved_and_duplicate():
                    {"id": "f1", "type": "fillet", "radius": 0.001,
                     "edges": [{"near": [0.0, 0.0, 0.0]}]}]}
     r = compile_and_run(FakePort(edges=tight), g)
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
+    assert _skipped(r)["code"] == "REFERENCE_AMBIGUOUS"
     # No mid within the ball -> UNRESOLVED (with the nearest distance reported).
     g["nodes"][1]["edges"] = [{"near": [0.5, 0.5, 0.5]}]
     r = compile_and_run(FakePort(edges=_EDGES), g)
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
-    assert "nearest was" in r.error["message"]
+    assert _skipped(r)["code"] == "REFERENCE_UNRESOLVED"
+    assert "nearest was" in _skipped(r)["message"]
     # Two anchors landing on the SAME edge -> duplicate = AMBIGUOUS.
     g["nodes"][1]["edges"] = [{"near": [0.005, 0.0, 0.0]}, {"near": [0.005, 0.0, 0.00005]}]
     r = compile_and_run(FakePort(edges=_EDGES), g)
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
-    assert "SAME edge" in r.error["message"]
+    assert _skipped(r)["code"] == "REFERENCE_AMBIGUOUS"
+    assert "SAME edge" in _skipped(r)["message"]
 
 
 # 2026-10-31 live failure: SolidWorks reports a full circle's "mid" at an arbitrary point of it
@@ -892,11 +900,11 @@ def test_split_straight_edge_resolves_from_any_interior_point():
 
 def test_anchor_on_a_shared_vertex_is_ambiguous_and_off_edge_is_unresolved():
     r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.02, 0.0, 0.0]]))
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
-    assert "shared vertex" in r.error["message"]
+    assert _skipped(r)["code"] == "REFERENCE_AMBIGUOUS"
+    assert "shared vertex" in _skipped(r)["message"]
     r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.03, 0.002, 0.0]]))
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
-    assert "nearest was 0.002000" in r.error["message"]
+    assert _skipped(r)["code"] == "REFERENCE_UNRESOLVED"
+    assert "nearest was 0.002000" in _skipped(r)["message"]
 
 
 def _suggested(message, edge):
@@ -909,8 +917,8 @@ def test_an_unresolved_anchor_names_the_nearest_edges_with_a_usable_point():
     # 2026-11-02 脚踏座: the anchor sat 6 mm off the rim plane and the message gave only that
     # distance; three repairs guessed and the budget ran out.
     r = compile_and_run(FakePort(edges=_RIM_EDGES), _edge_graph("chamfer", [[0.093, 0.095, 0.036]]))
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
-    message = r.error["message"]
+    assert _skipped(r)["code"] == "REFERENCE_UNRESOLVED"
+    message = _skipped(r)["message"]
     assert "#0 circle R0.019 centre [0.074, 0.095, 0.03] axis [0, 0, 1]" in message
     assert message.index("#0 circle") < message.index("#2 circle") < message.index("#1 circle")
     port = FakePort(edges=_RIM_EDGES)
@@ -921,7 +929,7 @@ def test_an_unresolved_anchor_names_the_nearest_edges_with_a_usable_point():
 
 def test_an_anchor_where_edges_meet_offers_a_point_inside_each():
     r = compile_and_run(FakePort(edges=_SPLIT_EDGES), _edge_graph("fillet", [[0.02, 0.0, 0.0]]))
-    message = r.error["message"]
+    message = _skipped(r)["message"]
     assert _suggested(message, 0) == [0.01, 0.0, 0.0] and _suggested(message, 1) == [0.035, 0.0, 0.0]
     # A boss rim meeting a plate edge (the 脚踏座 Ø60 seat end at z=0): the circle's point is
     # taken across the circle, away from the junction, and it resolves.
@@ -931,10 +939,10 @@ def test_an_anchor_where_edges_meet_offers_a_point_inside_each():
         {"i": 1, "start": [0.038, 0.03, 0.0], "end": [0.038, 0.03, 0.004], "mid": [0.038, 0.03, 0.002]},
     ]})
     r = compile_and_run(FakePort(edges=edges), _edge_graph("chamfer", [[0.038, 0.03, 0.0]]))
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
-    assert _suggested(r.error["message"], 0) == [0.038, -0.03, 0.0]
+    assert _skipped(r)["code"] == "REFERENCE_AMBIGUOUS"
+    assert _suggested(_skipped(r)["message"], 0) == [0.038, -0.03, 0.0]
     port = FakePort(edges=edges)
-    r = compile_and_run(port, _edge_graph("chamfer", [_suggested(r.error["message"], 0)]))
+    r = compile_and_run(port, _edge_graph("chamfer", [_suggested(_skipped(r)["message"], 0)]))
     assert r.status == "COMPLETED", r.to_dict()
     assert port.calls[-1][1]["edge_indices"] == "[0]"
 
@@ -983,12 +991,12 @@ def test_arc_anchor_resolves_through_the_exact_point_query():
 def test_exact_point_query_keeps_ambiguity_and_old_layers_stay_unresolved():
     r = compile_and_run(ExactEdgePort({0: [0.0], 1: [0.00005]}),
                         _edge_graph("fillet", [[0.0, 0.037071067812, 0.042071067812]]))
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_AMBIGUOUS"
+    assert _skipped(r)["code"] == "REFERENCE_AMBIGUOUS"
     # A layer without `points` support returns no on_dist: the anchor reports the chord miss.
     r = compile_and_run(FakePort(edges=json.dumps(_CORNER_EDGES)),
                         _edge_graph("fillet", [[0.0, 0.037071067812, 0.042071067812]]))
-    assert r.status == "FAILED" and r.error["code"] == "REFERENCE_UNRESOLVED"
-    assert "nearest was 0.002929" in r.error["message"]
+    assert _skipped(r)["code"] == "REFERENCE_UNRESOLVED"
+    assert "nearest was 0.002929" in _skipped(r)["message"]
 
 
 def test_chamfer_distance_angle_lowering():
