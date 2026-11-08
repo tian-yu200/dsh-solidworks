@@ -801,6 +801,16 @@ def _validate(graph):
                               "sketch coords (normally the construction centerline)." % label)
             elif axis.get("x1") == axis.get("x2") and axis.get("y1") == axis.get("y2"):
                 errors.append("%s: axis start and end coincide — not a segment." % label)
+            elif isinstance(prev, dict) and prev.get("id") == sk and isinstance(prev.get("profile"), list):
+                sides = contours.axis_sides(prev["profile"], axis)
+                if sides and sides[0][0] < -contours.CONTOUR_WELD_TOL and sides[1][0] > contours.CONTOUR_WELD_TOL:
+                    (low, i), (high, j) = sides
+                    errors.append(
+                        "%s: the profile of sketch '%s' lies on BOTH sides of the revolve axis — "
+                        "profile[%d] reaches %.2f mm on one side and profile[%d] %.2f mm on the other. "
+                        "SolidWorks revolves only a profile on one side of its axis (it may touch it): "
+                        "draw the half-section only; a bore is the half-section's inner edge, not a "
+                        "second half." % (label, sk, i, -low * 1000, j, high * 1000))
             angle = node.get("angle")
             if angle is not None and not _is_pos_number(angle):
                 errors.append("%s: 'angle' must be a positive number (RADIANS; omit for a full 360°)." % label)

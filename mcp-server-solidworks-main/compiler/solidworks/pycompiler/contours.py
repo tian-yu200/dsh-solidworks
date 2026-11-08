@@ -1147,3 +1147,43 @@ def resolve_fillets(profile, tol=CONTOUR_WELD_TOL):
                   "x1": round(p1[0], 9), "y1": round(p1[1], 9), "x2": round(p2[0], 9), "y2": round(p2[1], 9),
                   "dir": 1 if cross > 0 else -1}
     return (profile, problems) if problems else (out, [])
+
+
+# ------------------------------------------------------- revolve: a profile on one side of its axis
+
+def axis_sides(profile, axis, tol=CONTOUR_WELD_TOL):
+    """Where a revolve profile lies relative to its axis line.
+
+    SolidWorks revolves only a profile on ONE side of the axis (touching it is fine); one that
+    crosses it comes back as a null feature mid-build. Returns ((min distance, prim), (max distance,
+    prim)) over every non-construction point (arcs and closed kinds sampled, sketch fillets
+    resolved), signed by the side of the axis line, in metres; None when nothing is measurable.
+    """
+    x1, y1, x2, y2 = (_as_float(axis.get(k)) for k in ("x1", "y1", "x2", "y2"))
+    if None in (x1, y1, x2, y2):
+        return None
+    ux, uy = x2 - x1, y2 - y1
+    length = math.hypot(ux, uy)
+    if length == 0:
+        return None
+    resolved, problems = resolve_fillets(profile)
+    if problems:
+        return None
+    low = high = None
+    for i, prim in enumerate(resolved):
+        if not isinstance(prim, dict) or prim.get("construction") is True:
+            continue
+        kind = prim.get("kind")
+        if kind in _CLOSED_LOOP_KINDS:
+            pts = closed_loop(prim) or []
+        elif kind in ("line", "arc", "spline"):
+            pts = _prim_points(prim)
+        else:
+            continue
+        for x, y in pts:
+            d = (ux * (y - y1) - uy * (x - x1)) / length
+            if low is None or d < low[0]:
+                low = (d, i)
+            if high is None or d > high[0]:
+                high = (d, i)
+    return (low, high) if low is not None else None
