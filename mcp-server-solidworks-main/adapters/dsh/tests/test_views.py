@@ -82,3 +82,41 @@ def test_views_need_a_part_or_assembly(tmp_path, monkeypatch, cad_env):
     with pytest.raises(ValueError):
         cad_env.orchestrator.render_views("job-1", cad_env.token)
     assert not [c for c in cad_env.backend.calls if c[0] == "render_views"]
+
+
+def _graph():
+    return json.dumps({"units": "meters", "expect": {"bbox_mm": [20, 20, 20]},
+                       "nodes": [{"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02}]})
+
+
+def test_a_completed_build_returns_the_part_views_with_its_result(tmp_path, monkeypatch, cad_env):
+    _render(tmp_path, monkeypatch, cad_env)
+    server = _dsh_server()
+    result = server.submit_feature_graph("job-1", cad_env.token, _graph(), True)
+    assert isinstance(result, tuple), result
+    blocks, text = result
+    payload = json.loads(text)
+    assert payload["status"] == "completed" and len(blocks) == 4
+    assert [v["view"] for v in payload["views"]] == ["front", "top", "left", "isometric"]
+    assert "FAIL" in payload["views_compare"]
+
+
+def test_a_render_problem_never_fails_the_build(tmp_path, monkeypatch, cad_env):
+    _render(tmp_path, monkeypatch, cad_env)
+    cad_env.backend.call_handler = lambda tool, params: (
+        {"status": "FAILED", "error": {"code": "COM_ERROR", "message": "no window"}}
+        if tool == "render_views" else None)
+    server = _dsh_server()
+    payload = json.loads(server.submit_feature_graph("job-1", cad_env.token, _graph(), True))
+    assert payload["status"] == "completed" and "RENDER_FAILED" in payload["views_error"]
+
+
+def test_a_failed_build_renders_nothing(tmp_path, monkeypatch, cad_env):
+    _render(tmp_path, monkeypatch, cad_env)
+    cad_env.backend.feature_graph_handler = lambda graph, fresh: {
+        "status": "FAILED", "stateVersion": 2, "compiler": {"nodes_completed": 0, "node_log": []},
+        "error": {"code": "EXTRUSION_FAILED", "message": "null"}}
+    server = _dsh_server()
+    payload = json.loads(server.submit_feature_graph("job-1", cad_env.token, _graph(), True))
+    assert payload["status"] != "completed"
+    assert not [c for c in cad_env.backend.calls if c[0] == "render_views"]

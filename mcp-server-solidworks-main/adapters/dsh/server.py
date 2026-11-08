@@ -106,7 +106,7 @@ VIEW_MAX_SIDE = 1024  # px; the graphics window can be 2000+ wide, and detail be
 
 
 def _view_images(result):
-    """(one image per rendered view, one-line JSON naming each view and what it shows)."""
+    """(one image per rendered view, a dict naming each view and what it shows)."""
     from io import BytesIO
 
     from PIL import Image
@@ -124,11 +124,39 @@ def _view_images(result):
         blocks.append(MCPImage(data=buf.getvalue(), format="png"))
         item["image"] = len(blocks)
     payload = {"status": "completed", "risk": "read", "target_document": result["target_document"],
-               "views": result["views"],
-               "compare": "逐个视图和图纸的对应视图比：外轮廓、台阶高度、孔/槽/凸台的有无与位置、斜面。"
-                          "灰色细线是被挡住的边（图纸上的虚线）。一边有、另一边没有就是 FAIL，"
-                          "先改特征图重建，再保存。"}
-    return blocks, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+               "views": result["views"], "compare": VIEW_COMPARE}
+    return blocks, payload
+
+
+VIEW_COMPARE = ("逐个视图和图纸的对应视图比：外轮廓、台阶高度、孔/槽/凸台的有无与位置、斜面。"
+                "灰色细线是被挡住的边（图纸上的虚线）。一边有、另一边没有就是 FAIL，先改特征图重建，再保存。")
+
+
+def _with_views(job_id, job_token, func):
+    """A tool result that, after a COMPLETED feature-graph build, also carries the part's views.
+
+    Asking for views was left to the planner (inspect_state views), and planners skip optional
+    steps; a build that measures right while missing a feature passed that way (findings M5).
+    The images ride on the build result itself. Rendering never fails the build: on any problem
+    the plain JSON result is returned."""
+    try:
+        payload = func()
+    except Exception as exc:  # noqa: BLE001
+        return _compact(_error_payload(exc))
+    built = (isinstance(payload, dict) and payload.get("status") == "completed"
+             and isinstance((payload.get("partial_state") or {}).get("compiler"), dict))
+    if not built:
+        return _compact(payload)
+    try:
+        blocks, views = _view_images(orchestrator.render_views(job_id, job_token))
+    except Exception as exc:  # noqa: BLE001
+        payload["views_error"] = str(exc)[:300]
+        return _compact(payload)
+    if not blocks:
+        return _compact(payload)
+    payload["views"] = views["views"]
+    payload["views_compare"] = VIEW_COMPARE
+    return blocks, _compact(payload)
 
 
 @mcp.tool(structured_output=False)
@@ -204,7 +232,10 @@ def inspect_state(
     in one and not the other is a FAIL to fix before saving.
     """
     if scope == "views":
-        return _image_result(lambda: _view_images(orchestrator.render_views(job_id, job_token)))
+        def views():
+            blocks, payload = _view_images(orchestrator.render_views(job_id, job_token))
+            return blocks, _compact(payload)
+        return _image_result(views)
     return _json_result(
         lambda: orchestrator.inspect_state(
             job_id,
@@ -256,12 +287,16 @@ def submit_feature_graph(
     at count 0, as one prompt. It does not close residual documents.
     recovery_unverified / rollback_failed prohibits AUTOMATIC retry. Undo is not yet verified.
 
+    A completed build also returns images of the part (front, top, left, isometric; hidden edges
+    grey) with `views`: compare each with the drawing's matching view before saving.
+
     A completed result may carry non-fatal warnings. DIRECTION_FLIPPED means a null cut
     succeeded after opposite-direction retry: inspect that feature's location, depth and
     direction by readback AND front/top/side verification. MATERIAL_NOT_FOUND can be fixed
     later with apply_document_edits. Neither warning alone calls for graph replay/rollback.
     """
-    return _json_result(
+    return _with_views(
+        job_id, job_token,
         lambda: orchestrator.feature_graph(
             job_id, job_token, graph_json, fresh_document, repair_evidence_json,
             require_expect=True,
@@ -384,7 +419,8 @@ def confirm_action(
     Pass the action_id, one-time confirmation_token and exact confirmation_text returned by
     request_confirmation. Never infer approval from prior conversation.
     """
-    return _json_result(
+    return _with_views(
+        job_id, job_token,
         lambda: orchestrator.confirm_action(
             job_id,
             job_token,
