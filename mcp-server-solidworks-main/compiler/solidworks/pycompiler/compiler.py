@@ -13,6 +13,7 @@ Public API (consumed by pycompiler/__init__.py and the adapter):
 """
 import math
 
+from . import diagnosis
 from . import lowering
 from . import resolver
 from .errors import FeatureError
@@ -116,6 +117,8 @@ def _compile_and_run(port, graph):
     # overlap fail BEFORE any execution call (check_holes_do_not_overlap).
     node_features = {}
     sketch_mirrors = {}
+    # What has been built so far, for a failed extrude's explanation (findings H11).
+    material = diagnosis.MaterialLog(nodes)
     hole_placements = []
     for node in nodes:
         nid = node.get("id")
@@ -176,10 +179,12 @@ def _compile_and_run(port, graph):
                     rec.setdefault("resolved", []).append(
                         {"step": "thread_edge", "edge_index": params["edge_index"],
                          "edge_center": edge_info.get("edge_center")})
+                material.sending(op.tool, params, nid)
                 resp = port.execute(op.tool, params, sv)
                 result.exec_calls += 1
                 previous_sv = sv
                 sv = _advance(resp, sv, nid, ntype, op)
+                material.completed(op.tool, params, resp, node)
                 if sv != previous_sv:
                     # A write advanced the document: every analyze payload read at the old
                     # state_version is stale (SPEED task A). Reads that did NOT bump
@@ -277,8 +282,14 @@ def _compile_and_run(port, graph):
             rec["status"] = "FAILED"
             result.node_log.append(rec)
             result.status = "FAILED"
+            message = fe.message
+            if fe.code == "EXTRUSION_FAILED":
+                try:
+                    message += material.explain()
+                except Exception:  # an explanation must never replace the failure it explains
+                    pass
             result.error = {
-                "code": fe.code, "message": fe.message,
+                "code": fe.code, "message": message,
                 "node_id": fe.node_id or nid, "node_type": ntype, "step": fe.step,
             }
             result.final_state_version = sv
