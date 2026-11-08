@@ -416,8 +416,10 @@ def _check_expect(expect, nodes, errors):
         want = features[kind]
         if kind not in NODE_TYPES or kind == "sketch":
             errors.append("graph.expect.features.%s is not a feature node type." % kind)
-        elif isinstance(want, bool) or not isinstance(want, int) or want < 1:
-            errors.append("graph.expect.features.%s must be a positive whole count." % kind)
+        elif isinstance(want, bool) or not isinstance(want, int) or want < 0:
+            # 0 is how a plan says "none of these"; it checks nothing. Rejecting it cost 8 of the
+            # first 10 bench runs a wasted submit (2026-11-08, findings H1).
+            errors.append("graph.expect.features.%s must be a whole count (0 = none)." % kind)
         elif counts.get(kind, 0) < want:
             errors.append("graph.expect.features.%s = %d but the graph has %d %s node(s): the approved "
                           "plan has it — add the node(s), do not drop them from expect."

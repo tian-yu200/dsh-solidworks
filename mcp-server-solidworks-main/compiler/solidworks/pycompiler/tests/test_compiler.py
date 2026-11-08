@@ -2618,6 +2618,12 @@ def test_expect_accepts_the_plan_envelope_volume_and_feature_minimums():
                           nodes) == []
 
 
+def test_expect_zero_means_none_and_is_not_an_error():
+    # Bench 2026-11-08: plans with no fillet wrote {"fillet": 0, "chamfer": 0}; 8 of 10 first
+    # submits were rejected for it.
+    assert _expect_errors({"bbox_mm": [50, 50, 50], "features": {"fillet": 0, "chamfer": 0}}) == []
+
+
 @pytest.mark.parametrize("expect, fragment", [
     ({"bbox_mm": [0.09, 0.093, 0.157]}, "MILLIMETRES"),
     ({"bbox_mm": [90, 93]}, "three positive numbers"),
@@ -2625,7 +2631,9 @@ def test_expect_accepts_the_plan_envelope_volume_and_feature_minimums():
     ({"bbox_mm": [90, 93, 157], "volume_mm3": -1}, "volume_mm3 must be a positive"),
     ({"bbox_mm": [90, 93, 157], "features": {"fillet": 1, "chamfer": 1}}, "graph has 0 fillet"),
     ({"bbox_mm": [90, 93, 157], "features": {"sketch": 1}}, "not a feature node type"),
-    ({"bbox_mm": [90, 93, 157], "features": {"box": True}}, "positive whole count"),
+    ({"bbox_mm": [90, 93, 157], "features": {"box": True}}, "whole count"),
+    ({"bbox_mm": [90, 93, 157], "features": {"fillet": -1}}, "whole count"),
+    ({"bbox_mm": [90, 93, 157], "features": {"fillet": 1.5}}, "whole count"),
     ([90, 93, 157], "must be an object"),
 ])
 def test_expect_rejects_what_the_check_could_not_use(expect, fragment):
