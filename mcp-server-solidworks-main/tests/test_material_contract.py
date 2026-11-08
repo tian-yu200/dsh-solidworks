@@ -263,7 +263,7 @@ def test_compiler_exempts_exactly_one_code_after_the_last_node():
         "MATERIAL_NOT_APPLIED, COM_ERROR", ""), (
         "MATERIAL_NOT_APPLIED may only appear here as prose naming the fatal case")
     # geometry first, material last
-    assert COMPILER_SOURCE.index("for node in nodes:") < COMPILER_SOURCE.index(
+    assert COMPILER_SOURCE.index("for position, node in enumerate(nodes):") < COMPILER_SOURCE.index(
         "graph.get(\"material\")")
 
 
