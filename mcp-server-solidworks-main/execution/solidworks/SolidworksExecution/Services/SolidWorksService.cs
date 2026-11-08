@@ -19,8 +19,9 @@ namespace SolidworksExecution.Services
         // lookup (~375 ms measured). All COM access is serialized on the single StaExecutor thread,
         // so this static needs no locking.
         private static ISldWorks _solidWorks;
-        // Visible/UserControl is a lifecycle setting applied on first attach (EnsureReady's intent),
-        // not something each request should re-write.
+        // Whether EnsureVisible's attach-time Visible/UserControl write succeeded for the current
+        // attach. It gates only that write. Every tool call still re-reads the live Visible property
+        // (EnsureVisiblePerRequest), because an attach-time write can fail and nothing re-attaches.
         private static bool _sessionVisibilityApplied;
         private static readonly object UndoScopeSync = new object();
         private static bool _undoScopeActive;
@@ -119,6 +120,10 @@ namespace SolidworksExecution.Services
                 }
                 IsConnected = true;
                 EnsureVisible(); // the user must ALWAYS see what the automation does
+                // EnsureVisible writes once per attach; EnsureReady (every job's first call) reaches
+                // here on a live cached attach, so check the live window too (forced-hide test,
+                // 2026-11-08: ensure_ready left a hidden SolidWorks hidden).
+                EnsureVisiblePerRequest();
                 return true;
             }
             catch (COMException)
@@ -146,7 +151,8 @@ namespace SolidworksExecution.Services
         // that one, the user would watch a different window and see nothing happen (observed live: two
         // SLDWORKS processes, the older one window-less). Policy (for now): every instance we touch is
         // made visible. Best-effort — a visibility failure must never break the attach or a tool call.
-        // Runs once per attach (not per request): if it fails we leave the flag unset and retry later.
+        // Runs once per attach: if it fails we leave the flag unset and the next attach retries it.
+        // Tool calls do not depend on it succeeding (see EnsureVisiblePerRequest).
         private void EnsureVisible()
         {
             if (_sessionVisibilityApplied) return;
@@ -157,12 +163,45 @@ namespace SolidworksExecution.Services
                 _solidWorks.UserControl = true;
                 _sessionVisibilityApplied = true;
             }
-            catch { /* visibility is best-effort; never fail over it */ }
+            catch (Exception ex)
+            {
+                // Best-effort; never fail over it. Logged because a still-starting instance rejects it.
+                ExecLog.Write($"visibility: attach-time write failed {ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+            }
+        }
+
+        // The per-request half of the visibility policy, run on every tool call's cached attach.
+        // EnsureConnected skips Connect while the cached RCW is alive, so EnsureVisible alone is
+        // not enough: a cold-launched instance rejects the attach-time write while it is still
+        // starting (2026-11-06: Visible and UserControl both still false after ensure_ready), and
+        // with no re-attach nothing retried it. The whole job then ran in a window-less SolidWorks.
+        // Before 1721d30 every request re-attached and re-ran EnsureVisible; this keeps that
+        // behaviour without the ROT lookup. Costs one property read while the window is shown and
+        // writes only when it is hidden. It only un-hides the window and never takes focus.
+        private void EnsureVisiblePerRequest()
+        {
+            if (_solidWorks == null) return;
+            try
+            {
+                if (_solidWorks.Visible) return;
+                _solidWorks.Visible = true;
+                _solidWorks.UserControl = true;
+                ExecLog.Write("visibility: SolidWorks was hidden, set Visible=true");
+            }
+            catch (Exception ex)
+            {
+                // Best-effort; never fail a tool call over it. The next request tries again.
+                ExecLog.Write($"visibility: re-show failed {ex.GetType().Name} 0x{ex.HResult:X8}: {ex.Message}");
+            }
         }
 
         private bool EnsureConnected()
         {
-            if (_solidWorks != null && IsAlive(_solidWorks)) return true;
+            if (_solidWorks != null && IsAlive(_solidWorks))
+            {
+                EnsureVisiblePerRequest();
+                return true;
+            }
             return Connect();
         }
 
