@@ -206,6 +206,8 @@ def test_a_failed_view_refuses_the_finish(tmp_path, monkeypatch, cad_env):
     review[0].update(verdict="FAIL", differences="drawing shows a domed housing, the model is a block")
     payload = json.loads(server.finish_job("job-1", cad_env.token, False, json.dumps(review)))
     assert payload["error"]["code"] == "VIEW_REVIEW_FAILED" and "domed housing" in payload["error"]["message"]
+    # v6 fati / jiaotazuo (2026-11-09): an honest FAIL, then the model stopped with built_unverified.
+    assert "fresh_document" in payload["error"]["message"] and "built_unverified" in payload["error"]["message"]
 
 
 def test_general_notes_are_notes_not_a_failed_view(tmp_path, monkeypatch, cad_env):

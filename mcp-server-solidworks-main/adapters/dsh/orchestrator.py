@@ -115,8 +115,11 @@ def check_view_review(raw):
         raise RuntimeError("VIEW_REVIEW_REQUIRED: " + "；".join(problems) + "。" + VIEW_REVIEW_HELP)
     if failed:
         raise RuntimeError("VIEW_REVIEW_FAILED: 视图核对不通过——" + "；".join(failed)
-                           + "。结构差异（缺/多/错位的孔、槽、台阶、凸台、筋、轮廓、标了尺寸的圆角）先改特征图修掉，重建后重新"
-                           "核对。未注圆角/倒角、螺纹表示、按推荐读法的假设、默认值不是结构差异：移到 notes，该视图判 PASS。")
+                           + "。这不是收尾，任务还没完：结构差异（缺/多/错位的孔、槽、台阶、凸台、筋、轮廓、标了尺寸的圆角）"
+                           "现在就改特征图，用 fresh_document 整件重新提交（零件建成后的重建不占 2 次自动修复额度），"
+                           "再看新附的对照图、重新 finish_job。不要因为这里不通过就报 built_unverified 结束，那等于把一个"
+                           "已知不对的零件交给用户；简化成方块、直柱代替弯臂这类近似件同样要重建。未注圆角/倒角、螺纹"
+                           "表示、按推荐读法的假设、默认值不是结构差异：移到 notes，该视图判 PASS。")
     if not ({"front", "top"} <= covered and covered & {"left", "right"}):
         raise RuntimeError("VIEW_REVIEW_REQUIRED: 至少要核对主视、俯视和一个侧视（图纸确实没有的写 N/A 也不能顶替这三个中的两个以上）。"
                            + VIEW_REVIEW_HELP)
