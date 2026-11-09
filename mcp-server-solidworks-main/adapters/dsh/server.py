@@ -102,7 +102,7 @@ def _image_result(func):
         return _compact(_error_payload(exc))
 
 
-VIEW_MAX_SIDE = 1568
+VIEW_MAX_SIDE = 1024  # px, per view when no comparison sheet could be made; detail beyond this costs tokens
 
 
 def _view_images(result):

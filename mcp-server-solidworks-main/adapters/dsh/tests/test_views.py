@@ -104,7 +104,7 @@ def test_a_completed_build_returns_the_part_views_with_its_result(tmp_path, monk
     assert payload["comparison_image"] == 1
     assert "FAIL" in payload["views_compare"]
     with Image.open(io.BytesIO(blocks[0].data)) as image:
-        assert image.size == (server.VIEW_MAX_SIDE, 980)
+        assert image.size == (1568, 980)
 
 
 def test_a_completed_build_uses_the_job_drawing_path_in_its_comparison_sheet(tmp_path, monkeypatch, cad_env):
@@ -121,7 +121,7 @@ def test_a_completed_build_uses_the_job_drawing_path_in_its_comparison_sheet(tmp
     assert payload["status"] == "completed"
     assert len(blocks) == 1 and payload["comparison_image"] == 1
     with Image.open(io.BytesIO(blocks[0].data)) as image:
-        assert image.size == (1568, 1568)
+        assert image.size == (1568, 980)  # landscape drawing, same landscape sheet
 
 
 def test_start_job_passes_optional_local_drawing_path(tmp_path, monkeypatch):

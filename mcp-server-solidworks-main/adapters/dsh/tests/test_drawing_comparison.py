@@ -4,7 +4,6 @@ from PIL import Image
 from drawing_comparison import (
     FALLBACK_PANELS,
     LANDSCAPE_PANELS,
-    LANDSCAPE_SHEET_SIZE,
     PORTRAIT_PANELS,
     REQUIRED_VIEWS,
     SHEET_SIZE,
@@ -34,7 +33,7 @@ def _assert_panel_color(sheet, panels, name, color):
     assert sheet.getpixel(((x0 + x1) // 2, (y0 + y1) // 2)) == color
 
 
-def test_landscape_drawing_uses_full_width_top_panel_and_first_angle_views(tmp_path):
+def test_landscape_drawing_keeps_the_sheet_landscape_with_first_angle_views(tmp_path):
     drawing = _solid_image(tmp_path / "drawing-landscape.png", (230, 210, 40), (1200, 800))
     views, colors = _views(tmp_path)
     output = tmp_path / "landscape.png"
@@ -42,17 +41,31 @@ def test_landscape_drawing_uses_full_width_top_panel_and_first_angle_views(tmp_p
     create_comparison_sheet(drawing, views, output)
 
     with Image.open(output) as sheet:
-        assert sheet.size == LANDSCAPE_SHEET_SIZE
+        assert sheet.size == SHEET_SIZE  # a square sheet is shrunk much harder by the model's image pipeline
         _assert_panel_color(sheet, LANDSCAPE_PANELS, "drawing", (230, 210, 40))
         for name, color in colors.items():
             _assert_panel_color(sheet, LANDSCAPE_PANELS, name, color)
-    assert LANDSCAPE_PANELS["drawing"][0] == 30
-    assert LANDSCAPE_PANELS["drawing"][2] == LANDSCAPE_SHEET_SIZE[0] - 30
+    assert LANDSCAPE_PANELS["drawing"][2] < LANDSCAPE_PANELS["front"][0]
     assert LANDSCAPE_PANELS["top"][1] > LANDSCAPE_PANELS["front"][3]
     first_row_bottom = max(LANDSCAPE_PANELS["front"][3], LANDSCAPE_PANELS["left"][3])
     assert LANDSCAPE_PANELS["top"][1] - first_row_bottom >= 60
     assert LANDSCAPE_PANELS["left"][0] > LANDSCAPE_PANELS["front"][2]
-    assert max(LANDSCAPE_SHEET_SIZE) == 1568
+    assert max(SHEET_SIZE) == 1568
+
+
+def test_views_are_trimmed_to_the_part_before_fitting(tmp_path):
+    # A render is the whole graphics window; the part may fill a corner of it.
+    views, _ = _views(tmp_path)
+    window = Image.new("RGB", (400, 300), (240, 242, 246))
+    window.paste((0, 0, 0), (10, 10, 50, 40))
+    window.save(views["front"])
+    output = tmp_path / "trimmed.png"
+
+    create_comparison_sheet(None, views, output)
+
+    with Image.open(output) as sheet:
+        x0, y0, x1, y1 = FALLBACK_PANELS["front"]
+        assert sheet.getpixel(((x0 + x1) // 2, (y0 + y1) // 2)) == (0, 0, 0)
 
 
 def test_portrait_drawing_uses_left_panel_and_first_angle_views(tmp_path):

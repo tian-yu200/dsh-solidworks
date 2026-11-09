@@ -6,8 +6,10 @@ from typing import Mapping
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
+# One size for every layout. A model's image pipeline shrinks a big square far more than a
+# 1568x980 sheet (to ~0.5-0.7 of its side instead of ~0.8-0.9), and the views are the only
+# picture of the part the model gets, so a landscape drawing does not get a taller sheet.
 SHEET_SIZE = (1568, 980)
-LANDSCAPE_SHEET_SIZE = (1568, 1568)
 REQUIRED_VIEWS = ("front", "top", "left", "isometric")
 FALLBACK_PANELS = {
     "front": (28, 90, 772, 470),
@@ -23,12 +25,13 @@ PORTRAIT_PANELS = {
     "isometric": (1068, 550, 1540, 952),
 }
 LANDSCAPE_PANELS = {
-    "drawing": (30, 60, 1538, 900),
-    "front": (30, 990, 772, 1210),
-    "top": (30, 1280, 772, 1538),
-    "left": (796, 990, 1538, 1210),
-    "isometric": (796, 1280, 1538, 1538),
+    "drawing": (28, 90, 700, 952),
+    "front": (724, 90, 1124, 470),
+    "left": (1140, 90, 1540, 470),
+    "top": (724, 550, 1124, 952),
+    "isometric": (1140, 550, 1540, 952),
 }
+INK_LUMINANCE = 185  # rendered edges are black or grey (hidden); the view background is 210-255
 LABELS = {
     "drawing": "工程图 DRAWING",
     "front": "正视 FRONT",
@@ -62,6 +65,19 @@ def _load_rgb(path):
         return source.convert("RGB")
 
 
+def _crop_to_content(image, margin=0.06):
+    """Trim the empty graphics-area background around the part, keeping a small margin.
+
+    A rendered view is the whole graphics window; the part often fills a third of it, so
+    without this most of each panel is background."""
+    box = image.convert("L").point(lambda v: 255 if v < INK_LUMINANCE else 0).getbbox()
+    if not box:
+        return image
+    pad = max(8, int(margin * max(box[2] - box[0], box[3] - box[1])))
+    return image.crop((max(0, box[0] - pad), max(0, box[1] - pad),
+                       min(image.width, box[2] + pad), min(image.height, box[3] + pad)))
+
+
 def _strengthen_lines(image):
     # Rendered CAD edges are thin grey strokes; a small min-filter keeps them visible after scaling.
     return image.filter(ImageFilter.MinFilter(3))
@@ -76,7 +92,7 @@ def _paste_panel(canvas, image, rect, label, font, *, strengthen=False):
     inset = 12
     box = (x0 + inset, y0 + inset, x1 - inset, y1 - inset)
     fitted = ImageOps.contain(
-        _strengthen_lines(image) if strengthen else image,
+        _strengthen_lines(_crop_to_content(image)) if strengthen else image,
         (box[2] - box[0], box[3] - box[1]),
         method=Image.Resampling.LANCZOS,
     )
@@ -108,7 +124,7 @@ def create_comparison_sheet(drawing_path, view_paths: Mapping[str, str], output_
     elif drawing.width < drawing.height * 1.15:
         size, panels = SHEET_SIZE, PORTRAIT_PANELS
     else:
-        size, panels = LANDSCAPE_SHEET_SIZE, LANDSCAPE_PANELS
+        size, panels = SHEET_SIZE, LANDSCAPE_PANELS
 
     canvas = Image.new("RGB", size, "white")
     font = _font(24)
