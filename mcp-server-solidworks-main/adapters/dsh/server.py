@@ -452,9 +452,12 @@ def finish_job(job_id: str, job_token: str, keep_open: bool = False, view_review
 
     For a part this job built, view_review_json is required: one entry per view
     {"view": "front"|"top"|"left"|..., "drawing": what the drawing's view shows, "model": what
-    the part's image shows, "differences": missing/extra/misplaced or "none", "verdict":
-    "PASS"|"FAIL"|"N/A"}, covering front, top and a side view. A FAIL refuses the finish: fix the
-    graph first.
+    the part's image shows, "differences": missing/extra/misplaced structure or "none", "notes":
+    optional, "verdict": "PASS"|"FAIL"|"N/A"}, covering front, top and a side view. FAIL is for a
+    visible structural difference (hole, slot, step, boss, rib, outline, dimensioned fillet) and
+    refuses the finish: fix the graph first. General-note fillets/chamfers, thread representation,
+    surface finish, material, assumptions from a recommended reading and defaulted values go in
+    notes with PASS, and in the final reply.
 
     After a verified finish the job's own document is closed, freeing SolidWorks memory,
     when the job created or opened it, it is saved to a path and it is not dirty. Pass

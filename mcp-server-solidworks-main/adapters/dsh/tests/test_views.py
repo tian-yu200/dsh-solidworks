@@ -158,6 +158,20 @@ def test_a_failed_view_refuses_the_finish(tmp_path, monkeypatch, cad_env):
     assert payload["error"]["code"] == "VIEW_REVIEW_FAILED" and "domed housing" in payload["error"]["message"]
 
 
+def test_general_notes_are_notes_not_a_failed_view(tmp_path, monkeypatch, cad_env):
+    # jiaotazuo 11:58 / zct01 08:27 (2026-11-09): right part, but un-dimensioned casting fillets
+    # and a thread drawn as a tap hole were written as FAIL, so the finish was refused.
+    server = _built(tmp_path, monkeypatch, cad_env)
+    review = json.loads(GOOD_REVIEW)
+    review[0].update(verdict="FAIL", differences="general-note R3 casting fillets not modelled")
+    payload = json.loads(server.finish_job("job-1", cad_env.token, False, json.dumps(review)))
+    assert payload["error"]["code"] == "VIEW_REVIEW_FAILED" and "notes" in payload["error"]["message"]
+    review[0].update(verdict="PASS", differences="none", notes="general-note R3 casting fillets not modelled")
+    payload = json.loads(server.finish_job("job-1", cad_env.token, False, json.dumps(review)))
+    assert (payload.get("error") or {}).get("code") not in ("VIEW_REVIEW_REQUIRED", "VIEW_REVIEW_FAILED"), payload
+    assert cad_env.store.load("job-1", cad_env.token)["view_review"][0]["notes"].startswith("general-note")
+
+
 def test_a_complete_review_passes_the_gate_and_is_kept(tmp_path, monkeypatch, cad_env):
     server = _built(tmp_path, monkeypatch, cad_env)
     payload = json.loads(server.finish_job("job-1", cad_env.token, False, GOOD_REVIEW))

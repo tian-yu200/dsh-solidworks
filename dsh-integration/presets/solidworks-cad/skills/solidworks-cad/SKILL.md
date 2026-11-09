@@ -522,9 +522,9 @@ Validate independently:
   stated, engagement length, through/blind extent, and nut open/closed topology.
 
 Write `PASS`, `FAIL`, or `UNAVAILABLE` with evidence in each Validation Matrix
-row. A completed build returns images of the part (front, top, left, isometric; hidden edges grey;
-again via `inspect_state(scope="views")`). Compare each with the drawing's view feature by feature and
-pass that list to finish_job as view_review_json; a FAIL there means fix the graph, even when numbers agree.
+row. A completed build returns images of the part (front, top, left, isometric; hidden edges grey; again via `inspect_state(scope="views")`).
+Compare each with the drawing's view feature by feature and pass that list to finish_job as view_review_json; a FAIL there means fix the graph, even when numbers agree.
+FAIL = visible structure (hole, slot, step, boss, rib, outline, dimensioned fillet) missing/extra/misplaced; general-note fillets, thread representation, assumptions, defaults go in `notes` with PASS and in the final reply.
 
 On any directional or sectional `FAIL`, stop final save/export, traverse `L5`,
 reinspect the pictorial view first when one was found, update PLAN before repair,

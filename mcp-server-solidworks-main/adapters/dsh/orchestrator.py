@@ -81,8 +81,11 @@ VIEW_REVIEW_HELP = (
     "finish_job 需要 view_review_json：对照 inspect_state(scope=\"views\")（或建模结果里附的图）和原图，"
     "逐个视图写一条 {\"view\": \"front\"|\"top\"|\"left\"|\"right\"|\"back\"|\"bottom\", \"drawing\": \"图纸该视图"
     "里有哪些轮廓/台阶/孔/槽/凸台\", \"model\": \"模型图里对应看到什么\", \"differences\": \"缺的、多的、"
-    "位置不对的（没有写 无）\", \"verdict\": \"PASS\"|\"FAIL\"|\"N/A\"}。至少覆盖主视、俯视和一个侧视；"
-    "图纸没有的视图写 N/A 并在 differences 里说明。")
+    "位置不对的（没有写 无）\", \"notes\": \"可选\", \"verdict\": \"PASS\"|\"FAIL\"|\"N/A\"}。至少覆盖主视、俯视和一个侧视；"
+    "图纸没有的视图写 N/A 并在 differences 里说明。differences 只写看得见的结构差异：孔、槽、台阶、凸台、筋、"
+    "轮廓、标了尺寸的圆角，缺了、多了、位置或形状不对；有这种差异就判 FAIL。技术要求里的未注圆角/倒角、螺纹的"
+    "表示方式（装饰螺纹或底孔）、粗糙度、材料、按推荐读法做的假设、图上没标而取的默认值，不是结构差异，写进 "
+    "notes，判 PASS（这些也要在最终回复里交代）。")
 
 
 def check_view_review(raw):
@@ -112,7 +115,8 @@ def check_view_review(raw):
         raise RuntimeError("VIEW_REVIEW_REQUIRED: " + "；".join(problems) + "。" + VIEW_REVIEW_HELP)
     if failed:
         raise RuntimeError("VIEW_REVIEW_FAILED: 视图核对不通过——" + "；".join(failed)
-                           + "。先改特征图把差异修掉，重建后重新核对；确属图纸与模型都正确的显示差异才可改判 PASS。")
+                           + "。结构差异（缺/多/错位的孔、槽、台阶、凸台、筋、轮廓、标了尺寸的圆角）先改特征图修掉，重建后重新"
+                           "核对。未注圆角/倒角、螺纹表示、按推荐读法的假设、默认值不是结构差异：移到 notes，该视图判 PASS。")
     if not ({"front", "top"} <= covered and covered & {"left", "right"}):
         raise RuntimeError("VIEW_REVIEW_REQUIRED: 至少要核对主视、俯视和一个侧视（图纸确实没有的写 N/A 也不能顶替这三个中的两个以上）。"
                            + VIEW_REVIEW_HELP)
