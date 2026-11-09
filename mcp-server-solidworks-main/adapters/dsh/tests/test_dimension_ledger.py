@@ -186,6 +186,51 @@ class DimensionLedgerTests(unittest.TestCase):
 
         self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edge_response(edges)), [])
 
+    def test_plane_region_ignores_open_edges_but_keeps_area_guard(self):
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [0, 1, 0],
+            "point_a": [.01, 0, .01], "point_b": [.034, .02, .025],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [0, -1, 0], "point": [.01, 0, .01], "area": .0004},
+            {"planar": True, "normal": [0, 1, 0], "point": [.034, .02, .025], "area": .00016},
+        ]})
+        edges = []
+        for points in (
+            [[0, 0, 0], [.02, 0, 0], [.02, 0, .02], [0, 0, .02]],
+            [[.026, .02, .02], [.042, .02, .02], [.042, .02, .03], [.026, .02, .03]],
+        ):
+            edges.extend({"start": points[i], "end": points[(i + 1) % 4],
+                          "mid": [(points[i][j] + points[(i + 1) % 4][j]) / 2 for j in range(3)]}
+                         for i in range(4))
+        # This open, disconnected edge is present in the SolidWorks y=.020 mm plane projection.
+        edges.append({"start": [.007, .02, .01], "end": [.007, .02, 0],
+                      "mid": [.007, .02, .005]})
+        # Also retain the closed region when a multi-edge open branch meets its boundary once.
+        edges.extend([
+            {"start": [0, 0, 0], "end": [-.01, 0, 0], "mid": [-.005, 0, 0]},
+            {"start": [-.01, 0, 0], "end": [-.02, 0, 0], "mid": [-.015, 0, 0]},
+        ])
+
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edge_response(edges)), [])
+
+        graph["dimension_ledger"][0]["check"]["point_b"] = [.0256, .02, .025]
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edge_response(edges)), [])
+        graph["dimension_ledger"][0]["check"]["point_b"] = [.0255, .02, .025]
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edge_response(edges)), [])
+        graph["dimension_ledger"][0]["check"]["point_b"] = [.025499999, .02, .025]
+        warnings = evaluate_graph_ledger(graph, {}, faces, edge_response(edges))
+        self.assertEqual(warnings[0]["reason"], "plane_point_not_on_face")
+        graph["dimension_ledger"][0]["check"]["point_b"] = [.034, .02, .025]
+
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [0, -1, 0], "point": [.01, 0, .01], "area": .0004},
+            {"planar": True, "normal": [0, 1, 0], "point": [.034, .02, .025], "area": .00015},
+        ]})
+        warnings = evaluate_graph_ledger(graph, {}, faces, edge_response(edges))
+        self.assertEqual(warnings[0]["code"], "LEDGER_UNMEASURED")
+        self.assertEqual(warnings[0]["reason"], "plane_boundary_unavailable")
+
     def test_plane_region_uses_open_arc_midpoints_for_rounded_boundaries(self):
         radius, area = .01, 3.141592653589793 * .01 ** 2 / 2
         graph = graph_with(dimension("D-thickness", 20, {

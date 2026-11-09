@@ -275,18 +275,30 @@ def _polygon_sample(points):
 
 
 def _polygon_loops(points, adjacency):
+    graph = {node: set(items) for node, items in adjacency.items()}
+    open_nodes = [node for node, items in graph.items() if len(items) < 2]
+    while open_nodes:
+        node = open_nodes.pop()
+        if len(graph[node]) >= 2:
+            continue
+        for neighbor in tuple(graph[node]):
+            graph[neighbor].discard(node)
+            if len(graph[neighbor]) < 2:
+                open_nodes.append(neighbor)
+        graph[node].clear()
+    graph = {node: items for node, items in graph.items() if items}
     neighbors = {
         node: sorted(items, key=lambda other: math.atan2(points[other][1] - points[node][1],
                                                           points[other][0] - points[node][0]))
-        for node, items in adjacency.items()
+        for node, items in graph.items()
     }
-    unused = {(a, b) for a, items in adjacency.items() for b in items}
+    unused = {(a, b) for a, items in graph.items() for b in items}
     loops = []
     while unused:
         start = next(iter(unused))
         edge = start
         polygon = []
-        for _ in range(len(unused) + len(adjacency) + 1):
+        for _ in range(len(unused) + len(graph) + 1):
             if edge not in unused:
                 if edge == start:
                     break
@@ -404,8 +416,6 @@ def _plane_loops(edges, normal, offset):
 
     loops = list(circles)
     if segments:
-        if any(len(neighbors) < 2 for neighbors in adjacency.values()):
-            return None
         polygons = _polygon_loops(points, adjacency)
         if polygons is None:
             return None
@@ -433,7 +443,7 @@ def _plane_region_contains(faces, edges, point, normal, offset):
 
     basis = _basis(normal)
     projected = _project(point, basis)
-    if any(_loop_boundary_distance(loop, projected) <= 0.0005 for loop in loops):
+    if any(_loop_boundary_distance(loop, projected) <= 0.0005 + 1e-12 for loop in loops):
         return True
     return sum(1 for loop in loops if _loop_contains(loop, projected)) % 2 == 1
 
