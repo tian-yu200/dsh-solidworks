@@ -1,7 +1,8 @@
 # Feature Graph — common part card
 
-Default: this card + mapping_part. Use sheet metal/assembly mappings; quickref/schema
-only for missing constructs. Example is grammar, never a source of drawing dimensions.
+Default: card + mapping_part. Use sheet-metal/assembly maps; quickref/schema for gaps.
+Examples are grammar, not drawing evidence. If drawing is local, pass its path as
+drawing_path to start_job.
 
 Units: graph.units="meters"; all lengths m, all angles radians. Convert mm /1000.
 Each node needs unique id and type; order is dependency/feature-tree order.

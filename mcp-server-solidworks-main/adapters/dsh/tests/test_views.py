@@ -47,15 +47,18 @@ def _render(tmp_path, monkeypatch, cad_env, missing=()):
 
 def test_views_render_into_the_job_folder_and_say_what_each_shows(tmp_path, monkeypatch, cad_env):
     _render(tmp_path, monkeypatch, cad_env)
+    cad_env.job["drawing_path"] = str(tmp_path / "drawing.png")
+    cad_env.store.save(cad_env.job)
     result = cad_env.orchestrator.render_views("job-1", cad_env.token)
     tool, params = [c for c in cad_env.backend.calls if c[0] == "render_views"][-1]
     assert params["views"] == ["front", "top", "left", "isometric"]
     assert params["output_dir"].startswith(str(tmp_path / "views" / "job-1"))
     assert [v["view"] for v in result["views"]] == ["front", "top", "left", "isometric"]
     assert "沿 -Z" in result["views"][0]["shows"] and "第一角" in result["views"][2]["shows"]
+    assert result["drawing_path"] == str(tmp_path / "drawing.png")
 
 
-def test_the_tool_returns_one_scaled_image_per_saved_view(tmp_path, monkeypatch, cad_env):
+def test_views_with_a_missing_render_keep_available_images(tmp_path, monkeypatch, cad_env):
     _render(tmp_path, monkeypatch, cad_env, missing=("top",))
     server = _dsh_server()
     blocks, text = server.inspect_state("job-1", cad_env.token, "views")
@@ -96,9 +99,56 @@ def test_a_completed_build_returns_the_part_views_with_its_result(tmp_path, monk
     assert isinstance(result, tuple), result
     blocks, text = result
     payload = json.loads(text)
-    assert payload["status"] == "completed" and len(blocks) == 4
+    assert payload["status"] == "completed" and len(blocks) == 1
     assert [v["view"] for v in payload["views"]] == ["front", "top", "left", "isometric"]
+    assert payload["comparison_image"] == 1
     assert "FAIL" in payload["views_compare"]
+    with Image.open(io.BytesIO(blocks[0].data)) as image:
+        assert image.size == (server.VIEW_MAX_SIDE, 980)
+
+
+def test_a_completed_build_uses_the_job_drawing_path_in_its_comparison_sheet(tmp_path, monkeypatch, cad_env):
+    _render(tmp_path, monkeypatch, cad_env)
+    drawing = tmp_path / "drawing.png"
+    Image.new("RGB", (1200, 800), (230, 210, 40)).save(drawing)
+    cad_env.job["drawing_path"] = str(drawing)
+    cad_env.store.save(cad_env.job)
+    server = _dsh_server()
+
+    blocks, text = server.submit_feature_graph("job-1", cad_env.token, _graph(), True)
+
+    payload = json.loads(text)
+    assert payload["status"] == "completed"
+    assert len(blocks) == 1 and payload["comparison_image"] == 1
+    with Image.open(io.BytesIO(blocks[0].data)) as image:
+        assert image.size == (1568, 1568)
+
+
+def test_start_job_passes_optional_local_drawing_path(tmp_path, monkeypatch):
+    server = _dsh_server()
+    expected = {}
+
+    def begin_job(intent, target_document, as_assembly, drawing_path):
+        expected.update(intent=intent, target=target_document, assembly=as_assembly, drawing=drawing_path)
+        return {"status": "completed", "job_id": "job-1"}
+
+    monkeypatch.setattr(server.orchestrator, "begin_job", begin_job)
+
+    result = json.loads(server.start_job("build from drawing", drawing_path=str(tmp_path / "part.png")))
+
+    assert result["status"] == "completed"
+    assert expected == {"intent": "build from drawing", "target": "", "assembly": False,
+                       "drawing": str(tmp_path / "part.png")}
+
+
+def test_begin_job_persists_resolved_drawing_path(tmp_path, cad_env):
+    drawing = tmp_path / "drawing.png"
+    drawing.write_bytes(b"drawing")
+
+    started = cad_env.orchestrator.begin_job("build from local drawing", drawing_path=str(drawing))
+
+    job = cad_env.store.load(started["job_id"], started["job_token"])
+    assert job["drawing_path"] == str(drawing.resolve())
 
 
 def test_a_render_problem_never_fails_the_build(tmp_path, monkeypatch, cad_env):

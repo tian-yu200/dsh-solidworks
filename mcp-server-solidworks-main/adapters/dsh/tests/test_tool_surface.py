@@ -393,6 +393,16 @@ def test_inspect_state_exposes_the_reference_paging_parameters():
     assert properties["reference_limit"].get("default") == 0
 
 
+def test_start_job_exposes_optional_drawing_path():
+    import asyncio
+
+    server = _load_dsh_server()
+    start = next(tool for tool in asyncio.run(server.mcp.list_tools()) if tool.name == "start_job")
+    properties = start.input_schema["properties"]
+    assert properties["drawing_path"].get("default") == ""
+    assert "drawing_path" not in start.input_schema.get("required", [])
+
+
 # ---------------------------------------------------------------------------
 # job_token presence (a null token reads as "your credential was reset")
 # ---------------------------------------------------------------------------

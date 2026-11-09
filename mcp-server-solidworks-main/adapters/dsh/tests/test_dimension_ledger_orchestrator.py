@@ -63,6 +63,48 @@ def test_ledger_warnings_are_returned_after_commit_without_rollback(cad_env):
     ]
 
 
+def test_plane_distance_reads_edges_and_commits_as_a_warning_only_check(cad_env):
+    def reads(tool, params):
+        if tool != "analyze_model":
+            return None
+        state = dict(cad_env.backend.state)
+        if params["analysis_type"] == "geometry":
+            state["features"] = ["bodies=1", "bbox_size=[0.02,0.02,0.02]"]
+        elif params["analysis_type"] == "mass_properties":
+            state["features"] = ["volume=0.000008"]
+        elif params["analysis_type"] == "faces":
+            state["features"] = [json.dumps({"faces": [
+                {"planar": True, "normal": [1, 0, 0], "point": [0, .01, .01], "area": .0004},
+                {"planar": True, "normal": [-1, 0, 0], "point": [.02, .01, .01], "area": .0004},
+            ]})]
+        elif params["analysis_type"] == "edges":
+            edges = []
+            for x in (0, .02):
+                points = [[x, 0, 0], [x, .02, 0], [x, .02, .02], [x, 0, .02]]
+                edges.extend({"start": points[i], "end": points[(i + 1) % 4],
+                              "mid": [(points[i][j] + points[(i + 1) % 4][j]) / 2 for j in range(3)]}
+                             for i in range(4))
+            state["features"] = [json.dumps({"edges": edges})]
+        return {"status": "COMPLETED", "stateVersion": state["stateVersion"],
+                "cadState": state, "error": None}
+
+    cad_env.backend.call_handler = reads
+    graph = _graph([_dimension("D-thickness", 20, {
+        "kind": "plane_distance", "normal": [1, 0, 0],
+        "point_a": [0, .01, .01], "point_b": [.02, .01, .01],
+    })])
+
+    result = cad_env.orchestrator.feature_graph(
+        cad_env.job["job_id"], cad_env.token, json.dumps(graph), fresh_document=True,
+    )
+
+    assert result["status"] == "completed", result
+    assert "warnings" not in result
+    analyses = [params["analysis_type"] for name, params in cad_env.backend.calls
+                if name == "analyze_model"]
+    assert analyses == ["geometry", "mass_properties", "faces", "edges"]
+
+
 def test_an_invalid_optional_ledger_warns_and_never_blocks_the_build(cad_env):
     # An extra field rejecting the whole graph would be the expect.features trap again (H1).
     item = _dimension("D-width", 20, {"kind": "bbox_extent", "axis": "x"})

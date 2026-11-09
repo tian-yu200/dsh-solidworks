@@ -12,7 +12,7 @@ The runtime tool schemas and returned payloads are the authoritative contract.
 Parse each tool's JSON string before acting on its envelope status. Every tool
 result is compact single-line JSON. `start_job` returns `job_id` and
 `job_token` first; bulky readiness and state detail is read with
-`inspect_state(scope="state")`.
+`inspect_state(scope="state")`. For a local drawing, pass its path as `drawing_path` to `start_job`.
 ## Tool Boundary
 
 | Tool | Use |

@@ -102,16 +102,41 @@ def _image_result(func):
         return _compact(_error_payload(exc))
 
 
-VIEW_MAX_SIDE = 1024  # px; the graphics window can be 2000+ wide, and detail beyond this costs tokens
+VIEW_MAX_SIDE = 1568
 
 
 def _view_images(result):
-    """(one image per rendered view, a dict naming each view and what it shows)."""
+    """Return a drawing comparison sheet when all views exist, else the available views."""
     from io import BytesIO
+    from pathlib import Path
 
     from PIL import Image
 
+    from drawing_comparison import REQUIRED_VIEWS, create_comparison_sheet
+
+    view_paths = {item.get("view"): item.get("path") for item in result["views"]
+                  if item.get("path")}
+    sheet_path = None
+    if set(view_paths) == set(REQUIRED_VIEWS) and all(Path(path).is_file() for path in view_paths.values()):
+        try:
+            sheet_path = create_comparison_sheet(
+                result.get("drawing_path"), view_paths, Path(view_paths["front"]).parent / "comparison.png"
+            )
+        except (OSError, ValueError):
+            sheet_path = None
+
     blocks = []
+    if sheet_path is not None:
+        with Image.open(sheet_path) as image:
+            buffer = BytesIO()
+            image.save(buffer, format="PNG", optimize=True)
+        blocks.append(MCPImage(data=buffer.getvalue(), format="png"))
+        for item in result["views"]:
+            item.pop("path", None)
+        payload = {"status": "completed", "risk": "read", "target_document": result["target_document"],
+                   "views": result["views"], "comparison_image": 1, "compare": VIEW_COMPARE}
+        return blocks, payload
+
     for item in result["views"]:
         path = item.pop("path", None)
         if not path:
@@ -155,6 +180,8 @@ def _with_views(job_id, job_token, func):
     if not blocks:
         return _compact(payload)
     payload["views"] = views["views"]
+    if views.get("comparison_image"):
+        payload["comparison_image"] = views["comparison_image"]
     payload["views_compare"] = VIEW_COMPARE
     return blocks, _compact(payload)
 
@@ -164,13 +191,15 @@ def start_job(
     intent: str,
     target_document: str = "",
     as_assembly: bool = False,
+    drawing_path: str = "",
 ) -> str:
     """Start an authenticated CAD job and optionally open an existing target.
 
+    When the source drawing is a local file, pass its path as drawing_path for the view comparison.
     Returns job_id and private job_token. Pass both to every later job-scoped call.
     """
     return _json_result(
-        lambda: orchestrator.begin_job(intent, target_document, as_assembly)
+        lambda: orchestrator.begin_job(intent, target_document, as_assembly, drawing_path)
     )
 
 @mcp.tool(structured_output=False)
@@ -227,9 +256,9 @@ def inspect_state(
     Deep document scopes require job credentials.
     Assembly faces/edges additionally require component.
 
-    scope=views returns IMAGES of the job's part: front, top, left and isometric, hidden edges in
-    grey (the drawing's dashed lines). Compare each with the drawing's matching view; a feature
-    in one and not the other is a FAIL to fix before saving.
+    scope=views returns one comparison image when all four views are available: a local drawing
+    supplied to start_job is paired with front/top/left/isometric; otherwise the four views form
+    a 2x2 sheet. Compare each named view separately and report view_review_json exactly as before.
     """
     if scope == "views":
         def views():

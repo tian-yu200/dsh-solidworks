@@ -38,6 +38,17 @@ def geometry_response(size):
     ]}}
 
 
+def edge_response(edges):
+    return check_response({"edges": edges})
+
+
+def square_edges(x):
+    points = [[x, 0, 0], [x, .02, 0], [x, .02, .02], [x, 0, .02]]
+    return [{"start": points[i], "end": points[(i + 1) % 4],
+             "mid": [(points[i][j] + points[(i + 1) % 4][j]) / 2 for j in range(3)]}
+            for i in range(4)]
+
+
 class DimensionLedgerTests(unittest.TestCase):
     def test_optional_and_unknown_dimension_validate(self):
         graph = graph_with(dimension("D-unknown", None, None, source="unknown", nodes=[]))
@@ -88,10 +99,131 @@ class DimensionLedgerTests(unittest.TestCase):
             "point_a": [0, 0, 0], "point_b": [0.02, 0, 0],
         }))
         faces = check_response({"faces": [
-            {"planar": True, "normal": [1, 0, 0], "point": [0, 0.01, 0.01]},
-            {"planar": True, "normal": [-1, 0, 0], "point": [0.02, 0.01, 0.01]},
+            {"planar": True, "normal": [1, 0, 0], "point": [0, 0.01, 0.01], "area": .0004},
+            {"planar": True, "normal": [-1, 0, 0], "point": [0.02, 0.01, 0.01], "area": .0004},
         ]})
-        self.assertEqual(evaluate_graph_ledger(graph, {}, faces), [])
+        edges = edge_response(square_edges(0) + square_edges(.02))
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edges), [])
+
+    def test_plane_selector_must_land_in_face_or_within_half_mm_of_boundary(self):
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [1, 0, 0],
+            "point_a": [0, -.0004, .01], "point_b": [.02, -.0004, .01],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [1, 0, 0], "point": [0, .01, .01], "area": .0004},
+            {"planar": True, "normal": [-1, 0, 0], "point": [.02, .01, .01], "area": .0004},
+        ]})
+        edges = edge_response(square_edges(0) + square_edges(.02))
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edges), [])
+
+        for point_y in (-.0006, .025):
+            graph["dimension_ledger"][0]["check"]["point_a"][1] = point_y
+            warnings = evaluate_graph_ledger(graph, {}, faces, edges)
+            self.assertEqual(warnings[0]["code"], "LEDGER_UNMEASURED")
+            self.assertEqual(warnings[0]["reason"], "plane_point_not_on_face")
+
+    def test_plane_selector_inside_a_circular_hole_is_unmeasured(self):
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [1, 0, 0],
+            "point_a": [0, .01, .01], "point_b": [.02, .01, .01],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [1, 0, 0], "point": [0, .005, .005],
+             "area": .0004 - 3.141592653589793 * .004 ** 2},
+            {"planar": True, "normal": [-1, 0, 0], "point": [.02, .005, .005],
+             "area": .0004 - 3.141592653589793 * .004 ** 2},
+        ]})
+        edges = square_edges(0) + square_edges(.02) + [
+            {"kind": "circle", "center": [0, .01, .01], "normal": [1, 0, 0], "radius": .004},
+            {"kind": "circle", "center": [.02, .01, .01], "normal": [-1, 0, 0], "radius": .004},
+        ]
+
+        warnings = evaluate_graph_ledger(graph, {}, faces, edge_response(edges))
+
+        self.assertEqual(warnings[0]["code"], "LEDGER_UNMEASURED")
+        self.assertEqual(warnings[0]["reason"], "plane_point_not_on_face")
+
+    def test_plane_area_validation_handles_a_concentric_annular_face(self):
+        outer, inner = .01, .004
+        area = 3.141592653589793 * (outer ** 2 - inner ** 2)
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [0, 0, 1],
+            "point_a": [.007, 0, 0], "point_b": [.007, 0, .02],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [0, 0, 1], "point": [0, 0, 0], "area": area},
+            {"planar": True, "normal": [0, 0, -1], "point": [0, 0, .02], "area": area},
+        ]})
+        edges = edge_response([
+            {"kind": "circle", "center": [0, 0, 0], "normal": [0, 0, 1], "radius": outer},
+            {"kind": "circle", "center": [0, 0, 0], "normal": [0, 0, 1], "radius": inner},
+            {"kind": "circle", "center": [0, 0, .02], "normal": [0, 0, -1], "radius": outer},
+            {"kind": "circle", "center": [0, 0, .02], "normal": [0, 0, -1], "radius": inner},
+        ])
+
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edges), [])
+
+    def test_plane_region_accepts_coplanar_faces_with_a_shared_seam(self):
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [1, 0, 0],
+            "point_a": [0, .005, .01], "point_b": [.02, .005, .01],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [1, 0, 0], "point": [0, .005, .01], "area": .0002},
+            {"planar": True, "normal": [1, 0, 0], "point": [0, .015, .01], "area": .0002},
+            {"planar": True, "normal": [-1, 0, 0], "point": [.02, .005, .01], "area": .0002},
+            {"planar": True, "normal": [-1, 0, 0], "point": [.02, .015, .01], "area": .0002},
+        ]})
+        edges = []
+        for x in (0, .02):
+            corners = [[x, 0, 0], [x, .01, 0], [x, .02, 0],
+                       [x, .02, .02], [x, .01, .02], [x, 0, .02]]
+            for start, end in ((0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0), (1, 4)):
+                a, b = corners[start], corners[end]
+                edges.append({"start": a, "end": b,
+                              "mid": [(a[i] + b[i]) / 2 for i in range(3)]})
+
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edge_response(edges)), [])
+
+    def test_plane_region_uses_open_arc_midpoints_for_rounded_boundaries(self):
+        radius, area = .01, 3.141592653589793 * .01 ** 2 / 2
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [0, 0, 1],
+            "point_a": [0, .003, 0], "point_b": [0, .003, .02],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [0, 0, 1], "point": [0, .005, 0], "area": area},
+            {"planar": True, "normal": [0, 0, -1], "point": [0, .005, .02], "area": area},
+        ]})
+        edges = []
+        for z in (0, .02):
+            edges.extend([
+                {"start": [-radius, 0, z], "end": [radius, 0, z], "mid": [0, 0, z]},
+                {"start": [radius, 0, z], "end": [-radius, 0, z], "mid": [0, radius, z]},
+            ])
+
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces, edge_response(edges)), [])
+
+        graph["dimension_ledger"][0]["check"]["point_a"][1] = -.003
+        warnings = evaluate_graph_ledger(graph, {}, faces, edge_response(edges))
+        self.assertEqual(warnings[0]["code"], "LEDGER_UNMEASURED")
+        self.assertEqual(warnings[0]["reason"], "plane_point_not_on_face")
+
+    def test_plane_distance_is_unmeasured_when_boundary_readback_is_missing(self):
+        graph = graph_with(dimension("D-thickness", 20, {
+            "kind": "plane_distance", "normal": [1, 0, 0],
+            "point_a": [0, .01, .01], "point_b": [.02, .01, .01],
+        }))
+        faces = check_response({"faces": [
+            {"planar": True, "normal": [1, 0, 0], "point": [0, .01, .01], "area": .0004},
+            {"planar": True, "normal": [-1, 0, 0], "point": [.02, .01, .01], "area": .0004},
+        ]})
+
+        warnings = evaluate_graph_ledger(graph, {}, faces)
+
+        self.assertEqual(warnings[0]["code"], "LEDGER_UNMEASURED")
+        self.assertEqual(warnings[0]["reason"], "edges_unavailable")
 
     def test_derived_callout_is_metadata_not_an_expression_language(self):
         graph = graph_with(dimension("D-overall", 81, {"kind": "bbox_extent", "axis": "y"},

@@ -493,12 +493,24 @@ class CadOrchestrator:
             and item["check"].get("kind") in {"cylinder", "plane_distance"}
             for item in ledger
         )
+        needs_edges = any(
+            item.get("source_kind") != "unknown"
+            and isinstance(item.get("check"), dict)
+            and item["check"].get("kind") == "plane_distance"
+            for item in ledger
+        )
         faces_response = None
+        edges_response = None
         if needs_faces:
             try:
                 faces_response = backend.call("analyze_model", {"analysis_type": "faces"})
             except Exception as exc:  # noqa: BLE001 - this cannot undo a valid build
                 faces_response = {"status": "FAILED", "error": {"code": type(exc).__name__}}
+        if needs_edges:
+            try:
+                edges_response = backend.call("analyze_model", {"analysis_type": "edges"})
+            except Exception as exc:  # noqa: BLE001 - this cannot undo a valid build
+                edges_response = {"status": "FAILED", "error": {"code": type(exc).__name__}}
         expected_state = cad_state((verification or {}).get("state"))
         expected_version = expected_state.get("stateVersion")
         observed_versions = [
@@ -508,6 +520,8 @@ class CadOrchestrator:
         ]
         if faces_response is not None and faces_response.get("status") == "COMPLETED":
             observed_versions.append(faces_response.get("stateVersion"))
+        if edges_response is not None and edges_response.get("status") == "COMPLETED":
+            observed_versions.append(edges_response.get("stateVersion"))
         if expected_version is not None and any(v != expected_version for v in observed_versions):
             return [{"code": "LEDGER_UNMEASURED", "reason": "document_state_changed_during_measurement",
                      "dimension_id": item.get("id"), "label": item.get("label"),
@@ -516,7 +530,7 @@ class CadOrchestrator:
                      "check": (item.get("check") or {}).get("kind")}
                     for item in ledger if isinstance(item, dict)]
         try:
-            return evaluate_graph_ledger(graph, verification, faces_response)
+            return evaluate_graph_ledger(graph, verification, faces_response, edges_response)
         except Exception as exc:  # noqa: BLE001 - diagnostic problems fail closed as a warning
             return [{"code": "LEDGER_UNMEASURED", "reason": "ledger_check_error",
                      "message": str(exc)[:240]}]
@@ -1183,9 +1197,10 @@ class CadOrchestrator:
         rendered = json.loads(features[0]).get("views") or []
         for item in rendered:
             item["shows"] = VIEW_GUIDE.get(item.get("view"), "")
-        return {"target_document": self._target(state), "views": rendered}
+        return {"target_document": self._target(state), "drawing_path": job.get("drawing_path"),
+                "views": rendered}
 
-    def begin_job(self, intent, target_document="", as_assembly=False):
+    def begin_job(self, intent, target_document="", as_assembly=False, drawing_path=""):
         with self._write_lock:
             ready = backend.ensure_ready()
             if not ready.get("comAttached"):
@@ -1252,6 +1267,13 @@ class CadOrchestrator:
             job["document_origin"] = self._document_origin(
                 target_document, active_before, state
             )
+            if drawing_path:
+                try:
+                    job["drawing_path"] = str(Path(drawing_path).expanduser().resolve())
+                except (OSError, RuntimeError):
+                    job["drawing_path"] = str(drawing_path)
+            else:
+                job["drawing_path"] = None
             job["document_write_allowed"] = bool(target_document)
             job["explicit_target_document"] = bool(target_document)
             job_store.save(job)
