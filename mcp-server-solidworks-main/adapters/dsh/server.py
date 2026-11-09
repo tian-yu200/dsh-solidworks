@@ -26,6 +26,22 @@ def _error_code_from(exc):
     return match.group(1) if match else None
 
 
+EXECUTION_TIMEOUT_HELP = (
+    "执行层没有在时限内回答（SolidWorks 正忙，比如在重建一个大零件），这一步的结果未确认。"
+    "先 inspect_state(scope=\"state\") 看当前活动文档和状态：没有出现这次要建的文档或特征，就原样重新提交；"
+    "已经出现，就按现状继续。不要因为这一次超时结束任务。")
+
+
+def _is_transport_timeout(exc):
+    """httpx timeouts reached the model as UNEXPECTED_ERROR "ReadTimeout: timed out", and the
+    model ended the job (2-25, 2026-11-09 12:36: a big leftover part was active)."""
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - the execution client always ships httpx
+        return False
+    return isinstance(exc, httpx.TimeoutException)
+
+
 def _error_payload(exc):
     """One failure envelope for any tool: same codes, same shape, as `_json_result` always sent.
 
@@ -42,6 +58,12 @@ def _error_payload(exc):
             "status": "failed",
             "risk": "read",
             "error": {"code": "PERMISSION_DENIED", "message": str(exc)},
+        }
+    if _is_transport_timeout(exc):
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": "EXECUTION_TIMEOUT", "message": EXECUTION_TIMEOUT_HELP + " (%s)" % type(exc).__name__},
         }
     if isinstance(exc, ExecutionLayerError):
         return {

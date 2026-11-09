@@ -138,6 +138,22 @@ def test_json_result_maps_typed_failures_to_stable_error_codes():
     assert _error_code(server._json_result(unbound)) == "JOB_DOCUMENT_UNBOUND"
 
 
+def test_a_transport_timeout_says_what_to_do_instead_of_unexpected_error():
+    # 2-25, 2026-11-09 12:36: "UNEXPECTED_ERROR ReadTimeout: timed out" and the model gave up.
+    import json
+
+    import httpx
+
+    server = _load_dsh_server()
+
+    def read_timeout():
+        raise httpx.ReadTimeout("timed out")
+
+    payload = json.loads(server._json_result(read_timeout))
+    assert payload["error"]["code"] == "EXECUTION_TIMEOUT"
+    assert "inspect_state" in payload["error"]["message"] and "ReadTimeout" in payload["error"]["message"]
+
+
 def test_json_result_keeps_untyped_and_lowercase_errors_generic():
     server = _load_dsh_server()
 
