@@ -46,6 +46,10 @@ class AdapterExecutionPort(ExecutionPort):
     """
 
     def execute(self, tool, params, state_version):
+        if tool == "add_reference_geometry":
+            # Route the H22-prone COM call through the shared backend circuit breaker.
+            from backend import backend
+            return backend.execute_ir_tool(tool, params, state_version)
         resp = call_tool(tool, str(uuid.uuid4()), state_version, params)
         if _is_state_mismatch(resp):
             fresh = get_state()

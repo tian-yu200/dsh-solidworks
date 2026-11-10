@@ -247,7 +247,8 @@ def get_state() -> int:
     return sv
 
 
-def call_tool(tool_name: str, operation_id: str, state_version: int, params: dict) -> dict:
+def call_tool(tool_name: str, operation_id: str, state_version: int, params: dict,
+              timeout_seconds: float | None = None) -> dict:
     """
     POST /api/tool/execute on the solidworks-execution layer.
 
@@ -265,19 +266,20 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
         "params": params,
     }
 
-    _log(f"-> {tool_name} op={operation_id} sv={state_version}")
+    request_timeout = TOOL_EXEC_TIMEOUT if timeout_seconds is None else float(timeout_seconds)
+    _log(f"-> {tool_name} op={operation_id} sv={state_version} timeout={request_timeout:g}s")
 
     def _do():
-        return _get_client().post(EXECUTE_ENDPOINT, json=payload, timeout=TOOL_EXEC_TIMEOUT)
+        return _get_client().post(EXECUTE_ENDPOINT, json=payload, timeout=request_timeout)
 
     try:
         response = _request_with_autostart(_do, tool_name)
     except httpx.TimeoutException:
-        _log(f"<- {tool_name} TIMEOUT after {TOOL_EXEC_TIMEOUT}s")
+        _log(f"<- {tool_name} TIMEOUT after {request_timeout}s")
         # Only this side gave up: the service queues the call on its STA thread, which keeps
         # running it for up to StaExecutor.StaTimeoutSeconds (300 s) and then commits the result.
         raise ExecutionLayerError(
-            f"Request to solidworks-execution timed out after {TOOL_EXEC_TIMEOUT}s "
+            f"Request to solidworks-execution timed out after {request_timeout}s "
             f"(tool={tool_name}, op={operation_id}). The outcome is UNKNOWN: the operation "
             f"may still be running in SolidWorks and may yet complete, so read the state "
             f"(/api/tool/state, the open documents) before retrying it. Large sketches and "
