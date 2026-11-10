@@ -34,8 +34,8 @@ from policy import (
 )
 from references import page_reference, read_reference
 from settings import BACKUP_ROOT, VIEWS_ROOT
-from repair_policy import (admit as admit_repair, repair_evidence, design_contract, dimensions_equal,
-                           graph_fingerprints)
+from repair_policy import (IdenticalReplayError, admit as admit_repair, repair_evidence,
+                           design_contract, dimensions_equal, graph_fingerprints)
 
 
 # Who brought the job's document into SolidWorks. finish_job may only auto-close a document
@@ -389,7 +389,9 @@ class CadOrchestrator:
             job.setdefault("planned_feature_ids", {})[kind] = ids
 
     @staticmethod
-    def _record_built_features(job, compiler, graph):
+    def _record_built_features(job, compiler, graph, *, fresh_document=False):
+        if fresh_document:
+            job["built_feature_types"] = {}
         built = job.setdefault("built_feature_types", {})
         type_by_id = {n.get("id"): n.get("type") for n in (graph or {}).get("nodes") or []}
         node_by_id = {n.get("id"): n for n in (graph or {}).get("nodes") or []}
@@ -666,6 +668,8 @@ class CadOrchestrator:
         if kind == "feature_graph" and payload["fresh_document"]:
             try:
                 admit_repair(chain, payload["graph"], payload.get("repair_evidence") or {})
+            except IdenticalReplayError as exc:
+                reasons.append(str(exc))
             except RuntimeError as exc:
                 reasons.append(str(exc).partition(": ")[2] or str(exc))
             if chain:
@@ -692,6 +696,8 @@ class CadOrchestrator:
         inventory = backend.documents()
         with job_store.recovery_chain() as ledger:
             reasons, key = self._recovery_reasons(job, kind, payload, ledger, inventory)
+            if len(reasons) == 1 and reasons[0].startswith("REPAIR_IDENTICAL_REPLAY:"):
+                raise IdenticalReplayError(reasons[0])
             if reasons:
                 scope = {"reasons": reasons, "chain_revision": payload_hash(ledger.get("active")),
                          "inventory_revision": payload_hash(inventory),
@@ -700,7 +706,9 @@ class CadOrchestrator:
                 payload["recovery_override"] = scope
                 risk = "batch"  # One existing confirmation also covers a graph over ten nodes.
                 action_summary = summary
-                summary = "；".join(reasons) + "。确认后归档旧失败链，解除本目标的恢复阻止；不自动关闭残留文档。"
+                visible_reasons = [reason.partition(": ")[2] if reason.startswith("REPAIR_IDENTICAL_REPLAY:")
+                                   else reason for reason in reasons]
+                summary = "；".join(visible_reasons) + "。确认后归档旧失败链，解除本目标的恢复阻止；不自动关闭残留文档。"
                 if kind == "feature_graph" and payload["fresh_document"]:
                     summary += "本次作为新首次执行（修复计数 0），包含 %s 个节点。" % len(payload["graph"].get("nodes", []))
                 summary += "本次操作：" + action_summary
@@ -1909,8 +1917,26 @@ class CadOrchestrator:
                 if payload["fresh_document"]:
                     self._note_validation_failure()
                 raise
-            payload, risk, summary, _ = self._prepare_recovery_action(
-                job, "feature_graph", payload, risk, self._feature_graph_summary(job, graph, fresh_document))
+            try:
+                payload, risk, summary, _ = self._prepare_recovery_action(
+                    job, "feature_graph", payload, risk,
+                    self._feature_graph_summary(job, graph, fresh_document))
+            except IdenticalReplayError as exc:
+                message = str(exc).partition(": ")[2] or str(exc)
+                return envelope(
+                    status="failed",
+                    risk="read",
+                    job_id=job_id,
+                    action_id=None,
+                    error={"code": "REPAIR_IDENTICAL_REPLAY", "message": message},
+                    attempt_execution_status="not_started",
+                    instruction=(
+                        "The repeated graph was rejected without creating a pending action; "
+                        "correct the failed node and resubmit with repair_evidence_json. "
+                        "No cancel_action or user confirmation is needed for this rejection."
+                    ),
+                    **self._job_metadata(job),
+                )
             if risk == "batch":
                 return self._queue_confirmation(job, "feature_graph", payload, risk, summary)
             return self._execute_feature_graph(job, payload, risk)
@@ -2353,7 +2379,8 @@ class CadOrchestrator:
                 "nodes": compiler.get("nodes_completed"),
             }
         )
-        self._record_built_features(job, compiler, payload["graph"])
+        self._record_built_features(job, compiler, payload["graph"],
+                                    fresh_document=payload["fresh_document"])
         job["dimension_ledger_warnings"] = ledger_warnings
         self._record_success(job, "feature_graph", "built_unverified")
         job.pop("previous_document_write_allowed", None)

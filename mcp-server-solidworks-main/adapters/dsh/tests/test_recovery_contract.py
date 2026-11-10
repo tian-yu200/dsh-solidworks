@@ -12,9 +12,9 @@ GRAPH = {"schema_version": "0.0.1-draft-ir-exp", "units": "meters", "nodes": [
 ]}
 
 
-def fail_graph(cad_env):
+def fail_graph(cad_env, code="EXTRUSION_FAILED"):
     cad_env.backend.feature_graph_handler = lambda *_: {
-        "status": "FAILED", "error": {"code": "EXTRUSION_FAILED", "message": "probe"},
+        "status": "FAILED", "error": {"code": code, "message": "probe"},
         "compiler": {"node_log": [{"id": "s", "status": "COMPLETED"}]},
     }
 
@@ -82,7 +82,13 @@ def test_non_executable_changes_do_not_admit_a_repair(cad_env, edit):
     else:
         replay["nodes"][0]["name"] = "renamed sketch"
     calls = len(cad_env.backend.calls)
-    assert submit(cad_env, replay, evidence())["status"] == "pending_confirmation"
+    response = submit(cad_env, replay, evidence())
+    if edit in {"description", "node_name"}:
+        assert response["status"] == "failed"
+        assert response["error"]["code"] == "REPAIR_IDENTICAL_REPLAY"
+        assert response["action_id"] is None
+    else:
+        assert response["status"] == "pending_confirmation"
     assert len(cad_env.backend.calls) == calls
 
 
@@ -107,8 +113,8 @@ def test_drawing_creation_identity_failure_reports_target_separately(cad_env, mo
 FRAME = {"origin": [0, 0, 0], "xdir": [1, 0, 0], "ydir": [0, 1, 0]}
 
 
-def evidence(number=1):
-    return json.dumps({"error_code": "EXTRUSION_FAILED", "cause": "measured frame %s" % number,
+def evidence(number=1, error_code="EXTRUSION_FAILED"):
+    return json.dumps({"error_code": error_code, "cause": "measured frame %s" % number,
                        "readback": "probe %s: same model plane and approved design" % number,
                        "change": "encode declaration without changing geometry %s" % number})
 
@@ -125,17 +131,17 @@ def test_repair_budget_survives_new_jobs_renumbering_and_new_orchestrator(cad_en
     replay = copy.deepcopy(GRAPH)
     replay["nodes"][0]["id"] = "new-sketch"
     replay["nodes"][1].update(id="new-boss", sketch="new-sketch")
-    pending = submit(cad_env, replay, evidence())
-    assert "原样重放" in pending["action_summary"]
-    # 2-25 2026-11-09: the model read this as "confirmation disabled" and stopped; it says what to do.
-    assert "先改失败节点" in pending["action_summary"] and "repair_evidence_json" in pending["action_summary"]
-    cad_env.orchestrator.cancel_action("job-1", cad_env.token, pending["action_id"])
+    rejected = submit(cad_env, replay, evidence())
+    assert rejected["status"] == "failed"
+    assert rejected["error"]["code"] == "REPAIR_IDENTICAL_REPLAY"
+    assert rejected["action_id"] is None
+    assert "repair_evidence_json" in rejected["instruction"]
     fixed = copy.deepcopy(GRAPH)
     fixed["nodes"][0]["frame"] = FRAME
+    repaired = submit(cad_env, fixed, evidence())
+    assert repaired["repair_attempts_used"] == 1
+    assert repaired["recovery_status"] == "discarded"
     job, token = cad_env.store.create("replacement-job", "renumbered plan", {})
-    second = submit(cad_env, fixed, evidence(), job["job_id"], token)
-    assert second["repair_attempts_used"] == 1
-    assert second["recovery_status"] == "discarded"
     newer = cad_env.module.CadOrchestrator()
     fixed["nodes"][1]["end"] = "blind"  # explicit encoding of the same default
     third = newer.feature_graph(job["job_id"], token, json.dumps(fixed), True, evidence(2))
@@ -294,8 +300,12 @@ def test_another_jobs_edit_neither_waits_for_nor_resets_a_discarded_chain(cad_en
     assert edited["status"] != "pending_confirmation", edited
     with cad_env.store.recovery_chain() as ledger:
         assert ledger["active"] is not None and len(ledger["active"]["attempts"]) == 1
-    # The same design from that job is still a repair of the old chain: a replay is caught.
-    assert "原样重放" in submit(cad_env, GRAPH, evidence(), "another-job", token)["action_summary"]
+    # The same design from that job is still a repair of the old chain: a replay is rejected
+    # without creating a confirmation action that would block the corrected resubmission.
+    replay = submit(cad_env, GRAPH, evidence(), "another-job", token)
+    assert replay["status"] == "failed"
+    assert replay["error"]["code"] == "REPAIR_IDENTICAL_REPLAY"
+    assert replay["action_id"] is None
 
 
 def test_large_fresh_repair_needs_no_batch_confirmation_but_still_counts(cad_env):

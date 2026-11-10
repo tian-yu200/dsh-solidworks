@@ -5,6 +5,7 @@ import json
 import pytest
 
 from test_recovery_contract import GRAPH, evidence, fail_graph, submit
+from repair_policy import TRANSIENT_REPLAY_ERROR_CODES
 
 
 def approve(env, pending):
@@ -87,14 +88,38 @@ def test_block_key_uses_path_or_stable_id_never_title_or_empty(cad_env):
 def test_repeated_submit_without_confirmation_does_not_execute(cad_env):
     fail_graph(cad_env)
     submit(cad_env, GRAPH)
-    pending = submit(cad_env, GRAPH)
+    rejected = submit(cad_env, GRAPH)
+    assert rejected["status"] == "failed"
+    assert rejected["error"]["code"] == "REPAIR_IDENTICAL_REPLAY"
+    assert rejected["action_id"] is None
     calls = len(cad_env.backend.calls)
-    with pytest.raises(RuntimeError, match="GRAPH_PENDING_CONFIRMATION"):
-        submit(cad_env, GRAPH)
+    repeated = submit(cad_env, GRAPH)
+    assert repeated["status"] == "failed"
+    assert repeated["error"]["code"] == "REPAIR_IDENTICAL_REPLAY"
     assert len(cad_env.backend.calls) == calls
     with cad_env.store.recovery_chain() as ledger:
         assert len(ledger["active"]["attempts"]) == 1
-    assert approve(cad_env, pending)["repair_attempts_used"] == 0
+    fixed = copy.deepcopy(GRAPH)
+    fixed["nodes"][1]["reversed"] = True
+    repaired = submit(cad_env, fixed, evidence())
+    assert repaired["repair_attempts_used"] == 1
+
+
+@pytest.mark.parametrize("code", sorted(TRANSIENT_REPLAY_ERROR_CODES))
+def test_identical_graph_replay_is_allowed_after_transient_execution_error(cad_env, code):
+    assert {"EXECUTION_TIMEOUT", "EXECUTION_UNCERTAIN", "EXECUTION_LAYER_ERROR"} <= TRANSIENT_REPLAY_ERROR_CODES
+    fail_graph(cad_env, code=code)
+    first = submit(cad_env, GRAPH)
+    assert first["recovery_status"] == "discarded"
+    assert first["repair_attempts_used"] == 0
+
+    retried = submit(cad_env, GRAPH, evidence(error_code=code))
+
+    assert retried["status"] == "failed"  # the fake backend returns the same timeout again
+    assert retried["action_id"] is None
+    assert retried["repair_attempts_used"] == 1
+    with cad_env.store.recovery_chain() as ledger:
+        assert len(ledger["active"]["attempts"]) == 2
 
 
 def test_exhausted_repairs_confirm_once_and_restart_budget(cad_env):
@@ -138,6 +163,7 @@ def test_large_unrelated_graph_merges_batch_and_recovery_confirmation(cad_env):
 def test_context_change_after_approval_request_refreshes_before_execution(cad_env):
     fail_graph(cad_env)
     submit(cad_env, GRAPH)
+    cad_env.backend.state["updateStamp"] = 98
     pending = submit(cad_env, GRAPH)
     request = cad_env.orchestrator.request_confirmation("job-1",cad_env.token,pending["action_id"])
     cad_env.backend.state["updateStamp"] = 99
@@ -154,6 +180,7 @@ def test_context_change_after_approval_request_refreshes_before_execution(cad_en
 def test_invalid_user_confirmation_cannot_reset_chain(cad_env):
     fail_graph(cad_env)
     submit(cad_env,GRAPH)
+    cad_env.backend.state["updateStamp"] = 99
     pending = submit(cad_env,GRAPH)
     request = cad_env.orchestrator.request_confirmation("job-1",cad_env.token,pending["action_id"])
     calls = len(cad_env.backend.calls)

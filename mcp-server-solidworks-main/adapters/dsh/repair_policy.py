@@ -211,6 +211,16 @@ def repair_evidence(raw):
 # two executed attempts cites it. Admitted only when the orchestrator recorded such a rejection
 # on the last attempt (validation_failures), so the code is never a free pass.
 PRE_EXECUTION_CODES = {"VALIDATION_FAILED"}
+TRANSIENT_REPLAY_ERROR_CODES = frozenset({
+    "EXECUTION_TIMEOUT",
+    "EXECUTION_UNCERTAIN",
+    "EXECUTION_LAYER_ERROR",
+    "EXECUTION_UNAVAILABLE",
+})
+
+
+class IdenticalReplayError(RuntimeError):
+    """A duplicate graph was rejected before execution and must not queue confirmation."""
 
 
 def _stated(value):
@@ -247,12 +257,17 @@ def admit(chain,graph,evidence):
                                % (previous.get("expect"),current.get("expect")))
     elif not dimensions_equal(previous,current):
         raise RuntimeError("REPAIR_DESIGN_CHANGED: "+design_change_description(previous,current))
-    if any(a.get("representation")==representation for a in chain["attempts"]):
+    replayed_before = any(a.get("representation") == representation for a in chain["attempts"])
+    transient_replay = (last.get("representation") == representation
+                        and last.get("error_code") in TRANSIENT_REPLAY_ERROR_CODES)
+    if replayed_before and not transient_replay:
         # zhijia_2_25 2026-11-09: an unchanged graph after an extrude failure; the model read the
         # confirmation as "disabled" and stopped. The reason now says what to do instead.
-        raise RuntimeError("REPAIR_IDENTICAL_REPLAY: 原样重放不属于自动修复，需用户确认。这张图和上次失败的那张完全一样："
-                           "上次是几何或校验类失败（拉伸/切除/草图/圆角/校验）时，原样重放会以同样方式失败，"
-                           "应先改失败节点，带 repair_evidence_json 重新提交，不需要确认；只有超时、连接中断这类偶发故障才值得原样重放")
+        raise IdenticalReplayError(
+            "REPAIR_IDENTICAL_REPLAY: 上次错误 %s 不属于可原样重试的偶发错误码 %s；"
+            "原样重放不会执行，也不会创建待确认操作。先改失败节点，带 repair_evidence_json 重新提交。"
+            % (last.get("error_code"), ", ".join(sorted(TRANSIENT_REPLAY_ERROR_CODES)))
+        )
     citable={last.get("error_code")} | (PRE_EXECUTION_CODES if last.get("validation_failures") else set())
     if (not isinstance(evidence.get("error_code"),str) or evidence["error_code"] not in citable
             or not all(_stated(evidence.get(k)) for k in ("cause","readback","change"))):

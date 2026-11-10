@@ -2581,3 +2581,30 @@ def test_sketch_fillets_count_as_planned_and_built_fillets(cad_env):
     cad_env.orchestrator._record_built_features(job, compiler, graph)
     assert job["planned_feature_types"]["fillet"] == 2
     assert job["built_feature_types"]["fillet"] == 2
+
+
+def test_fresh_rebuild_does_not_count_features_from_the_previous_document(cad_env):
+    first = {"nodes": [
+        {"id": "base", "type": "box"},
+        {"id": "round", "type": "fillet", "edges": [{"near": [0, 0, 0]}]},
+    ]}
+    replacement = {"nodes": [{"id": "base2", "type": "box"}]}
+    job = {"document_origin": "pre_existing"}
+
+    cad_env.orchestrator._plan_features(job, first)
+    cad_env.orchestrator._record_built_features(
+        job, {"node_log": [{"id": "base", "status": "COMPLETED"},
+                            {"id": "round", "status": "COMPLETED"}]}, first,
+        fresh_document=True,
+    )
+    assert job["built_feature_types"]["fillet"] == 1
+
+    cad_env.orchestrator._plan_features(job, replacement)
+    cad_env.orchestrator._record_built_features(
+        job, {"node_log": [{"id": "base2", "status": "COMPLETED"}]}, replacement,
+        fresh_document=True,
+    )
+
+    warnings = cad_env.orchestrator._completeness_warnings(job, {})
+    missing = next(w for w in warnings if w["code"] == "PLANNED_FEATURES_MISSING")
+    assert missing["missing"] == {"fillet": 1}

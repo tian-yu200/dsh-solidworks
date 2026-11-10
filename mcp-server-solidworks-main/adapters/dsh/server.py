@@ -329,7 +329,9 @@ def submit_feature_graph(
     L4 permits at most two repair executions of one design after the initial attempt, persisted
     across jobs.
     Resubmit the full graph with repair_evidence_json (error_code matching last failure,
-    cause, readback, change); second repair needs new evidence, never identical replay.
+    cause, readback, change); geometry/validation failures require a changed graph, while a graph
+    identical to an earlier attempt may be replayed only after a transient execution error (and it
+    still consumes one of the two repair executions).
     Lock node count/ordered (type,operation), material name/library, all non-placement
     dimensions/specs/end types and intrinsic sketch shape (1e-9 m tolerance). Placement anchors, reversed,
     ref/datum/face/signed offset, frame and whole-sketch rigid motion/mirror may change.
