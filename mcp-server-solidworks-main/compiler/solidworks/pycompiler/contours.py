@@ -1170,10 +1170,48 @@ def axis_sides(profile, axis, tol=CONTOUR_WELD_TOL):
     if problems:
         return None
     low = high = None
+
+    def record(point, index):
+        nonlocal low, high
+        x, y = point
+        distance = (ux * (y - y1) - uy * (x - x1)) / length
+        if low is None or distance < low[0]:
+            low = (distance, index)
+        if high is None or distance > high[0]:
+            high = (distance, index)
+
     for i, prim in enumerate(resolved):
         if not isinstance(prim, dict) or prim.get("construction") is True:
             continue
         kind = prim.get("kind")
+        if kind == "circle":
+            centre, diameter = _centre(prim), _pos(prim.get("diameter"))
+            if centre is None or diameter is None:
+                continue
+            nx, ny = -uy / length, ux / length
+            radius = diameter / 2.0
+            record((centre[0] - nx * radius, centre[1] - ny * radius), i)
+            record((centre[0] + nx * radius, centre[1] + ny * radius), i)
+            continue
+        if kind == "arc":
+            curves = _curves(prim)
+            if not curves or curves[0][0] != "arc":
+                continue
+            curve = curves[0]
+            centre, radius = curve[1], curve[2]
+            start_angle, sweep = curve[3], curve[4]
+            record((centre[0] + radius * math.cos(start_angle),
+                    centre[1] + radius * math.sin(start_angle)), i)
+            record((centre[0] + radius * math.cos(start_angle + sweep),
+                    centre[1] + radius * math.sin(start_angle + sweep)), i)
+            # Signed distance to a line is sinusoidal along a circle. Its only interior
+            # extrema are the two radius directions parallel to the line normal.
+            for angle in (math.atan2(-ux, uy), math.atan2(-ux, uy) + math.pi):
+                point = (centre[0] + radius * math.cos(angle),
+                         centre[1] + radius * math.sin(angle))
+                if _on_arc(curve, point, tol):
+                    record(point, i)
+            continue
         if kind in _CLOSED_LOOP_KINDS:
             pts = closed_loop(prim) or []
         elif kind in ("line", "arc", "spline"):
@@ -1181,11 +1219,7 @@ def axis_sides(profile, axis, tol=CONTOUR_WELD_TOL):
         else:
             continue
         for x, y in pts:
-            d = (ux * (y - y1) - uy * (x - x1)) / length
-            if low is None or d < low[0]:
-                low = (d, i)
-            if high is None or d > high[0]:
-                high = (d, i)
+            record((x, y), i)
     return (low, high) if low is not None else None
 
 

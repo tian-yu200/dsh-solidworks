@@ -5,6 +5,7 @@ nothing from it. Seen on dev drawing zct01 (01:55 run, first submit) and an olde
 none of the 85 graphs that built in the local sessions is flagged.
 """
 import os
+import math
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -55,3 +56,33 @@ def test_an_arc_bulging_over_the_axis_is_caught():
     bulge = [L(.0, 0, .02, 0), L(.02, 0, .02, .03), L(.02, .03, 0, .03),
              {"kind": "arc", "cx": 0, "cy": .015, "x1": 0, "y1": .03, "x2": 0, "y2": 0, "dir": 1}]
     assert [e for e in validate(_graph(bulge)) if "BOTH sides of the revolve axis" in e]
+
+
+def test_arc_center_across_axis_does_not_reject_arc_wholly_on_one_side():
+    # The arc center is not part of the profile. This R20 mm arc lies entirely to the right
+    # of x=0 even though its center is at x=-10 mm.
+    profile = [
+        {"kind": "arc", "cx": -.01, "cy": 0,
+         "x1": -.01 + .02 * .866025403784, "y1": -.01,
+         "x2": -.01 + .02 * .866025403784, "y2": .01, "dir": 1},
+        L(-.01 + .02 * .866025403784, .01, .03, .01),
+        L(.03, .01, .03, -.01),
+        L(.03, -.01, -.01 + .02 * .866025403784, -.01),
+    ]
+
+    (low, _), (high, _) = contours.axis_sides(profile, AXIS)
+    assert low < 0 and high < 0
+    assert not [e for e in validate(_graph(profile)) if "BOTH sides of the revolve axis" in e]
+
+
+def test_narrow_circle_axis_crossing_is_not_lost_by_sampling():
+    radius = 10.0
+    cx = radius * .9999
+    start = .098
+    point = {"kind": "arc", "cx": cx, "cy": 0,
+             "x1": cx + radius * math.cos(start), "y1": radius * math.sin(start),
+             "x2": cx + radius * math.cos(start), "y2": radius * math.sin(start), "dir": 1}
+    low, high = contours.axis_sides([point], AXIS)
+
+    assert low[0] < 0 < high[0]
+    assert [e for e in validate(_graph([point])) if "BOTH sides of the revolve axis" in e]
