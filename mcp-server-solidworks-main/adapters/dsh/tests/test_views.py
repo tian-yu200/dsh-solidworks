@@ -141,6 +141,22 @@ def test_start_job_passes_optional_local_drawing_path(tmp_path, monkeypatch):
                        "drawing": str(tmp_path / "part.png")}
 
 
+def test_start_job_passes_explicit_recovery_archive_reason(monkeypatch):
+    server = _dsh_server()
+    expected = {}
+    reason = "Claude 批准：清理 codex 已结束的 dev canary 遗留恢复链"
+
+    def begin_job(intent, target_document, as_assembly, drawing_path, recovery_archive_reason=""):
+        expected.update(intent=intent, recovery_archive_reason=recovery_archive_reason)
+        return {"status": "completed", "job_id": "job-archive"}
+
+    monkeypatch.setattr(server.orchestrator, "begin_job", begin_job)
+    result = json.loads(server.start_job("approved recovery archive", recovery_archive_reason=reason))
+
+    assert result["status"] == "completed"
+    assert expected == {"intent": "approved recovery archive", "recovery_archive_reason": reason}
+
+
 def test_begin_job_persists_resolved_drawing_path(tmp_path, cad_env):
     drawing = tmp_path / "drawing.png"
     drawing.write_bytes(b"drawing")
@@ -149,6 +165,14 @@ def test_begin_job_persists_resolved_drawing_path(tmp_path, cad_env):
 
     job = cad_env.store.load(started["job_id"], started["job_token"])
     assert job["drawing_path"] == str(drawing.resolve())
+
+
+def test_begin_job_persists_explicit_recovery_archive_reason(cad_env):
+    reason = "Claude 批准：清理 codex 已结束的 dev canary 遗留恢复链"
+    started = cad_env.orchestrator.begin_job("archive approved canary recovery", recovery_archive_reason=reason)
+
+    job = cad_env.store.load(started["job_id"], started["job_token"])
+    assert job["recovery_archive_reason"] == reason
 
 
 def test_a_render_problem_never_fails_the_build(tmp_path, monkeypatch, cad_env):

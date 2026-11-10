@@ -2310,6 +2310,45 @@ def _confirm_job_action(env, job_id, job_token, pending):
     )
 
 
+def test_user_approved_recovery_archive_reason_is_recorded_exactly(cad_env):
+    env = cad_env
+    reason = "Claude 批准：清理 codex 已结束的 dev canary 遗留恢复链"
+    job = {"job_id": "canary-override", "recovery_status": "rollback_failed",
+           "repair_attempts_used": 1}
+    ledger = {"active": {"chain_id": "canary-chain", "attempts": [{"status": "partial"}]},
+              "history": [], "blocked_documents": {}}
+    scope = {"reasons": ["prior canary recovery was unverified"], "archive_reason": reason,
+             "chain_revision": None, "block_revision": None, "document_block_key": None}
+
+    env.orchestrator._archive_user_override(job, ledger, scope)
+
+    assert ledger["active"] is None
+    assert ledger["history"][0]["closed_reason"] == reason
+    assert job["recovery_overrides"][0]["archive_reason"] == reason
+
+
+def test_confirmed_recovery_override_uses_begin_job_archive_reason(cad_env):
+    env = cad_env
+    reason = "Claude 批准：清理 codex 已结束的 dev canary 遗留恢复链"
+    started = env.orchestrator.begin_job("new dev canary", recovery_archive_reason=reason)
+    job = env.store.load(started["job_id"], started["job_token"])
+    job["recovery_status"] = "rollback_failed"
+    env.store.save(job)
+
+    pending = env.orchestrator.feature_graph(
+        started["job_id"], started["job_token"], json.dumps(_minimal_graph()),
+        fresh_document=True,
+    )
+    assert pending["status"] == "pending_confirmation", pending
+    assert "归档原因：" + reason in pending["action_summary"]
+
+    built = _confirm_job_action(env, started["job_id"], started["job_token"], pending)
+
+    assert built["status"] == "completed", built
+    job = env.store.load(started["job_id"], started["job_token"])
+    assert job["recovery_overrides"][-1]["archive_reason"] == reason
+
+
 def test_invalid_batch_graph_fails_before_confirmation_or_document_creation(cad_env):
     env = cad_env
     started = env.orchestrator.begin_job("new model, validate before approval")

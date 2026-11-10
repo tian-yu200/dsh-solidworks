@@ -702,13 +702,16 @@ class CadOrchestrator:
                 scope = {"reasons": reasons, "chain_revision": payload_hash(ledger.get("active")),
                          "inventory_revision": payload_hash(inventory),
                          "document_block_key": key,
-                         "block_revision": payload_hash(ledger["blocked_documents"].get(key))}
+                         "block_revision": payload_hash(ledger["blocked_documents"].get(key)),
+                         "archive_reason": job.get("recovery_archive_reason") or None}
                 payload["recovery_override"] = scope
                 risk = "batch"  # One existing confirmation also covers a graph over ten nodes.
                 action_summary = summary
                 visible_reasons = [reason.partition(": ")[2] if reason.startswith("REPAIR_IDENTICAL_REPLAY:")
                                    else reason for reason in reasons]
                 summary = "；".join(visible_reasons) + "。确认后归档旧失败链，解除本目标的恢复阻止；不自动关闭残留文档。"
+                if scope.get("archive_reason"):
+                    summary += "归档原因：" + scope["archive_reason"] + "。"
                 if kind == "feature_graph" and payload["fresh_document"]:
                     summary += "本次作为新首次执行（修复计数 0），包含 %s 个节点。" % len(payload["graph"].get("nodes", []))
                 summary += "本次操作：" + action_summary
@@ -726,7 +729,9 @@ class CadOrchestrator:
         chain = ledger.get("active")
         # Callers check the revision while holding the same cross-process ledger lock.
         if chain:
-            chain.update(closed_by="user_override", closed_reason="；".join(scope["reasons"]), closed_at=utc_now())
+            chain.update(closed_by="user_override",
+                         closed_reason=scope.get("archive_reason") or "；".join(scope["reasons"]),
+                         closed_at=utc_now())
             ledger.setdefault("history", []).append(chain)
             ledger["active"] = None
         key = scope.get("document_block_key")
@@ -1211,8 +1216,11 @@ class CadOrchestrator:
         return {"target_document": self._target(state), "drawing_path": job.get("drawing_path"),
                 "views": rendered}
 
-    def begin_job(self, intent, target_document="", as_assembly=False, drawing_path=""):
+    def begin_job(self, intent, target_document="", as_assembly=False, drawing_path="",
+                  recovery_archive_reason=""):
         with self._write_lock:
+            if not isinstance(recovery_archive_reason, str) or len(recovery_archive_reason) > 300:
+                raise ValueError("recovery_archive_reason must be a string of at most 300 characters")
             ready = backend.ensure_ready()
             if not ready.get("comAttached"):
                 return envelope(
@@ -1278,6 +1286,8 @@ class CadOrchestrator:
             job["document_origin"] = self._document_origin(
                 target_document, active_before, state
             )
+            if recovery_archive_reason.strip():
+                job["recovery_archive_reason"] = recovery_archive_reason.strip()
             if drawing_path:
                 try:
                     job["drawing_path"] = str(Path(drawing_path).expanduser().resolve())
