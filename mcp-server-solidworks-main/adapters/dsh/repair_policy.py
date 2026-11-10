@@ -248,7 +248,11 @@ def admit(chain,graph,evidence):
     elif not dimensions_equal(previous,current):
         raise RuntimeError("REPAIR_DESIGN_CHANGED: "+design_change_description(previous,current))
     if any(a.get("representation")==representation for a in chain["attempts"]):
-        raise RuntimeError("REPAIR_IDENTICAL_REPLAY: 原样重放不属于自动修复，需用户确认")
+        # zhijia_2_25 2026-11-09: an unchanged graph after an extrude failure; the model read the
+        # confirmation as "disabled" and stopped. The reason now says what to do instead.
+        raise RuntimeError("REPAIR_IDENTICAL_REPLAY: 原样重放不属于自动修复，需用户确认。这张图和上次失败的那张完全一样："
+                           "上次是几何或校验类失败（拉伸/切除/草图/圆角/校验）时，原样重放会以同样方式失败，"
+                           "应先改失败节点，带 repair_evidence_json 重新提交，不需要确认；只有超时、连接中断这类偶发故障才值得原样重放")
     citable={last.get("error_code")} | (PRE_EXECUTION_CODES if last.get("validation_failures") else set())
     if (not isinstance(evidence.get("error_code"),str) or evidence["error_code"] not in citable
             or not all(_stated(evidence.get(k)) for k in ("cause","readback","change"))):

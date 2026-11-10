@@ -127,6 +127,8 @@ def test_repair_budget_survives_new_jobs_renumbering_and_new_orchestrator(cad_en
     replay["nodes"][1].update(id="new-boss", sketch="new-sketch")
     pending = submit(cad_env, replay, evidence())
     assert "原样重放" in pending["action_summary"]
+    # 2-25 2026-11-09: the model read this as "confirmation disabled" and stopped; it says what to do.
+    assert "先改失败节点" in pending["action_summary"] and "repair_evidence_json" in pending["action_summary"]
     cad_env.orchestrator.cancel_action("job-1", cad_env.token, pending["action_id"])
     fixed = copy.deepcopy(GRAPH)
     fixed["nodes"][0]["frame"] = FRAME
