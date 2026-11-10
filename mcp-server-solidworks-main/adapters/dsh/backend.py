@@ -1,5 +1,9 @@
+import json
+import os
+import subprocess
 import sys
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -14,6 +18,7 @@ if _claude_path not in sys.path:
 
 from execution_client import (  # noqa: E402
     ExecutionLayerError,
+    HEALTH_ENDPOINT,
     call_tool,
     ensure_ready,
     get_health,
@@ -26,6 +31,42 @@ from adapter_log import write as _log  # noqa: E402
 
 
 REFERENCE_GEOMETRY_HTTP_TIMEOUT = 310.0  # STA timeout is 300 s; leave room for the response.
+RECOVERY_PROBE_TIMEOUT_SECONDS = 2.0
+RECOVERY_PROBE_INTERVAL_SECONDS = 5.0
+DOCUMENTS_ENDPOINT = IDENTITY_ENDPOINT.rsplit("/", 1)[0] + "/documents"
+
+
+def _process_snapshot():
+    """Read process identities without contacting a possibly blocked SolidWorks STA."""
+    empty = {"solidworks_pids": [], "execution_service_pids": []}
+    if os.name != "nt":
+        return empty
+    command = (
+        "$sw = @(Get-Process -Name SLDWORKS -ErrorAction SilentlyContinue | "
+        "ForEach-Object { [int]$_.Id }); "
+        "$svc = @(Get-Process -Name SolidworksExecution -ErrorAction SilentlyContinue | "
+        "ForEach-Object { [int]$_.Id }); "
+        "[PSCustomObject]@{ solidworks_pids = $sw; execution_service_pids = $svc } | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                                capture_output=True, text=True, timeout=2.0, check=False,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode != 0 or not result.stdout.strip():
+            return empty
+        body = json.loads(result.stdout)
+
+        def normalize(value):
+            values = value if isinstance(value, list) else [value]
+            try:
+                return [int(pid) for pid in values if pid is not None]
+            except (TypeError, ValueError):
+                return []
+
+        return {"solidworks_pids": normalize(body.get("solidworks_pids")),
+                "execution_service_pids": normalize(body.get("execution_service_pids"))}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return empty
 
 
 class SolidWorksBackend:
@@ -36,6 +77,8 @@ class SolidWorksBackend:
         self._lock = threading.RLock()
         self._execution_gate = threading.RLock()
         self._state_version = None
+        self._last_recovery_probe = 0.0
+        self._recovery_probe_lock = threading.Lock()
         self._execution_health = execution_health or ExecutionHealth(
             JOB_ROOT / "execution-health.json",
             JOB_ROOT / "execution-operations.jsonl",
@@ -47,15 +90,63 @@ class SolidWorksBackend:
         state = self._execution_health.unhealthy
         if not state:
             return None
+        self._try_auto_recovery(state)
+        state = self._execution_health.unhealthy
+        if not state:
+            return None
         reason = state.get("reason", "manual recovery required")
         return {
             "status": "FAILED",
             "stateVersion": self._state_version,
             "cadState": None,
             "error": {"code": "EXECUTION_UNHEALTHY",
-                      "message": "The SolidWorks execution backend is UNHEALTHY; %s was not sent to the STA. %s"
-                                 % (tool, reason)},
+                      "message": ("The SolidWorks execution backend is UNHEALTHY; %s was not sent to the STA. %s"
+                                  % (tool, self._execution_health.recovery_message(reason)))},
         }
+
+    @staticmethod
+    def _instance_snapshot(state_version):
+        baseline = _process_snapshot()
+        baseline["state_version"] = int(state_version)
+        return baseline
+
+    @staticmethod
+    def _documents_probe_succeeded():
+        try:
+            response = pooled_get(DOCUMENTS_ENDPOINT, RECOVERY_PROBE_TIMEOUT_SECONDS)
+            if response.status_code != 200:
+                return False
+            body = response.json()
+            docs = body.get("documents")
+            fields = {"document_id", "title", "path", "type", "isDirty", "updateStamp"}
+            return (isinstance(docs, list) and "active_document" in body
+                    and isinstance(body.get("undo_scope_active"), bool)
+                    and all(isinstance(doc, dict) and fields.issubset(doc) for doc in docs)
+                    and len({doc["document_id"] for doc in docs}) == len(docs)
+                    and (body["active_document"] is None or body["active_document"] in docs))
+        except Exception:
+            return False
+
+    def _try_auto_recovery(self, state):
+        now = time.monotonic()
+        with self._recovery_probe_lock:
+            if now - self._last_recovery_probe < RECOVERY_PROBE_INTERVAL_SECONDS:
+                return False
+            self._last_recovery_probe = now
+        try:
+            current = _process_snapshot()
+            current["state_version"] = state.get("state_version")
+            if not self._execution_health.has_new_instance(current):
+                return False
+            if not self._execution_health.try_recover(current, self._documents_probe_succeeded):
+                return False
+            if isinstance(current.get("state_version"), int):
+                with self._lock:
+                    self._state_version = current["state_version"]
+            return True
+        except Exception as exc:
+            _log("Execution health recovery probe failed: %s" % exc)
+            return False
 
     @contextmanager
     def _execution(self, tool):
@@ -139,9 +230,11 @@ class SolidWorksBackend:
             return response, state_version
 
         if tool == "add_reference_geometry":
+            baseline_instance = self._instance_snapshot(state_version)
             try:
                 response, state_version = self._execution_health.run_reference_geometry(
-                    operation_id, state_version, params, invoke)
+                    operation_id, state_version, params, invoke,
+                    baseline_instance=baseline_instance)
             except ExecutionCircuitOpen as exc:
                 return {"status": "FAILED", "stateVersion": self._state_version,
                         "cadState": None, "error": {"code": "EXECUTION_UNHEALTHY", "message": str(exc)}}
