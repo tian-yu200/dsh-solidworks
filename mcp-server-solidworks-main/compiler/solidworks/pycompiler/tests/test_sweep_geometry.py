@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from pycompiler.ir_schema import validate        # noqa: E402
+from pycompiler.contours import point_in_profile # noqa: E402
 
 
 def L(a, b, c, d):
@@ -45,6 +46,29 @@ def test_a_path_that_starts_off_the_profile_plane_is_named():
 def test_a_profile_beside_the_path_is_named():
     errors = _sweep_errors(BENT, [{"kind": "circle", "diameter": .01, "cx": .03}])
     assert len(errors) == 1 and "outside the profile" in errors[0]
+
+
+def test_nonconvex_profile_uses_the_contour_not_its_bounding_box():
+    u_shape = [
+        L(-.03, -.03, .03, -.03), L(.03, -.03, .03, .03),
+        L(.03, .03, .01, .03), L(.01, .03, .01, -.01),
+        L(.01, -.01, -.01, -.01), L(-.01, -.01, -.01, .03),
+        L(-.01, .03, -.03, .03), L(-.03, .03, -.03, -.03),
+    ]
+
+    assert point_in_profile(u_shape, (0, -.02)) is True
+    assert point_in_profile(u_shape, (0, 0)) is False  # notch is inside the bbox, outside the U
+    errors = _sweep_errors(BENT, u_shape)
+    assert len(errors) == 1 and "outside the profile's actual contour" in errors[0]
+
+
+def test_nested_inner_loop_is_a_void_for_sweep_containment():
+    outer = {"kind": "rectangle", "width": .06, "height": .06}
+    hole = {"kind": "circle", "diameter": .02}
+
+    assert point_in_profile([outer, hole], (0, 0)) is False
+    assert point_in_profile([outer, hole], (.02, 0)) is True
+    assert _sweep_errors(BENT, [outer, hole])
 
 
 def test_a_bend_tighter_than_the_section_is_named():

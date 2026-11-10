@@ -558,6 +558,108 @@ def closed_loop(prim):
     return _dedupe([(x + cx, y + cy) for x, y in local])
 
 
+def profile_rings(profile):
+    """Return sampled closed boundary rings for a sketch profile, or None if unsupported.
+
+    Closed primitives are independent loops. Consecutive line/arc/spline primitives form
+    one explicitly ordered loop; sketch fillets are resolved to arcs before sampling.
+    """
+    resolved, problems = resolve_fillets(profile or [])
+    if problems:
+        return None
+
+    rings = []
+    chain = []
+
+    def flush_chain():
+        nonlocal chain
+        if not chain:
+            return True
+        points = []
+        for prim in chain:
+            kind = prim.get("kind")
+            if kind == "line":
+                ends = [(x, y) for _w, x, y in _iter_endpoints(prim)]
+                part = ends if len(ends) == 2 else []
+            elif kind == "arc":
+                part = _arc_samples(prim, n=LOOP_SAMPLES_PER_TURN)
+            elif kind == "spline":
+                # Through-points are not the fitted spline curve itself. Decline this
+                # geometric claim rather than produce a potentially false containment result.
+                return False
+            else:
+                return False
+            if len(part) < 2:
+                return False
+            if points:
+                if math.hypot(points[-1][0] - part[0][0], points[-1][1] - part[0][1]) > CONTOUR_WELD_TOL:
+                    return False
+                points.extend(part[1:])
+            else:
+                points.extend(part)
+        if len(points) < 4 or math.hypot(points[-1][0] - points[0][0], points[-1][1] - points[0][1]) > CONTOUR_WELD_TOL:
+            return False
+        points[-1] = points[0]
+        rings.append(points[:-1])
+        chain = []
+        return True
+
+    for prim in resolved:
+        if not isinstance(prim, dict) or prim.get("construction") is True:
+            continue
+        kind = prim.get("kind")
+        if kind in _CLOSED_LOOP_KINDS:
+            if not flush_chain():
+                return None
+            ring = closed_loop(prim)
+            if not ring or len(ring) < 3:
+                return None
+            rings.append(ring)
+        elif kind in ("line", "arc", "spline"):
+            if chain:
+                prev_end = _iter_endpoints(chain[-1])[-1][1:]
+                current_start = _iter_endpoints(prim)[0][1:]
+                if math.hypot(prev_end[0] - current_start[0], prev_end[1] - current_start[1]) > CONTOUR_WELD_TOL:
+                    if not flush_chain():
+                        return None
+            chain.append(prim)
+        else:
+            return None
+    if not flush_chain() or not rings:
+        return None
+    return rings
+
+
+def point_in_profile(profile, point, tol=CONTOUR_WELD_TOL):
+    """Even-odd containment over closed sketch loops; boundary points count as inside."""
+    if not (isinstance(point, (list, tuple)) and len(point) == 2
+            and all(_is_finite(v) for v in point)):
+        return None
+    rings = profile_rings(profile)
+    if rings is None:
+        return None
+    x, y = float(point[0]), float(point[1])
+    inside = False
+    for ring in rings:
+        ring_inside = False
+        for i, (x1, y1) in enumerate(ring):
+            x2, y2 = ring[(i + 1) % len(ring)]
+            dx, dy = x2 - x1, y2 - y1
+            length_sq = dx * dx + dy * dy
+            if length_sq <= 0:
+                continue
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length_sq))
+            if math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) <= tol:
+                return True
+            if (y1 > y) != (y2 > y):
+                cross_x = x1 + (y - y1) * dx / dy
+                if cross_x > x:
+                    ring_inside = not ring_inside
+        if ring_inside:
+            inside = not inside
+    return inside
+
+
 def _bbox(points):
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]

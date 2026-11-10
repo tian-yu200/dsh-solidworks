@@ -1479,18 +1479,14 @@ def _sweep_geometry_errors(profile_node, path_node):
                 % (abs(off[0]) * 1000, abs(off[1]) * 1000)]
     rel = [world[near][k] - po[k] for k in range(3)]
     pierce = (sum(rel[k] * px[k] for k in range(3)), sum(rel[k] * py[k] for k in range(3)))
-    pts = []
-    for prim in contours.resolve_fillets(profile_node["profile"])[0]:
-        if not isinstance(prim, dict) or prim.get("construction") is True:
-            continue
-        ring = contours.closed_loop(prim)
-        pts += ring if ring else contours._prim_points(prim)  # the real outline, not its bounding box
-    if not pts:
+    rings = contours.profile_rings(profile_node["profile"])
+    if not rings:
         return []
-    xs, ys = [q[0] for q in pts], [q[1] for q in pts]
-    if not (min(xs) - 1e-6 <= pierce[0] <= max(xs) + 1e-6 and min(ys) - 1e-6 <= pierce[1] <= max(ys) + 1e-6):
+    if contours.point_in_profile(profile_node["profile"], pierce) is False:
         return ["the sweep path meets the profile plane at (%.2f, %.2f) mm in the profile sketch, outside "
-                "the profile — draw the profile around the path's end." % (pierce[0] * 1000, pierce[1] * 1000)]
+                "the profile's actual contour (being inside its bounding box is not enough); draw the "
+                "profile around the path's end." % (pierce[0] * 1000, pierce[1] * 1000)]
+    pts = [point for ring in rings for point in ring]
     reach = max(math.hypot(q[0] - pierce[0], q[1] - pierce[1]) for q in pts)
     bend = contours.smallest_bend(path_node["profile"])
     if bend is not None and reach >= bend:
