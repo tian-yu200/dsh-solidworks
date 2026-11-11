@@ -112,7 +112,7 @@ ask_user_question call: three check lines, ALL genuinely missing dimensions and 
 approval, at most 600 characters (the DSH dialog does not scroll); no three-question cap.
 After the answer, build directly. Ask again only if that answer introduces a new
 contradiction. “接受/继续” approves the plan but supplies no missing numeric value.
-Read [drawing intake](solidworks://skill/references/drawing-intake.md) for the evidence contract.
+Read [drawing intake](solidworks://skill/references/drawing-intake.md); for axial sections or intersecting cast silhouettes, follow [construction strategies](solidworks://skill/references/construction-strategies.md).
 
 ```mermaid
 flowchart TD
