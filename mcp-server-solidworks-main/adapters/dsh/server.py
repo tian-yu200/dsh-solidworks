@@ -214,20 +214,12 @@ def start_job(
     target_document: str = "",
     as_assembly: bool = False,
     drawing_path: str = "",
-    recovery_archive_reason: str = "",
 ) -> str:
     """Start an authenticated CAD job and optionally open an existing target.
 
     When the source drawing is a local file, pass its path as drawing_path for the view comparison.
-    Set recovery_archive_reason only when the user has explicitly approved the exact audit reason
-    for archiving an unresolved recovery chain.
     Returns job_id and private job_token. Pass both to every later job-scoped call.
     """
-    if recovery_archive_reason:
-        return _json_result(lambda: orchestrator.begin_job(
-            intent, target_document, as_assembly, drawing_path,
-            recovery_archive_reason=recovery_archive_reason,
-        ))
     return _json_result(
         lambda: orchestrator.begin_job(intent, target_document, as_assembly, drawing_path)
     )

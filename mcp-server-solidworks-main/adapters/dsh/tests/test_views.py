@@ -141,20 +141,13 @@ def test_start_job_passes_optional_local_drawing_path(tmp_path, monkeypatch):
                        "drawing": str(tmp_path / "part.png")}
 
 
-def test_start_job_passes_explicit_recovery_archive_reason(monkeypatch):
+def test_model_start_job_does_not_expose_internal_recovery_archive_reason():
+    import inspect
+
     server = _dsh_server()
-    expected = {}
-    reason = "Claude 批准：清理 codex 已结束的 dev canary 遗留恢复链"
-
-    def begin_job(intent, target_document, as_assembly, drawing_path, recovery_archive_reason=""):
-        expected.update(intent=intent, recovery_archive_reason=recovery_archive_reason)
-        return {"status": "completed", "job_id": "job-archive"}
-
-    monkeypatch.setattr(server.orchestrator, "begin_job", begin_job)
-    result = json.loads(server.start_job("approved recovery archive", recovery_archive_reason=reason))
-
-    assert result["status"] == "completed"
-    assert expected == {"intent": "approved recovery archive", "recovery_archive_reason": reason}
+    assert "recovery_archive_reason" not in inspect.signature(server.start_job).parameters
+    with pytest.raises(TypeError):
+        server.start_job("model request", recovery_archive_reason="approved")
 
 
 def test_begin_job_persists_resolved_drawing_path(tmp_path, cad_env):

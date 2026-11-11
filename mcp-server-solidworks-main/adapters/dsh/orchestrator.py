@@ -729,8 +729,11 @@ class CadOrchestrator:
         chain = ledger.get("active")
         # Callers check the revision while holding the same cross-process ledger lock.
         if chain:
+            system_reasons = "；".join(scope["reasons"])
+            archive_reason = scope.get("archive_reason")
             chain.update(closed_by="user_override",
-                         closed_reason=scope.get("archive_reason") or "；".join(scope["reasons"]),
+                         closed_reason=(archive_reason + "（原因：" + system_reasons + "）"
+                                        if archive_reason else system_reasons),
                          closed_at=utc_now())
             ledger.setdefault("history", []).append(chain)
             ledger["active"] = None

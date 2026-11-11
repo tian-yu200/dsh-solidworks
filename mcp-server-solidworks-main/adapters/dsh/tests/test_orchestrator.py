@@ -2310,21 +2310,29 @@ def _confirm_job_action(env, job_id, job_token, pending):
     )
 
 
-def test_user_approved_recovery_archive_reason_is_recorded_exactly(cad_env):
+def test_user_approved_recovery_archive_reason_preserves_system_reasons(cad_env):
     env = cad_env
     reason = "Claude 批准：清理 codex 已结束的 dev canary 遗留恢复链"
     job = {"job_id": "canary-override", "recovery_status": "rollback_failed",
            "repair_attempts_used": 1}
     ledger = {"active": {"chain_id": "canary-chain", "attempts": [{"status": "partial"}]},
               "history": [], "blocked_documents": {}}
-    scope = {"reasons": ["prior canary recovery was unverified"], "archive_reason": reason,
+    reasons = ["prior canary recovery was unverified", "target recovery is blocked"]
+    scope = {"reasons": reasons, "archive_reason": reason,
              "chain_revision": None, "block_revision": None, "document_block_key": None}
 
     env.orchestrator._archive_user_override(job, ledger, scope)
 
     assert ledger["active"] is None
-    assert ledger["history"][0]["closed_reason"] == reason
+    assert ledger["history"][0]["closed_reason"] == reason + "（原因：" + "；".join(reasons) + "）"
     assert job["recovery_overrides"][0]["archive_reason"] == reason
+
+
+def test_recovery_archive_without_internal_reason_keeps_system_reasons(cad_env):
+    ledger = {"active": {"chain_id": "prior"}, "history": [], "blocked_documents": {}}
+    scope = {"reasons": ["first", "second"], "document_block_key": None}
+    cad_env.orchestrator._archive_user_override({"job_id": "override"}, ledger, scope)
+    assert ledger["history"][0]["closed_reason"] == "first；second"
 
 
 def test_confirmed_recovery_override_uses_begin_job_archive_reason(cad_env):
