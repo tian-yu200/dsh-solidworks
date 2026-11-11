@@ -1354,6 +1354,11 @@ def test_first_save_still_confirms_without_proof_of_ownership_or_onto_a_file(
     pending = cad_env.orchestrator.save_or_export(
         "job-1", cad_env.token, "save", file_path=str(target)
     )
+    if hazard == "other_instance_active":
+        assert pending["status"] == "failed", pending
+        assert pending["error"]["code"] == "ACTIVE_DOCUMENT_CHANGED"
+        assert not any(tool == "save_document" for tool, _ in cad_env.backend.calls)
+        return
     assert pending["status"] == "pending_confirmation"
     assert pending["risk"] == "save_as"
     assert "Part1" in pending["action_summary"]
@@ -1384,7 +1389,7 @@ def test_first_save_of_an_untitled_document_the_job_did_not_create_confirms(
         activeDocument="Part1", activeDocumentPath="", isDirty=True
     )
     job = cad_env.store.load("job-1", cad_env.token)
-    job["expected_document"] = {"title": "Part1", "path": ""}
+    job["expected_document"] = {"title": "Part1", "path": "", "document_id": "existing-0"}
     cad_env.store.save(job)
 
     pending = cad_env.orchestrator.save_or_export(
@@ -1991,6 +1996,7 @@ def test_finish_job_closes_the_document_its_job_created_and_saved(unbound_env, t
         "expected_title": target.name,
         "expected_path": str(target),
         "expected_type": "PART",
+        "expected_document_id": "created-1",
     }
     job = env.store.load(env.job_id, env.token)
     assert job["status"] == "completed"

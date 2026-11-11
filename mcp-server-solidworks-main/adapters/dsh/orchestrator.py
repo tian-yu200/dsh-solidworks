@@ -213,10 +213,14 @@ class CadOrchestrator:
 
         Closes only when ALL of: the job produced the document (created/opened), it is saved
         to a path, it is not dirty, and the caller did not pass keep_open. Anything else — and
-        any close failure — leaves the document open and says why; the job's verdict is never
-        changed by this, because the CAD work is already verified complete.
+        ordinary close failure — leaves the document open and says why. Identity drift
+        invalidates the verdict; other cleanup failures preserve the completed CAD verdict.
         """
         identity = self._identity(state)
+        expected_id = (job.get("expected_document") or {}).get("document_id")
+        closing_identity = dict(identity)
+        if expected_id and same_document(job["expected_document"], state):
+            closing_identity["document_id"] = expected_id
         if keep_open:
             return {"document_left_open": {"reason": "keep_open",
                                            "document": identity}}
@@ -232,7 +236,7 @@ class CadOrchestrator:
                                            "document": identity}}
 
         try:
-            response = self._close_document(identity, save=False)
+            response = self._close_document(closing_identity, save=False)
         except Exception as exc:  # noqa: BLE001 - verified work must not be failed by a close
             return {"document_left_open": {"reason": "close_failed",
                                            "document": identity},
@@ -1282,8 +1286,15 @@ class CadOrchestrator:
                 )
 
             job_id = str(uuid.uuid4())
+            identity = self._identity(state)
+            if identity.get("title") or identity.get("path"):
+                inventory = backend.documents()
+                active = inventory.get("active_document") or {}
+                if not active.get("document_id") or not same_document(identity, self._inventory_state(inventory)):
+                    raise RuntimeError("ACTIVE_DOCUMENT_CHANGED: job source changed while binding its instance.")
+                identity["document_id"] = active["document_id"]
             job, token = job_store.create(
-                job_id, intent, self._identity(state)
+                job_id, intent, identity
             )
             job["last_state"] = state
             job["document_origin"] = self._document_origin(
@@ -1593,6 +1604,8 @@ class CadOrchestrator:
         )
         normalized = validate_save_or_export_payload(payload, state)
         operation = normalized["operation"]
+        if operation in ("save", "export", "batch_export"):
+            self._file_write_identity(job, state)
         target_document = self._document_label(job)
         risk = "write"
         if operation == "save":
@@ -3288,9 +3301,20 @@ class CadOrchestrator:
                     "JOB_DOCUMENT_READ_ONLY: close_all is refused because this "
                     "targetless job is bound to a pre-existing user document."
                 )
-            payload, assessed_state, risk, summary = (
-                self._assess_save_or_export(job, payload)
-            )
+            try:
+                payload, assessed_state, risk, summary = (
+                    self._assess_save_or_export(job, payload)
+                )
+            except RuntimeError as exc:
+                code, _, message = str(exc).partition(": ")
+                if code not in {"ACTIVE_DOCUMENT_CHANGED", "EXECUTION_SERVICE_UPGRADE_REQUIRED",
+                                "DOCUMENT_IDENTITY_UNVERIFIED"}:
+                    raise
+                error = {"code": code, "message": message}
+                self._record_failure(job, kind="save_or_export", phase="preflight", error=error,
+                                     execution_status="failed", verification_status_value="not_run",
+                                     recovery_status=job.get("recovery_status", "not_needed"))
+                return envelope(status="failed", job_id=job_id, error=error, **self._job_metadata(job))
 
             if risk in ("destructive", "overwrite", "save_as", "batch"):
                 return self._queue_confirmation(
@@ -3301,6 +3325,37 @@ class CadOrchestrator:
             return self._execute_save_or_export(
                 job, payload, risk, verified_state=assessed_state
             )
+
+    def _file_write_identity(self, job, state):
+        """Bind the source instance and require an execution-side write guard."""
+        inventory = backend.documents()
+        if inventory.get("file_write_identity_guard") is not True:
+            raise RuntimeError(
+                "EXECUTION_SERVICE_UPGRADE_REQUIRED: the execution service must support "
+                "atomic source-document identity checks before saving or exporting."
+            )
+        active = inventory.get("active_document") or {}
+        expected = job.get("expected_document") or {}
+        actual_state = self._inventory_state(inventory)
+        source_id = (expected.get("document_id")
+                     or (job.get("created_document_identity") or {}).get("document_id"))
+        if not source_id:
+            raise RuntimeError(
+                "DOCUMENT_IDENTITY_UNVERIFIED: start a new job to bind the source instance "
+                "before saving or exporting."
+            )
+        if (not active.get("document_id") or not same_document(expected, actual_state)
+                or not same_document(self._identity(state), actual_state)
+                or (source_id and source_id != active["document_id"])):
+            raise RuntimeError("ACTIVE_DOCUMENT_CHANGED: file-write source no longer matches the job.")
+        source = {**self._identity(state), "document_id": active["document_id"]}
+        job["expected_document"] = source
+        job["file_write_identity_evidence"] = {"before": inventory}
+        job_store.save(job)
+        return {"expected_document_id": source["document_id"],
+                "expected_title": source["title"] or "",
+                "expected_path": source["path"] or "",
+                "expected_type": source["type"] or ""}
 
     def _execute_save_or_export(self, job, payload, risk, verified_state=None):
         # Like the assessment, execution consumes only identity fields off `state` (the backup
@@ -3317,6 +3372,22 @@ class CadOrchestrator:
             )
         operation = payload["operation"]
         backup_path = None
+        source_guard = {}
+        if operation in ("save", "export", "batch_export"):
+            try:
+                source_guard = self._file_write_identity(job, state)
+            except Exception as exc:
+                code, _, message = str(exc).partition(": ")
+                error = {"code": code if message else "DOCUMENT_INVENTORY_UNAVAILABLE",
+                         "message": message or str(exc)}
+                self._record_failure(
+                    job, kind="save_or_export", phase="preflight", error=error,
+                    execution_status="failed", verification_status_value="not_run",
+                    recovery_status=job.get("recovery_status", "not_needed"),
+                )
+                return envelope(status="failed", risk=risk, job_id=job["job_id"],
+                                target_document=self._target(state), error=error,
+                                **self._job_metadata(job))
         if operation == "save" or (
             operation == "close" and payload.get("save_before_close")
         ):
@@ -3324,7 +3395,7 @@ class CadOrchestrator:
 
         if operation == "save":
             response = backend.call(
-                "save_document", {"file_path": payload.get("file_path", "")}
+                "save_document", {"file_path": payload.get("file_path", ""), **source_guard}
             )
         elif operation == "export":
             response = backend.call(
@@ -3332,6 +3403,7 @@ class CadOrchestrator:
                 {
                     "format": payload.get("format", ""),
                     "file_path": payload.get("file_path", ""),
+                    **source_guard,
                 },
             )
         elif operation == "batch_export":
@@ -3340,11 +3412,15 @@ class CadOrchestrator:
                 {
                     "file_path_base": payload.get("file_path", ""),
                     "formats_json": payload.get("formats_json", "[]"),
+                    **source_guard,
                 },
             )
         else:
+            closing_identity = self._identity(state)
+            if (job.get("expected_document") or {}).get("document_id"):
+                closing_identity["document_id"] = job["expected_document"]["document_id"]
             response = self._close_document(
-                self._identity(state),
+                closing_identity,
                 save=payload.get("save_before_close", False),
                 close_all=payload.get("close_all", False),
             )
@@ -3422,7 +3498,9 @@ class CadOrchestrator:
         else:
             try:
                 after, verification = self._post_verify(
-                    job, update_identity=(operation == "save")
+                    job, update_identity=(operation == "save"),
+                    saved_path=(payload.get("file_path") or state.get("activeDocumentPath"))
+                    if operation == "save" else None,
                 )
             except Exception as exc:  # noqa: BLE001
                 # save/export is not wrapped in an undo scope, so there is no transaction to
@@ -3577,7 +3655,7 @@ class CadOrchestrator:
         return same_document(stamp.get("identity") or {}, state)
 
     def _post_verify(
-        self, job, update_identity=False, reuse_deep_checks=False, verified=None
+        self, job, update_identity=False, reuse_deep_checks=False, verified=None, saved_path=None
     ):
         # SPEED (#6): this read is used for exactly three things — the identity gate
         # (same_document against the job's expected document), the document type that selects
@@ -3600,10 +3678,25 @@ class CadOrchestrator:
         identity_match = True
         identity_error = None
         if update_identity:
-            # Binding is explicit: only an operation that creates its own document passes
-            # update_identity=True. An empty expected_document no longer auto-adopts whatever
-            # document happens to be active (see _require_bound_job).
-            job["expected_document"] = self._identity(state)
+            # Save As may rename this instance; a path match cannot authorize adopting another.
+            expected_id = (job.get("expected_document") or {}).get("document_id")
+            try:
+                inventory = backend.documents()
+                job.setdefault("file_write_identity_evidence", {})["after"] = inventory
+                active = inventory.get("active_document") or {}
+                identity_match = bool(
+                    expected_id and active.get("document_id") == expected_id
+                    and same_document(self._identity(state), self._inventory_state(inventory))
+                    and (not saved_path or normalize_path(active.get("path") or "")
+                         == normalize_path(str(saved_path)))
+                )
+            except Exception as exc:
+                identity_match = False
+                job.setdefault("file_write_identity_evidence", {})["after_error"] = str(exc)
+            if identity_match:
+                job["expected_document"] = {**self._identity(state), "document_id": expected_id}
+            else:
+                identity_error = "ACTIVE_DOCUMENT_CHANGED_DURING_OPERATION: saved source instance/path was not preserved."
         elif not same_document(job["expected_document"], state):
             identity_match = False
             identity_error = (
@@ -3611,6 +3704,18 @@ class CadOrchestrator:
                 f"'{job['expected_document'].get('path') or job['expected_document'].get('title')}', "
                 f"got '{self._target(state)}'"
             )
+        if not update_identity and identity_match and (job.get("expected_document") or {}).get("document_id"):
+            try:
+                inventory = backend.documents()
+                expected_id = job["expected_document"]["document_id"]
+                identity_match = bool(
+                    (inventory.get("active_document") or {}).get("document_id") == expected_id
+                    and same_document(self._identity(state), self._inventory_state(inventory))
+                )
+            except Exception:
+                identity_match = False
+            if not identity_match:
+                identity_error = "ACTIVE_DOCUMENT_CHANGED_DURING_OPERATION: bound document instance changed."
         job["last_state"] = state
         job_store.save(job)
 
@@ -3765,10 +3870,28 @@ class CadOrchestrator:
             if close_report is None:
                 # Memory hygiene, AFTER the verdict exists: SolidWorks holds every open
                 # document in this one process, so a finished job's own saved document gets
-                # closed. Nothing here can change the completed status — a refused or failed
-                # close is reported, not raised (STANDING RULE from the user).
+                # closed. Ordinary cleanup failures preserve the verdict (STANDING RULE);
+                # target identity drift instead invalidates verification below.
                 close_report = self._autoclose_job_document(
                     job, state, bool(keep_open)
+                )
+            if (close_report.get("close_error") or {}).get("code") == "ACTIVE_DOCUMENT_CHANGED":
+                # A changed target invalidates the verdict, rather than merely failing cleanup.
+                error = close_report["close_error"]
+                verification = {**verification, "all_completed": False, "identity_match": False}
+                job["status"] = "active"
+                job.pop("finished_at", None)
+                job.pop("verification_stamp", None)
+                self._record_failure(
+                    job, kind="finish_job", phase="verification", error=error,
+                    execution_status="completed", verification_status_value="failed",
+                    recovery_status="recovery_unverified",
+                )
+                return envelope(
+                    status="verification_failed", job_id=job_id,
+                    target_document=self._target(state), partial_state=state,
+                    verification=verification, error=error, **close_report,
+                    **self._job_metadata(job),
                 )
             close_fields = {
                 "closed_document": close_report.get("closed_document"),

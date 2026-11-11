@@ -53,6 +53,40 @@ namespace SolidworksExecution.Services
             return entry.Item2;
         }
 
+        // A Python-side identity probe and the following tool request are separate STA
+        // operations. A document can switch without a state-version change between them.
+        // Bind file writes to the captured COM document inside the same serialized call.
+        private ExecutionResponse CheckFileWriteDocument(
+            ToolRequest request, JObject parameters, IModelDoc2 document, string operation)
+        {
+            string expectedId = parameters?.Value<string>("expected_document_id") ?? string.Empty;
+            string expectedTitle = parameters?.Value<string>("expected_title") ?? string.Empty;
+            string expectedPath = parameters?.Value<string>("expected_path") ?? string.Empty;
+            string expectedType = parameters?.Value<string>("expected_type") ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(expectedId))
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "EXPECTED_DOCUMENT_REQUIRED",
+                    $"{operation} requires the expected stable source document ID; refresh the document inventory before writing.");
+
+            string actualId = StableDocumentId(document);
+            string actualTitle = document.GetTitle() ?? string.Empty;
+            string actualPath = document.GetPathName() ?? string.Empty;
+            string actualType = DocumentTypeName(document);
+            bool mismatch =
+                (!string.IsNullOrEmpty(expectedId) && expectedId != actualId) ||
+                (!string.IsNullOrEmpty(expectedTitle) &&
+                 !string.Equals(expectedTitle, actualTitle, StringComparison.OrdinalIgnoreCase)) ||
+                (parameters?["expected_path"] != null &&
+                 !string.Equals(expectedPath, actualPath, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrEmpty(expectedType) &&
+                 !string.Equals(expectedType, actualType, StringComparison.OrdinalIgnoreCase));
+            return mismatch
+                ? BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "ACTIVE_DOCUMENT_CHANGED",
+                    $"Refusing to {operation} '{(string.IsNullOrEmpty(actualPath) ? actualTitle : actualPath)}' because its source document identity no longer matches the approved document.")
+                : null;
+        }
+
         // Pure inventory: attach to an existing instance only, without visibility writes,
         // activation, selection, rebuild or feature-tree traversal. Called on StaExecutor.
         public Dictionary<string, object> GetOpenDocumentsInfo()
@@ -93,6 +127,7 @@ namespace SolidworksExecution.Services
             return new Dictionary<string, object>
             {
                 ["stateVersion"] = _guard.GetCurrentStateVersion(),
+                ["file_write_identity_guard"] = true,
                 ["documents"] = documents,
                 ["active_document"] = activeInfo,
                 ["undo_scope_active"] = scopeOwnerOpen,
@@ -1219,6 +1254,9 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
+                var identityError = CheckFileWriteDocument(request, p, modelDoc, "save");
+                if (identityError != null) return identityError;
+
                 int saveErrors = 0, saveWarnings = 0;
                 bool success;
 
@@ -1256,6 +1294,7 @@ namespace SolidworksExecution.Services
                     Status = "COMPLETED",
                     Verified = true,
                     StateVersion = _guard.GetCurrentStateVersion(),
+                    ResultGeometry = new { source_document_id = StableDocumentId(modelDoc) },
                     CadState = new CadState
                     {
                         StateVersion = _guard.GetCurrentStateVersion(),
@@ -1313,6 +1352,9 @@ namespace SolidworksExecution.Services
                 if (modelDoc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+
+                var identityError = CheckFileWriteDocument(request, p, modelDoc, "export");
+                if (identityError != null) return identityError;
 
                 bool isDrawing = modelDoc is IDrawingDoc;
 
@@ -1428,6 +1470,9 @@ namespace SolidworksExecution.Services
                 if (modelDoc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+
+                var identityError = CheckFileWriteDocument(request, p, modelDoc, "batch export");
+                if (identityError != null) return identityError;
 
                 bool isDrawing = modelDoc is IDrawingDoc;
 

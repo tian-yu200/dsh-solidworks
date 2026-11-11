@@ -52,7 +52,8 @@ class FakeBackend:
                  "title": s.get("activeDocument"), "path": s.get("activeDocumentPath") or "",
                  "type": s.get("documentType"), "isDirty": bool(s.get("isDirty")),
                  "updateStamp": s.get("updateStamp", 0)} for s in rows]
-        return {"documents": docs, "active_document": docs[-1] if docs else None,
+        return {"file_write_identity_guard": True,
+                "documents": docs, "active_document": docs[-1] if docs else None,
                 "undo_scope_active": self._undo_state is not None}
 
     def _material_failure_code(self, name, library):
@@ -183,6 +184,24 @@ class FakeBackend:
             if response is not None:
                 return response
 
+        if tool in {"save_document", "export_document", "batch_export"}:
+            expected = {key: params.get(key) or "" for key in (
+                "expected_document_id", "expected_title", "expected_path", "expected_type")}
+            if not expected["expected_document_id"]:
+                return {"status": "FAILED", "cadState": copy.deepcopy(self.state),
+                        "error": {"code": "EXPECTED_DOCUMENT_REQUIRED",
+                                  "message": "Expected source document identity is required."}}
+            current = self.state or {}
+            actual = {"expected_document_id": current.get("documentId", "existing-0"),
+                      "expected_title": current.get("activeDocument", ""),
+                      "expected_path": current.get("activeDocumentPath", ""),
+                      "expected_type": current.get("documentType", "")}
+            if any(key in params and str(value).casefold() != str(actual[key]).casefold()
+                   for key, value in expected.items()):
+                return {"status": "FAILED", "cadState": copy.deepcopy(self.state),
+                        "error": {"code": "ACTIVE_DOCUMENT_CHANGED",
+                                  "message": "Refusing to write a different document."}}
+
         if tool == "set_part_material":
             rejected = self._material_rejection(params)
             if rejected is not None:
@@ -218,11 +237,13 @@ class FakeBackend:
             expected_path = params.get("expected_path", "")
             expected_title = params.get("expected_title", "")
             expected_type = params.get("expected_type", "")
+            expected_id = params.get("expected_document_id", "")
             active_path = (self.state or {}).get("activeDocumentPath", "")
             active_title = (self.state or {}).get("activeDocument", "")
             active_type = (self.state or {}).get("documentType", "")
             identity_mismatch = (
-                (expected_path and expected_path.lower() != active_path.lower())
+                (expected_id and expected_id != (self.state or {}).get("documentId", "existing-0"))
+                or (expected_path and expected_path.lower() != active_path.lower())
                 or (
                     not expected_path
                     and expected_title
@@ -388,7 +409,7 @@ def cad_env(tmp_path, monkeypatch):
 
     orchestrator = orchestrator_module.CadOrchestrator()
     job, token = store.create(
-        "job-1", "test CAD job", orchestrator._identity(state)
+        "job-1", "test CAD job", {**orchestrator._identity(state), "document_id": "existing-0"}
     )
     job["last_state"] = dict(state)
     job["document_write_allowed"] = True  # fixture models an explicitly targeted document
