@@ -466,3 +466,13 @@ def test_policy_plugin_behaviour_tests_pass():
     )
     assert result.returncode == 0, (
         "node --test failed:\n%s\n%s" % (result.stdout, result.stderr))
+
+
+def test_main_workflow_doc_lists_the_twelve_tools():
+    # Review 2026-11-13: the 79 KB main doc still said "9 个高层工具" after the surface grew to 12.
+    with open(os.path.join(REPO_ROOT, "SolidWorksAiAssistant用户对话工作流.md"), encoding="utf-8") as fh:
+        text = fh.read()
+    count = re.search(r"-> (\d+) 个高层 mcp__solidworks__ 工具", text)
+    assert count and int(count.group(1)) == len(EXPECTED_TOOLS), SURFACE_DRIFT_HINT
+    listed = text.split("DSH 模型只能调用：", 1)[1].split("\n\n")[1]
+    assert set(re.findall(r"`([a-z_]+)`", listed)) == EXPECTED_TOOLS, SURFACE_DRIFT_HINT

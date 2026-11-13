@@ -16,7 +16,7 @@ Undo、工程图和验证经验，但运行链路改为：
 ```text
 DeepSeek Harness
     -> solidworks-cad preset 与 policy
-    -> 9 个高层 mcp__solidworks__ 工具
+    -> 12 个高层 mcp__solidworks__ 工具
     -> Python 任务编排、文档身份锁、备份、确认与验证
     -> SolidPilot 编译器和 C# 执行服务
     -> SolidWorks COM
@@ -26,10 +26,11 @@ DSH 模型只能调用：
 
 `start_job`、`inspect_state`、`submit_feature_graph`、
 `apply_document_edits`、`drawing_workflow`、`save_or_export`、
-`request_confirmation`、`confirm_action`、`finish_job`。
+`request_confirmation`、`confirm_action`、`cancel_action`、`finish_job`、
+`read_drawing_text`、`read_drawing_region`。
 
 本文后续的 Taskpane、`CadPlan`、Planner 和 Provider 细节仍用于理解原实现。
-它们不应被误写成 DSH 九工具链的实际组件。DSH 的当前事实源是：
+它们不应被误写成 DSH 十二工具链的实际组件。DSH 的当前事实源是：
 
 - `D:\dsh-solidwork\mcp-server-solidworks-main\adapters\dsh\server.py`
 - `D:\dsh-solidwork\mcp-server-solidworks-main\adapters\dsh\orchestrator.py`

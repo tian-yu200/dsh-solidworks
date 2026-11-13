@@ -10,7 +10,7 @@ from models import utc_now
 
 
 def _minimal_graph():
-    return {"units": "meters", "nodes": [{"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02}]}
+    return {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [{"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02}]}
 
 
 def _edit(tool, **params):
@@ -1188,7 +1188,9 @@ def test_finish_job_reuses_unchanged_post_verify(cad_env, tmp_path):
     assert finished["closed_document"]["path"] == str(tmp_path / "out.SLDPRT")
     assert finished["document_left_open"] is None
     assert finished["verification"]["all_completed"] is True
-    assert finished["trust_level"] == "verified"
+    # Every check passed, but a graph without a measured dimension ledger caps the verdict.
+    assert finished["trust_level"] == "built_unverified"
+    assert finished["verification_gaps"] == ["LEDGER_ABSENT"]
 
 
 def test_finish_job_reverifies_when_state_version_advanced(cad_env, tmp_path):
@@ -2091,9 +2093,10 @@ def test_finish_job_reports_a_close_failure_without_failing_the_job(unbound_env,
 
     finished = env.orchestrator.finish_job(env.job_id, env.token)
 
-    # The CAD work is verified: a cleanup failure must not change the verdict.
+    # A cleanup failure must not change the verdict: the only gap stays the absent ledger.
     assert finished["status"] == "completed", finished
-    assert finished["trust_level"] == "verified"
+    assert finished["trust_level"] == "built_unverified"
+    assert finished["verification_gaps"] == ["LEDGER_ABSENT"]
     assert finished["verification_status"] == "passed"
     assert finished["closed_document"] is None
     assert finished["document_left_open"]["reason"] == "close_failed"
@@ -2550,7 +2553,7 @@ def test_fresh_graph_can_save_and_finish(cad_env, tmp_path, keep_open):
 # was finished without it, unsaved) --------------------------------------------------------------
 
 def _box_and_fillet():
-    return {"units": "meters", "nodes": [
+    return {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02},
         {"id": "r3", "type": "fillet", "radius": .003, "edges": [{"near": [.01, .01, 0]}]},
     ]}
@@ -2623,7 +2626,7 @@ def test_sketch_fillets_count_as_planned_and_built_fillets(cad_env):
     # 2026-11-09: a repair that moves R10 corners from a fillet node into the sketch must not leave
     # PLANNED_FEATURES_MISSING behind (the bench scores that warning as a failure).
     line = lambda a, b, c, d: {"kind": "line", "x1": a, "y1": b, "x2": c, "y2": d}
-    graph = {"units": "meters", "nodes": [
+    graph = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "s", "type": "sketch", "ref": {"datum": "front"}, "profile": [
             line(0, 0, .04, 0), {"kind": "fillet", "radius": .005}, line(.04, 0, .04, .04),
             {"kind": "fillet", "radius": .005}, line(.04, .04, 0, .04), line(0, .04, 0, 0)]},

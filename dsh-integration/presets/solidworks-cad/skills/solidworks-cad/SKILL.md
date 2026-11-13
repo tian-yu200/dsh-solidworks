@@ -339,11 +339,11 @@ and nonempty requested outputs.
 
 Use the returned trust level accurately:
 
-- `verified`: objective final verification passed.
+- `verified`: objective final verification passed with no warning, measuring at least one `dimension_ledger` dimension.
 - `drawing_consistent`: drawing-direction evidence agrees without a reference
   solid comparison.
-- `built_unverified`: construction succeeded but required objective evidence was
-  unavailable.
+- `built_unverified`: construction succeeded but some objective evidence was unavailable
+  or disagreed; `finish_job` names each one in `verification_gaps` (report them).
 - `unverified`: do not claim completion as verified.
 
 `finish_job` is mandatory for a completed write workflow.

@@ -34,6 +34,7 @@ sweep-path sketches are open by design and never checked.
 """
 
 import math
+import re
 import traceback
 
 from . import contours
@@ -67,6 +68,18 @@ def canonical_sketch_frame(ref):
         "right": ([d, 0, 0], [0, 0, -1], [0, 1, 0]),
     }[ref.get("datum", "top")]
     return {"origin": origin, "xdir": x, "ydir": y}
+
+# schema_version was required by the contract but never checked, so a graph written for another
+# version went on to fail as a confusing parameter error (review 2026-11-12, F-07). Every draft up
+# to the current one is accepted as before; anything else is rejected before execution.
+CURRENT_SCHEMA_VERSION = "0.8.0-draft"
+_SCHEMA_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)-draft(?:-ir-exp)?$")
+
+
+def supported_schema_version(version):
+    match = _SCHEMA_VERSION.match(version) if isinstance(version, str) else None
+    return bool(match) and tuple(int(g) for g in match.groups()) <= (0, 8, 0)
+
 
 DATUMS = frozenset(("front", "top", "right"))
 # Assembly sub-vocabulary (v0.6.0 — Phase B, ADR-047): component + mate. An assembly graph is
@@ -471,6 +484,9 @@ def _validate(graph):
 
     if graph.get("units") != "meters":
         errors.append("units must be 'meters' (got %r)." % graph.get("units"))
+    if not supported_schema_version(graph.get("schema_version")):
+        errors.append("schema_version %r is not a version this compiler implements: write %r."
+                      % (graph.get("schema_version"), CURRENT_SCHEMA_VERSION))
 
     nodes = graph.get("nodes")
     if not isinstance(nodes, list) or len(nodes) == 0:

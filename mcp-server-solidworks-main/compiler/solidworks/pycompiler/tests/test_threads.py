@@ -130,7 +130,7 @@ def _fresh_analyze_memo():
 
 
 def _graph(nodes, **extra):
-    g = {"units": "meters", "nodes": nodes}
+    g = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": nodes}
     g.update(extra)
     return g
 
@@ -319,7 +319,7 @@ def test_lowercase_class_is_rejected_as_an_external_thread_class():
 
 
 def test_lowercase_class_is_rejected_on_a_cosmetic_thread_node():
-    g = {"units": "meters", "nodes": [
+    g = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "n1", "type": "box", "ref": {"datum": "top"},
          "width": 0.05, "depth": 0.05, "height": 0.02},
         {"id": "n2", "type": "hole",

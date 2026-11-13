@@ -88,7 +88,7 @@ def test_views_need_a_part_or_assembly(tmp_path, monkeypatch, cad_env):
 
 
 def _graph():
-    return json.dumps({"units": "meters", "expect": {"bbox_mm": [20, 20, 20]},
+    return json.dumps({"schema_version": "0.8.0-draft", "units": "meters", "expect": {"bbox_mm": [20, 20, 20]},
                        "nodes": [{"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02}]})
 
 

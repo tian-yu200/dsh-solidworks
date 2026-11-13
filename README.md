@@ -24,9 +24,9 @@
 1. **发图**：在 DSH 里发一张图纸图片，说"建模"。
 2. **读图**：模型先直接看原图。小字看不清时，用 `read_drawing_text`（Windows 内置 OCR，整张图扫描一次）和 `read_drawing_region`（一次调用批量裁切、放大多个视图）辅助。尺寸分四类：图上明示、可唯一推导、用户给值、真正未知。
 3. **一轮提问与批准**：读图结论和建模计划写在消息正文里。模型只就真正未知的值提问，每个问题附一个推荐值，并和计划批准合并成一轮。
-4. **建模**：批准后提交一张完整的 Feature Graph，也就是 CAD 中立的特征意图。确定性编译器（不含 LLM）把它转换成 SolidWorks 操作，在 Undo 事务内逐个节点构建。
+4. **建模**：批准后提交一张完整的 Feature Graph，也就是 CAD 中立的特征意图。确定性编译器（不含 LLM）把它转换成 SolidWorks 操作，在一个 Undo 作用域内逐个节点构建：整次构建合成一条撤销记录，失败时单步撤销。
 5. **自查**：新零件必须带上批准方案中的包络尺寸，体积和特征数可选。建完后按实测结果比对，每个轴的容差为 max(1 mm, 2%)。不符时报 `PLAN_MISMATCH`，零件被丢弃，这次失败计入修复预算。
-6. **收尾**：`finish_job` 做最终的客观验证。`verification_failed`、`partial`、`rollback_failed` 都不算成功交付。
+6. **收尾**：`finish_job` 做最终的客观验证。`verification_failed`、`partial`、`rollback_failed` 都不算成功交付。只要还有没核实的项（体积不符、包络没读到、计划特征没建全、新零件没保存、尺寸表不符或测不到），或者特征图没带可测的尺寸表（`dimension_ledger`），结果最高只给 `built_unverified`，原因列在 `verification_gaps` 里。
 
 图解版工作流见 [`docs/workflow.html`](docs/workflow.html)，下载后用浏览器打开。
 
@@ -93,7 +93,7 @@ DeepSeek Harness（solidworks-cad 预设 + policy 插件）
 - 任务级 `job_id` 与私密 `job_token`。
 - 活动文档身份锁：用户切换文档后，阻止继续写入。
 - 现有文件在首次写入前备份。
-- SolidWorks Undo 事务、失败回滚和回滚后验证。撤销范围按文档身份跟踪，所属文档关闭后自动释放。
+- SolidWorks Undo 作用域：一次构建合成一条撤销记录，失败时单步撤销，撤销后重建验证。撤销范围按文档身份跟踪，所属文档关闭后自动释放。
 - 调用超时后报告"结果未知，先读状态再重试"，不会盲目重做。
 - Feature Graph 复用现有的确定性编译器，长度单位为米，角度单位为弧度。节点类型：
   - `box`、`sketch`（矩形、圆、线、弧、椭圆、样条、键槽、圆角矩形等轮廓）、`extrude`；
@@ -225,7 +225,8 @@ node --test "dsh-integration/plugins/solidworks-policy/test/*.test.mjs" "dsh-int
 ## 已知限制
 
 - 输入是图纸**图片**（PNG、JPG 等位图）或 **PDF**。PDF 按页渲染成图片再读，矢量线条和文字层不当作尺寸来源；还不能直接读取 DXF/DWG。
-- 方案自查只比对包络尺寸和体积，还没有做到逐个关键尺寸比对。
+- 逐个关键尺寸的比对依赖模型在特征图里写的尺寸表（`dimension_ledger`）；没写时只比对包络和体积，结果最高为 `built_unverified`。尺寸表和读图出自同一个模型，读图时读错的尺寸，它查不出来。
+- 失败回滚是 SolidWorks 的单步撤销，不是事务。中途若有操作自带撤销记录，一步撤不干净，这时报告 `rollback_failed` 或 `recovery_unverified`。新建的零件失败时直接关闭丢弃，不靠撤销。
 - 修改已有零件失败时，SolidWorks 的撤销能否真正恢复原状还没有验证。这种情况会报告为 `recovery_unverified`，不会自动重试。
 - 实测数据来自作者本机的单次运行，还没有整理成可复跑的基准集。
 - 只在 SolidWorks 2025（33.0）上实测过。

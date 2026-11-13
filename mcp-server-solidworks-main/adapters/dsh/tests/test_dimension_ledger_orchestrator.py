@@ -5,6 +5,7 @@ import pytest
 
 def _graph(ledger):
     return {
+        "schema_version": "0.8.0-draft",
         "units": "meters",
         "nodes": [{"id": "base", "type": "box", "width": .02, "depth": .02, "height": .02}],
         "dimension_ledger": ledger,
@@ -63,7 +64,7 @@ def test_ledger_warnings_are_returned_after_commit_without_rollback(cad_env):
     ]
 
 
-def test_plane_distance_reads_edges_and_commits_as_a_warning_only_check(cad_env):
+def _plane_distance_reads(cad_env):
     def reads(tool, params):
         if tool != "analyze_model":
             return None
@@ -88,11 +89,18 @@ def test_plane_distance_reads_edges_and_commits_as_a_warning_only_check(cad_env)
         return {"status": "COMPLETED", "stateVersion": state["stateVersion"],
                 "cadState": state, "error": None}
 
-    cad_env.backend.call_handler = reads
-    graph = _graph([_dimension("D-thickness", 20, {
-        "kind": "plane_distance", "normal": [1, 0, 0],
-        "point_a": [0, .01, .01], "point_b": [.02, .01, .01],
-    })])
+    return reads
+
+
+_THICKNESS = _dimension("D-thickness", 20, {
+    "kind": "plane_distance", "normal": [1, 0, 0],
+    "point_a": [0, .01, .01], "point_b": [.02, .01, .01],
+})
+
+
+def test_plane_distance_reads_edges_and_commits_as_a_warning_only_check(cad_env):
+    cad_env.backend.call_handler = _plane_distance_reads(cad_env)
+    graph = _graph([_THICKNESS])
 
     result = cad_env.orchestrator.feature_graph(
         cad_env.job["job_id"], cad_env.token, json.dumps(graph), fresh_document=True,
@@ -155,7 +163,7 @@ def test_faces_readback_from_a_different_state_is_unmeasured(cad_env):
 def test_ledger_is_optional_and_adds_no_faces_read(cad_env):
     result = cad_env.orchestrator.feature_graph(
         cad_env.job["job_id"], cad_env.token,
-        json.dumps({"units": "meters", "nodes": [
+        json.dumps({"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
             {"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02},
         ]}),
         fresh_document=True,
@@ -166,3 +174,50 @@ def test_ledger_is_optional_and_adds_no_faces_read(cad_env):
     analyses = [params["analysis_type"] for name, params in cad_env.backend.calls
                 if name == "analyze_model"]
     assert analyses == ["geometry", "mass_properties"]
+
+
+def _build_save_finish(cad_env, tmp_path, graph):
+    built = cad_env.orchestrator.feature_graph(
+        cad_env.job["job_id"], cad_env.token, json.dumps(graph), fresh_document=True,
+    )
+    assert built["status"] == "completed", built
+    saved = cad_env.orchestrator.save_or_export(
+        cad_env.job["job_id"], cad_env.token, "save", file_path=str(tmp_path / "out.SLDPRT"),
+    )
+    assert saved["status"] == "completed", saved
+    finished = cad_env.orchestrator.finish_job(cad_env.job["job_id"], cad_env.token)
+    assert finished["status"] == "completed", finished
+    return finished
+
+
+def test_a_matching_measured_ledger_finishes_verified(cad_env, tmp_path):
+    cad_env.backend.call_handler = _plane_distance_reads(cad_env)
+
+    finished = _build_save_finish(cad_env, tmp_path, _graph([_THICKNESS]))
+
+    assert finished["trust_level"] == "verified"
+    assert "verification_gaps" not in finished
+
+
+def test_a_graph_without_a_ledger_finishes_built_unverified(cad_env, tmp_path):
+    # Review 2026-11-13: without a measured dimension only the envelope and volume were compared.
+    graph = _graph(None)
+    del graph["dimension_ledger"]
+
+    finished = _build_save_finish(cad_env, tmp_path, graph)
+
+    assert finished["trust_level"] == "built_unverified"
+    assert finished["verification_gaps"] == ["LEDGER_ABSENT"]
+    assert "LEDGER_ABSENT" in finished["trust_note"]
+
+
+def test_a_volume_mismatch_never_finishes_verified(cad_env, tmp_path):
+    # Review 2026-11-12 F-01: PLAN_VOLUME_MISMATCH used to leave the verdict at `verified`.
+    cad_env.backend.call_handler = _plane_distance_reads(cad_env)
+    graph = _graph([_THICKNESS])
+    graph["expect"] = {"bbox_mm": [20, 20, 20], "volume_mm3": 4000}
+
+    finished = _build_save_finish(cad_env, tmp_path, graph)
+
+    assert finished["trust_level"] == "built_unverified"
+    assert finished["verification_gaps"] == ["PLAN_VOLUME_MISMATCH"]

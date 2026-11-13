@@ -74,7 +74,7 @@ def test_non_executable_changes_do_not_admit_a_repair(cad_env, edit):
     submit(cad_env, GRAPH)
     replay = copy.deepcopy(GRAPH)
     if edit == "schema_version":
-        replay["schema_version"] = "different"
+        replay["schema_version"] = "0.8.0-draft"  # another supported version, same geometry
     elif edit == "unknown_field":
         replay["unused_extra"] = 42
     elif edit == "description":

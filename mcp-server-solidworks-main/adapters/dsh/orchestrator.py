@@ -569,6 +569,19 @@ class CadOrchestrator:
         return warnings
 
     @staticmethod
+    def _verification_gaps(job, warnings):
+        """What keeps a passed finish from `verified`. Every completeness warning means something
+        was not objectively confirmed: a volume mismatch, an unchecked envelope or missing planned
+        features used to come out `verified` (review 2026-11-12 F-01). Without a measured
+        dimension ledger only the envelope and volume were compared, so a built feature graph
+        also needs one measured ledger dimension (review 2026-11-13)."""
+        gaps = sorted({w["code"] for w in warnings if isinstance(w, dict) and w.get("code")})
+        built_graph = any(step.get("kind") == "feature_graph" for step in job.get("completed_steps") or [])
+        if built_graph and not job.get("dimension_ledger_measured"):
+            gaps.append("LEDGER_ABSENT")
+        return gaps
+
+    @staticmethod
     def _job_metadata(job):
         return {
             "execution_status": job.get("execution_status", "not_started"),
@@ -2408,6 +2421,11 @@ class CadOrchestrator:
         self._record_built_features(job, compiler, payload["graph"],
                                     fresh_document=payload["fresh_document"])
         job["dimension_ledger_warnings"] = ledger_warnings
+        ledger = payload["graph"].get("dimension_ledger")
+        job["dimension_ledger_measured"] = sum(
+            1 for item in ledger
+            if isinstance(item, dict) and item.get("source_kind") != "unknown" and isinstance(item.get("check"), dict)
+        ) if isinstance(ledger, list) else 0
         self._record_success(job, "feature_graph", "built_unverified")
         job.pop("previous_document_write_allowed", None)
         job_store.save(job)
@@ -3861,11 +3879,9 @@ class CadOrchestrator:
             job["execution_status"] = "completed"
             job["verification_status"] = "passed"
             job["recovery_status"] = "not_needed"
-            ledger_warning = any(
-                warning.get("code") in {"LEDGER_MISMATCH", "LEDGER_UNMEASURED"}
-                for warning in finish_warnings
-            )
-            job["trust_level"] = "built_unverified" if ledger_warning else "verified"
+            gaps = self._verification_gaps(job, finish_warnings)
+            job["trust_level"] = "built_unverified" if gaps else "verified"
+            job["verification_gaps"] = gaps
             job["error"] = None
             if close_report is None:
                 # Memory hygiene, AFTER the verdict exists: SolidWorks holds every open
@@ -3901,6 +3917,12 @@ class CadOrchestrator:
                 close_fields["close_error"] = close_report["close_error"]
             if finish_warnings:
                 close_fields["warnings"] = finish_warnings
+            if gaps:
+                close_fields["verification_gaps"] = gaps
+                close_fields["trust_note"] = (
+                    "trust_level=built_unverified：零件已建成，但这些项没有客观核实：%s。最终回复如实列出，"
+                    "不要说「已验证」。LEDGER_ABSENT 指特征图没有带可测的 dimension_ledger，只比对了包络和"
+                    "体积；它本身不是重建的理由。" % "、".join(gaps))
             job_store.save(job)
             return envelope(
                 status="completed",

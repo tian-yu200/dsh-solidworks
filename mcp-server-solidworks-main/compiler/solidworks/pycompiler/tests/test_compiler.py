@@ -2662,3 +2662,17 @@ def test_expect_counts_fillet_edges_and_sketch_fillets_like_a_plan_does():
 def test_expect_rejects_what_the_check_could_not_use(expect, fragment):
     errors = _expect_errors(expect)
     assert any(fragment in e for e in errors), errors
+
+
+def test_schema_version_must_be_one_the_compiler_implements():
+    # Review 2026-11-12 F-07: the required version was never checked at runtime.
+    from pycompiler.ir_schema import supported_schema_version, validate
+    box = {"id": "n1", "type": "box", "width": .02, "depth": .02, "height": .02}
+    for version in ("0.0.1-draft-ir-exp", "0.5.0-draft", "0.7.4-draft", "0.8.0-draft"):
+        assert supported_schema_version(version), version
+        assert validate({"schema_version": version, "units": "meters", "nodes": [box]}) == []
+    for version in (None, 8, "", "0.9.0", "0.9.0-draft", "1.0.0-draft", "different"):
+        assert not supported_schema_version(version), version
+    errors = validate({"schema_version": "0.9.0", "units": "meters", "nodes": [box]})
+    assert errors and "write '0.8.0-draft'" in errors[0]
+    assert validate({"units": "meters", "nodes": [box]})

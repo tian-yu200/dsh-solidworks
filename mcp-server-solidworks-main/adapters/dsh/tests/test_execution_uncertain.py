@@ -11,7 +11,7 @@ import pytest
 
 
 def _minimal_graph():
-    return {"units": "meters",
+    return {"schema_version": "0.8.0-draft", "units": "meters",
             "nodes": [{"id": "n1", "type": "box",
                        "width": .02, "depth": .02, "height": .02}]}
 

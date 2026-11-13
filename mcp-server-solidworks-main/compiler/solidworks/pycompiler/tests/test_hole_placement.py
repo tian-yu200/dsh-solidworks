@@ -128,7 +128,7 @@ def _plate_and_hole(at, diameter=0.0066, depth="through_all", extra=None):
             "diameter": diameter, "depth": depth}
     if extra:
         hole.update(extra)
-    return {"units": "meters",
+    return {"schema_version": "0.8.0-draft", "units": "meters",
             "nodes": [
                 {"id": "b1", "type": "box", "ref": {"datum": "top"},
                  "width": 0.060, "depth": 0.040, "height": 0.010},
@@ -172,7 +172,7 @@ def test_off_centre_hole_lands_on_the_requested_model_point(frame, at, face):
     if face[0]["normal"] == [0.0, 1.0, 0.0]:
         graph = _plate_and_hole(at)
     else:
-        graph = {"units": "meters", "nodes": [
+        graph = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
             {"id": "b1", "type": "box", "ref": {"datum": "top"},
              "width": 0.060, "depth": 0.040, "height": 0.010},
             {"id": "h1", "type": "hole",
@@ -272,7 +272,7 @@ def test_corner_holes_at_22mm_still_pass_on_a_60x40_face():
 def test_centred_hole_overlapping_an_off_centre_hole_is_rejected():
     # D2: a CENTRED hole (sketch origin) must join the overlap test too. The box is 60x40 mm, so
     # the sketch origin is the plate centre; an off-centre d10 hole 4 mm away overlaps it.
-    graph = {"units": "meters", "nodes": [
+    graph = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "b1", "type": "box", "ref": {"datum": "top"},
          "width": 0.060, "depth": 0.040, "height": 0.010},
         {"id": "h1", "type": "hole",
@@ -291,7 +291,7 @@ def test_centred_hole_overlapping_an_off_centre_hole_is_rejected():
 
 
 def test_two_overlapping_holes_on_the_same_face_are_rejected():
-    graph = {"units": "meters", "nodes": [
+    graph = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "b1", "type": "box", "ref": {"datum": "top"},
          "width": 0.060, "depth": 0.040, "height": 0.010},
         {"id": "h1", "type": "hole",
@@ -310,7 +310,7 @@ def test_two_overlapping_holes_on_the_same_face_are_rejected():
 
 
 def test_two_holes_far_apart_on_the_same_face_are_fine():
-    graph = {"units": "meters", "nodes": [
+    graph = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "b1", "type": "box", "ref": {"datum": "top"},
          "width": 0.060, "depth": 0.040, "height": 0.010},
         {"id": "h1", "type": "hole",
@@ -345,7 +345,7 @@ def test_two_holes_far_apart_on_the_same_face_are_fine():
 def test_structural_validation_rejects_bad_placement(ref, needle):
     base = {"node_face": {"node": "b1", "selector": "top"}}
     base.update(ref)
-    graph = {"units": "meters", "nodes": [
+    graph = {"schema_version": "0.8.0-draft", "units": "meters", "nodes": [
         {"id": "b1", "type": "box", "ref": {"datum": "top"},
          "width": 0.060, "depth": 0.040, "height": 0.010},
         {"id": "h1", "type": "hole", "ref": base,
