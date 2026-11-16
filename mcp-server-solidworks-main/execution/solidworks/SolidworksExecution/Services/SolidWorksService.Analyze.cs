@@ -1301,9 +1301,13 @@ namespace SolidworksExecution.Services
         // that calls it, so no existing key moves. This is the size check a drawing-vs-model round trip
         // needs ("is it 400 long?"), which faces cannot answer: a face's `point` is a mid-parameter,
         // not an endpoint, so extents had to be reconstructed from whichever faces happened to exist.
-        // Union of IBody2.GetBodyBox over the SAME solid-body enumeration the geometry/faces/bodies
-        // readers walk, so a multibody part reports the whole envelope and the counts stay comparable.
-        // Silent when there is nothing to report (no solid body, or every GetBodyBox threw): the scope
+        // Union over the SAME solid-body enumeration the geometry/faces/bodies readers walk, so a
+        // multibody part reports the whole envelope and the counts stay comparable.
+        // Extents come from IBody2.GetExtremePoint along ±X/±Y/±Z, which is exact. GetBodyBox is only
+        // a quick enclosing box: on fillets, splines and helices it overshoots (jiaotazuo read 157.57
+        // for an exact 157.0, a 30×80×120 shell read 34.5×93.67×120 — H24, 2026-11-16). It is kept
+        // only as the per-body fallback when an extreme-point call fails.
+        // Silent when there is nothing to report (no solid body, or every call threw): the scope
         // still completes with its historical keys rather than failing a read over an extents call.
         private static void AddBoundingBoxResults(IModelDoc2 modelDoc, List<string> results)
         {
@@ -1322,15 +1326,18 @@ namespace SolidworksExecution.Services
             {
                 var body = b as IBody2;
                 if (body == null) continue;
-                double[] box = null;
-                try
+                double[] box = ExactBodyBox(body);
+                if (box == null)
                 {
-                    // GetBodyBox: [0..2]=min xyz, [3..5]=max xyz, meters.
-                    object raw = body.GetBodyBox();
-                    box = raw as double[];
-                    if (box == null && raw is object[] oa) box = Array.ConvertAll(oa, o => (double)o);
+                    try
+                    {
+                        // GetBodyBox: [0..2]=min xyz, [3..5]=max xyz, meters.
+                        object raw = body.GetBodyBox();
+                        box = raw as double[];
+                        if (box == null && raw is object[] oa) box = Array.ConvertAll(oa, o => (double)o);
+                    }
+                    catch { }
                 }
-                catch { }
                 if (box == null || box.Length < 6) continue;
                 minX = Math.Min(minX, box[0]); minY = Math.Min(minY, box[1]); minZ = Math.Min(minZ, box[2]);
                 maxX = Math.Max(maxX, box[3]); maxY = Math.Max(maxY, box[4]); maxZ = Math.Max(maxZ, box[5]);
@@ -1341,6 +1348,32 @@ namespace SolidworksExecution.Services
             results.Add($"bbox_min=[{Num6(minX)},{Num6(minY)},{Num6(minZ)}]");
             results.Add($"bbox_max=[{Num6(maxX)},{Num6(maxY)},{Num6(maxZ)}]");
             results.Add($"bbox_size=[{Num6(maxX - minX)},{Num6(maxY - minY)},{Num6(maxZ - minZ)}]");
+        }
+
+        // [minX, minY, minZ, maxX, maxY, maxZ] in meters from the body's extreme points along the six
+        // axis directions, or null if any call fails (the caller then falls back to GetBodyBox).
+        private static double[] ExactBodyBox(IBody2 body)
+        {
+            var box = new double[6];
+            for (int axis = 0; axis < 3; axis++)
+            {
+                for (int side = 0; side < 2; side++)
+                {
+                    double sign = side == 0 ? -1.0 : 1.0;
+                    double x, y, z;
+                    try
+                    {
+                        if (!body.GetExtremePoint(axis == 0 ? sign : 0, axis == 1 ? sign : 0, axis == 2 ? sign : 0,
+                                                  out x, out y, out z))
+                            return null;
+                    }
+                    catch { return null; }
+                    double v = axis == 0 ? x : axis == 1 ? y : z;
+                    if (double.IsNaN(v) || double.IsInfinity(v)) return null;
+                    box[side * 3 + axis] = v;
+                }
+            }
+            return box;
         }
 
         // ------------------------------------------------------------------

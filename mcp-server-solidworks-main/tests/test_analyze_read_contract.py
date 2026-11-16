@@ -59,6 +59,18 @@ def test_bbox_is_documented_for_both_scopes_and_appended_last():
         assert any(line.startswith(token) for line in lines), token
 
 
+def test_bbox_is_exact_and_body_box_is_only_the_fallback():
+    """H24 (2026-11-16): GetBodyBox overshoots on fillets, splines and helices (jiaotazuo 157.57 for
+    an exact 157.0; a 30x80x120 shell read 34.5x93.67x120), and grading, expect.bbox_mm and the
+    dimension ledger all read this box. Extents must come from GetExtremePoint first."""
+    src = _service()
+    assert "body.GetExtremePoint(" in src
+    assert src.index("double[] box = ExactBodyBox(body);") < src.index("object raw = body.GetBodyBox();")
+    assert "if (box == null)" in src[src.index("double[] box = ExactBodyBox(body);"):src.index("object raw = body.GetBodyBox();")]
+    out = _contract()["analyze_model"]["output"]
+    assert "IBody2.GetExtremePoint" in out and "falling back" in out
+
+
 def test_face_kinds_are_documented_as_the_service_emits_them():
     out = _contract()["analyze_model"]["output"]
     assert "'cylinder' {origin, axis, radius}" in out
