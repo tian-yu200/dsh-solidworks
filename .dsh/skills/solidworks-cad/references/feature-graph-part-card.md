@@ -1,44 +1,38 @@
 # Feature Graph — common part card
 
 Default: card + mapping_part. Use sheet-metal/assembly maps; quickref/schema for gaps.
-Examples are grammar, not drawing evidence. If drawing is local, pass its path as
-drawing_path to start_job.
+Examples are grammar, not drawing evidence. Pass local drawing as drawing_path to start_job.
 
-Units: graph.units="meters"; all lengths m, all angles radians. Convert mm /1000.
-Each node needs unique id and type; order is dependency/feature-tree order.
-ref is an OBJECT, never a string. Node IDs are graph IDs, not runtime face indices.
-Omit graph.material when unspecified. Save a new working-directory file; no overwrite.
-A new part REQUIRES graph.expect from the approved plan: bbox_mm:[a,b,c] (envelope, MM,
-any order), volume_mm3?, features?:{"fillet":n,"chamfer":n}. Off-plan build: PLAN_MISMATCH.
-Optional dimension_ledger: optional drawing-dimension-to-node checks; format and checks in quickref (warnings only).
+Units: graph.units="meters"; lengths m, angles radians (/1000 from mm).
+Each node needs unique id and type in dependency order. ref is an OBJECT, never string.
+Node IDs are graph IDs, not face indices. Omit graph.material when unspecified.
+Save a new working-directory file; no overwrite.
+New part REQUIRES graph.expect from approved plan: bbox_mm:[a,b,c] (MM, any order),
+volume_mm3?, features?:{"fillet":n,"chamfer":n}. Off-plan build: PLAN_MISMATCH.
+dimension_ledger (exact keys; value/tolerance_mm/selector_tolerance_mm in mm; unknown->value:null,check:null):
+[{id,label,value,source_kind:"explicit"|"derived"|"user"|"unknown",view,node_ids:[id,...],check}].
+check: {kind:"bbox_extent",axis:"x"|"y"|"z",tolerance_mm?} | {kind:"cylinder",axis:[dx,dy,dz],through:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (through m-pt, value=dia mm) | {kind:"plane_distance",normal:[nx,ny,nz],point_a:[x,y,z],point_b:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (m-pts).
 
-Datum frames (sketch x,y; positive extrusion normal):
-front = +X,+Y; +Z. top = +X,-Z; +Y. right = -Z,+Y; +X.
-ref={"datum":"top"}; optional signed offset shifts along the normal.
-ref={"node_face":{"node":"base","selector":"top"},"position":"center"}
-selects a previous body's top face and its center. For off-center holes use
-position:"point", at:[x,y,z] in MODEL meters, on the selected face; do not use
-unverified face indices. Other face anchors require inspected geometry.
+Datum frames (sketch x,y; +extrude normal): front=+X,+Y;+Z. top=+X,-Z;+Y. right=-Z,+Y;+X.
+ref={"datum":"top",offset?:m}. ref={"node_face":{"node":"base","selector":"top"},"position":"center"}
+selects a body's top face center. Off-center holes: position:"point", at:[x,y,z] (MODEL m on face);
+no unverified face indices. Other face anchors require inspected geometry.
 
-Common nodes (required fields shown; consult schema for other end conditions):
+Common nodes (consult schema for other end conditions):
 - box: width, depth, height >0; optional datum ref (default top). Centered footprint.
-- sketch: ref plus profile array. rectangle {kind,width,height,cx?,cy?}; circle
-  {kind,diameter,cx?,cy?}; or lines {kind:"line",x1,y1,x2,y2} and arcs
-  {kind:"arc",cx,cy,x1,y1,x2,y2,dir:1|-1}, centre equidistant from both ends.
-  Round a sharp corner with {kind:"fillet",radius} placed between its two segments:
-  exact tangent arc, no edge anchor. Shared endpoints CLOSE the chain;
-  construction:true is scaffolding, not the solid contour.
-- extrude: sketch:"immediately_preceding_sketch_id", operation:"boss"|"cut",
-  depth positive (blind default). end:"through_all" for a through cut; end:"mid_plane"
-  uses depth as TOTAL thickness. reversed:true flips growth; it is not a plane offset.
-- hole: +Y (top) face only; diameter >0, depth:"through_all"|blind. Side bore:
-  circle sketch + extrude cut.
-- fillet: radius >0, edges:[{near:[x,y,z]}]. near is any MODEL-space point inside the
-  edge (a full circle: anywhere on it), never a shared vertex or arc center. Ambiguous
-  or absent anchors fail. Add every drawing fillet/chamfer; never silently omit one.
+- sketch: ref + profile array. rectangle {kind,width,height,cx?,cy?}; circle {kind,diameter,cx?,cy?};
+  lines {kind:"line",x1,y1,x2,y2} and arcs {kind:"arc",cx,cy,x1,y1,x2,y2,dir:1|-1} (center equidistant).
+  Corner round: {kind:"fillet",radius} between two segments (exact tangent arc, no edge anchor).
+  Shared endpoints CLOSE chain; construction:true is scaffolding, not solid contour.
+- extrude: sketch:"immediately_preceding_sketch_id", operation:"boss"|"cut", depth >0 (blind default).
+  end:"through_all" for through cut; end:"mid_plane" uses depth as TOTAL thickness.
+  reversed:true flips growth (not plane offset).
+- hole: +Y (top) face only; diameter >0, depth:"through_all"|blind. Side bore: circle sketch + extrude cut.
+- fillet: radius >0, edges:[{near:[x,y,z]}] (MODEL point inside edge; full circle: anywhere on it;
+  never shared vertex or arc center). Add every drawing fillet/chamfer; never silently omit one.
 
-Example (numbers are examples only): 50 mm cube, blind side pocket, top-center through
-hole, 1 mm round on the +X/+Y edge; submit_feature_graph(fresh_document=true).
+Example (grammar only): 50 mm cube, blind side pocket, top-center through hole, 1 mm round;
+submit_feature_graph(fresh_document=true).
 ```json
 {
   "schema_version":"0.8.0-draft","units":"meters",
@@ -57,33 +51,27 @@ Completed is not verified: compare readback and all views; report missing checks
 
 ## Execution recovery and L4
 
-Datum/offset defaults use the canonical axes above; face selection preserves model position.
-Recorded sketches keep measured explicit frames. The compiler checks orthonormal/coincident
-frames and maps coordinates/direction. A null cut retries the opposite direction; success
-reports result_geometry.direction_flipped=true, node/operation flags and DIRECTION_FLIPPED
-warnings. Check that feature's location, depth and direction in readback AND all three views.
+Datum/offset defaults use canonical axes above; face selection preserves model position.
+Recorded sketches keep measured explicit frames; compiler checks orthonormal/coincident frames.
+A null cut retries opposite direction; success reports result_geometry.direction_flipped=true and
+DIRECTION_FLIPPED warnings — verify location, depth and direction in readback AND all three views.
 
 Only discarded permits AUTOMATIC rebuilding: owned document absent, old documents unchanged,
-Undo released, job unbound.
-Report operation_target separately from active_document_after_recovery; never write the latter.
-Initial execution plus at most 2 repairs of one design is persisted across jobs. No reset, renumbering,
-identical replay or split graphs. Supply repair_evidence_json (error_code matching the last
-failure, cause, readback, change); the second repair needs new evidence.
+Undo released, job unbound. Report operation_target separately from active_document_after_recovery;
+never write the latter. Initial execution + at most 2 repairs of one design persists across jobs
+(no reset, renumbering, identical replay or split graphs). Supply repair_evidence_json
+(error_code matching last failure, cause, readback, change); second repair needs new evidence.
 
-The server locks node count and ordered (type, operation), material name/library, ALL
-non-placement dimensions/specifications and end types (blind/through_all/mid_plane/up_to),
-and each sketch's intrinsic shape, with 1e-9 m dimension tolerance. It allows placement anchors, reversed,
-ref (datum/face/signed offset), frame and ONE whole-sketch translation/rotation/mirror;
-node ids/names/descriptions may change. Do not change diameters, depths, radii, hole/thread
-specs, counts, spacing, angles, thickness, sketch lengths or omit features. Moving separate
-primitives independently is not a whole-sketch placement repair. After PLAN_MISMATCH only
-expect is locked: change dimensions/features until the graph builds the approved plan.
+Server locks node count, ordered (type, operation), material, ALL non-placement dimensions/specs,
+end types, and intrinsic sketch shape (1e-9 m tolerance). Allowed: placement anchors, reversed,
+ref (datum/face/signed offset), frame and ONE whole-sketch translation/rotation/mirror; node ids/names
+may change. Do not alter diameters, depths, radii, hole/thread specs, counts, spacing, angles,
+thickness, sketch lengths or omit features. Moving primitives independently is not a placement repair.
+After PLAN_MISMATCH only expect is locked: fix dimensions/features to match the approved plan.
 
-Inadmissible design/evidence, exhausted budget, context changes, in_flight or uncertain
-recovery returns pending_confirmation. Show the Chinese reason; request_confirmation/
-confirm_action asks the USER. Approval archives closed_by=user_override and starts a new
-first execution at count 0; it neither closes residual documents nor proves Undo restoration.
-A fresh-document graph needs no batch confirmation (plan approval authorizes it);
-an existing-document graph over 10 nodes does. Recovery needs at most ONE confirmation.
-Existing-document failures always report recovery_unverified and prohibit automatic retry;
-continuation also requires user confirmation. First save of the own part: no prompt.
+Inadmissible design/evidence, exhausted budget, context changes, in_flight or uncertain recovery
+returns pending_confirmation. Show Chinese reason; request_confirmation/confirm_action asks USER
+(archives closed_by=user_override, resets count to 0; neither closes residual docs nor proves Undo).
+Fresh-document graph needs no batch confirmation (plan approval authorizes it); existing-document >10
+nodes does. Recovery needs at most ONE confirmation. Existing-document failures report recovery_unverified
+and prohibit automatic retry. First save of own part: no prompt.

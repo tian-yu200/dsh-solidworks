@@ -510,3 +510,75 @@ def test_the_dsh_tool_requires_the_plan_envelope_on_a_new_part(cad_env):
     assert len(cad_env.backend.calls) == calls
     server = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
     assert "require_expect=True" in server
+
+
+def test_dead_inflight_chain_with_clean_inventory_does_not_block_next_drawing(cad_env):
+    # Findings H9: an aborted process leaves recovery_status='in_flight'; once SolidWorks is back
+    # at the chain's baseline inventory, a new job for another drawing must archive it cleanly.
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    with cad_env.store.recovery_chain() as ledger:
+        last = ledger["active"]["attempts"][-1]
+        last.update(recovery_status="in_flight", error_code=None, status=None, pid=99999999)
+    cad_env.backend.feature_graph_handler = None
+    other = copy.deepcopy(GRAPH)
+    other["nodes"][0]["profile"][0]["diameter"] = .05
+    job, token = cad_env.store.create("next-drawing", "another part", {})
+    built = submit(cad_env, other, "{}", job["job_id"], token)
+    assert built["status"] == "completed", built
+    with cad_env.store.recovery_chain() as ledger:
+        assert ledger["active"] is None
+        archived = ledger["history"][-2]
+        assert archived["closed_by"] == "new_job"
+        assert archived["attempts"][-1]["reconciled_from"] == "in_flight"
+        assert archived["attempts"][-1]["recovery_status"] == "discarded"
+
+
+def test_dead_inflight_chain_preserves_repair_budget_for_same_design(cad_env):
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    with cad_env.store.recovery_chain() as ledger:
+        last = ledger["active"]["attempts"][-1]
+        last.update(recovery_status="in_flight", error_code=None, status=None, pid=99999999)
+    cad_env.backend.feature_graph_handler = None
+    job, token = cad_env.store.create("same-drawing-retry", "retry same part", {})
+    uncertain_ev = json.dumps({
+        "error_code": "EXECUTION_UNCERTAIN",
+        "cause": "previous session terminated mid-build",
+        "readback": "inventory clean at baseline",
+        "change": "replay after process interruption",
+    })
+    repaired = submit(cad_env, GRAPH, uncertain_ev, job["job_id"], token)
+    assert repaired["status"] == "completed", repaired
+    assert repaired["repair_attempts_used"] == 1
+
+
+def test_dead_inflight_chain_with_leftover_document_still_requires_confirmation(cad_env, monkeypatch):
+    fail_graph(cad_env)
+    submit(cad_env, GRAPH)
+    with cad_env.store.recovery_chain() as ledger:
+        last = ledger["active"]["attempts"][-1]
+        last.update(recovery_status="in_flight", error_code=None, status=None, pid=99999999)
+    real_docs = cad_env.backend.documents
+
+    def dirty_inventory():
+        inv = copy.deepcopy(real_docs())
+        inv["documents"].append({
+            "document_id": "doc-stray-99",
+            "title": "零件99",
+            "path": "",
+            "type": "PART",
+            "dirty": True,
+            "update_stamp": 1,
+        })
+        return inv
+
+    monkeypatch.setattr(cad_env.backend, "documents", dirty_inventory)
+    other = copy.deepcopy(GRAPH)
+    other["nodes"][0]["profile"][0]["diameter"] = .05
+    job, token = cad_env.store.create("next-drawing", "another part", {})
+    pending = submit(cad_env, other, "{}", job["job_id"], token)
+    assert pending["status"] == "pending_confirmation"
+    with cad_env.store.recovery_chain() as ledger:
+        assert ledger["active"]["attempts"][-1]["recovery_status"] == "in_flight"
+

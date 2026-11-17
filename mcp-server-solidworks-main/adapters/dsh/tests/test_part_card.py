@@ -51,3 +51,62 @@ def test_registered_tool_schema_and_complete_card_envelope():
     payload = server.orchestrator.inspect_state(scope="reference", reference_topic="feature_graph_part_card")
     assert len(json.dumps(payload, ensure_ascii=False)) < 7000
     assert payload["verification"]["page"]["has_more"] is False
+
+
+def test_dimension_ledger_contract_is_explicit_in_part_card_and_quickref():
+    import dimension_ledger
+
+    card = references.read_reference("feature_graph_part_card")
+    quickref = references.read_reference("feature_graph_quickref")
+    for doc_name, text in (("part_card", card), ("quickref", quickref)):
+        assert "dimension_ledger" in text, doc_name
+        for field in dimension_ledger.DIMENSION_FIELDS:
+            assert field in text, (doc_name, field)
+        for src in dimension_ledger.SOURCES:
+            assert src in text, (doc_name, src)
+        for check_kind, keys in dimension_ledger.CHECK_FIELDS.items():
+            assert check_kind in text, (doc_name, check_kind)
+            for key in keys:
+                assert key in text, (doc_name, check_kind, key)
+
+    sample_graph = {
+        "nodes": [{"id": "base_extrude", "type": "box"}],
+        "dimension_ledger": [
+            {
+                "id": "d_len", "label": "80", "value": 80,
+                "source_kind": "explicit", "view": "front",
+                "node_ids": ["base_extrude"],
+                "check": {"kind": "bbox_extent", "axis": "x", "tolerance_mm": 0.5},
+            },
+            {
+                "id": "d_hole", "label": "Ø12", "value": 12,
+                "source_kind": "explicit", "view": "top",
+                "node_ids": ["base_extrude"],
+                "check": {"kind": "cylinder", "axis": [0, 1, 0], "through": [0, 0, 0]},
+            },
+            {
+                "id": "d_step", "label": "15", "value": 15,
+                "source_kind": "derived", "view": "left",
+                "node_ids": ["base_extrude"],
+                "check": {
+                    "kind": "plane_distance",
+                    "normal": [0, 1, 0],
+                    "point_a": [0, 0, 0],
+                    "point_b": [0, 0.015, 0],
+                },
+            },
+        ],
+    }
+    assert dimension_ledger.validate_graph_ledger(sample_graph) == []
+
+
+def test_add_reference_geometry_exits_active_sketch_before_plane_or_axis():
+    root = Path(__file__).resolve().parents[3]
+    cs_path = root / "execution/solidworks/SolidworksExecution/Services/SolidWorksService.Features.cs"
+    source = cs_path.read_text(encoding="utf-8")
+    start = source.index("public ExecutionResponse AddReferenceGeometry(")
+    end = source.index("featureMgr.InsertRefPlane(", start)
+    window = source[start:end]
+    assert "modelDoc.SketchManager.ActiveSketch != null" in window
+    assert "modelDoc.SketchManager.InsertSketch(true)" in window
+

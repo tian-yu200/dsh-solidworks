@@ -1024,6 +1024,10 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
+                // Ensure we are NOT in sketch mode before inserting reference geometry (H22 defense)
+                if (modelDoc.SketchManager.ActiveSketch != null)
+                    modelDoc.SketchManager.InsertSketch(true);
+
                 var featureMgr = modelDoc.FeatureManager;
                 IFeature feature = null;
 

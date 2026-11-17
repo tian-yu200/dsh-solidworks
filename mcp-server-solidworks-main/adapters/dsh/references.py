@@ -408,8 +408,8 @@ def render_quickref(schema=None):
         "legend: R=required O=optional | m=meters rad=radians deg=degrees |"
         " IP=immediately preceding node | AM=analyze_model | AA=analyze_assembly |"
         " dflt=default",
-        "Optional dimension_ledger: [{id,label,value,source_kind,view,node_ids,check}]. Derived callout in label; unknown: null value/check.",
-        "Checks (warnings only): bbox_extent(axis x|y|z); cylinder(axis+through m-point); plane_distance(normal+2 m-points). Length value/tolerance mm.",
+        "Optional dimension_ledger: [{id,label,value,source_kind:'explicit'|'derived'|'user'|'unknown',view,node_ids:[id,...],check}] (value/tolerance_mm/selector_tolerance_mm in mm; derived keeps formula in label; unknown uses value:null, check:null).",
+        "Ledger check (warnings only, exact keys): {kind:'bbox_extent',axis:'x'|'y'|'z',tolerance_mm?} | {kind:'cylinder',axis:[dx,dy,dz],through:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (through=axis m-point, value=dia mm) | {kind:'plane_distance',normal:[nx,ny,nz],point_a:[x,y,z],point_b:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (face m-points).",
     ]
     # One line per vocabulary, `key=v1|v2|...` — a COMPACT block, because six "label: a, b, c"
     # lines cost ~90 characters of pure label/comma overhead and the card is char-bound at two

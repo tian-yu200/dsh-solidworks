@@ -1,6 +1,9 @@
+import ctypes
 import hmac
 import json
+import os
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -47,6 +50,38 @@ ORIGIN_OPENED = "opened"            # begin_job opened it while nothing else was
 ORIGIN_PRE_EXISTING = "pre_existing"  # it was already SolidWorks' active document on entry
 ORIGIN_UNBOUND = "unbound"          # the job has no document of its own yet
 CLOSEABLE_ORIGINS = (ORIGIN_CREATED, ORIGIN_OPENED)
+
+_ACTIVE_ATTEMPTS_LOCK = threading.Lock()
+_ACTIVE_ATTEMPT_IDS = set()
+
+
+def _pid_is_alive(pid):
+    """True when OS process `pid` is currently alive."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if sys.platform == "win32":
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.GetLastError() == 5  # ERROR_ACCESS_DENIED => alive
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _sketch_fillets(node):
@@ -636,6 +671,54 @@ class CadOrchestrator:
                     ledger["blocked_documents"][current_key] = record
 
 
+    def _reconcile_dead_inflight_chain(self, job, ledger, inventory):
+        """Reconcile a dead orphan `in_flight` attempt when SolidWorks is verified back at baseline.
+
+        Findings H9: killing an MCP/agent process mid-build leaves the last attempt stuck at
+        `in_flight`, causing every subsequent session on any drawing to stop for
+        `REPAIR_RECOVERY_UNVERIFIED` even after the stray part was closed (or never opened).
+        When the owning process is no longer alive AND SolidWorks has no active undo scope and
+        the exact baseline document inventory, the orphan attempt is demonstrably discarded:
+        reconciling it lets `_retire_foreign_chain` archive it for a different part while keeping
+        the 3-attempt repair budget intact for the same part.
+        """
+        chain = ledger.get("active")
+        attempts = (chain or {}).get("attempts") or []
+        if not attempts:
+            return
+        last = attempts[-1]
+        if last.get("recovery_status") != "in_flight":
+            return
+        attempt_id = last.get("attempt_id")
+        with _ACTIVE_ATTEMPTS_LOCK:
+            if attempt_id and attempt_id in _ACTIVE_ATTEMPT_IDS:
+                return
+        pid = last.get("pid")
+        if isinstance(pid, int):
+            if _pid_is_alive(pid):
+                return
+        elif any(a.get("job_id") == job["job_id"] for a in attempts):
+            return
+        if inventory.get("undo_scope_active"):
+            return
+        baseline = chain.get("baseline")
+        if not isinstance(baseline, dict) or not isinstance(baseline.get("documents"), list):
+            return
+        docs = inventory.get("documents")
+        if not isinstance(docs, list):
+            return
+        if (self._inventory_changes(baseline, inventory)
+                or {d["document_id"] for d in baseline["documents"]} !=
+                   {d["document_id"] for d in docs}):
+            return
+        last.update(
+            recovery_status="discarded",
+            status=last.get("status") or "failed",
+            error_code=last.get("error_code") or "EXECUTION_UNCERTAIN",
+            reconciled_from="in_flight",
+            reconciled_at=utc_now(),
+        )
+
     @staticmethod
     def _foreign_discarded_chain(job, ledger):
         """The open chain when another job left it with its last attempt cleanly discarded."""
@@ -661,7 +744,11 @@ class CadOrchestrator:
         chain = self._foreign_discarded_chain(job, ledger)
         if chain is None or kind != "feature_graph" or not payload.get("fresh_document"):
             return
-        if (chain.get("design_contract") is not None
+        old_drawing = normalize_path(chain.get("drawing_path") or "")
+        new_drawing = normalize_path(job.get("drawing_path") or "")
+        explicitly_different_drawing = bool(old_drawing and new_drawing and old_drawing != new_drawing)
+        if (not explicitly_different_drawing
+                and chain.get("design_contract") is not None
                 and dimensions_equal(chain["design_contract"], design_contract(payload["graph"]))):
             return
         chain.update(closed_by="new_job", closed_reason="另一个任务的新零件", closed_at=utc_now())
@@ -670,6 +757,7 @@ class CadOrchestrator:
 
     def _recovery_reasons(self, job, kind, payload, ledger, inventory):
         self._prune_document_blocks(ledger, inventory)
+        self._reconcile_dead_inflight_chain(job, ledger, inventory)
         self._retire_foreign_chain(job, kind, payload, ledger)
         identity = self._recovery_identity(job, inventory)
         key = self._document_block_key(identity)
@@ -2018,9 +2106,11 @@ class CadOrchestrator:
                 if not chain:
                     chain = {"chain_id": str(uuid.uuid4()), "design": design,
                              "design_contract": design_contract(payload["graph"]), "contract_version": 2,
+                             "drawing_path": job.get("drawing_path"),
                              "baseline": baseline, "attempts": []}
                     ledger["active"] = chain
                 attempt = {"attempt_id": str(uuid.uuid4()), "job_id": job["job_id"], "at": utc_now(),
+                           "pid": os.getpid(),
                            "representation": representation, "evidence_hash": payload_hash(payload.get("repair_evidence") or {}),
                            "evidence": payload.get("repair_evidence") or {}, "recovery_status": "in_flight"}
                 chain["attempts"].append(attempt)
@@ -2037,10 +2127,19 @@ class CadOrchestrator:
             return self._queue_refreshed_recovery(job, "feature_graph", payload, risk,
                 self._feature_graph_summary(job, payload["graph"], payload["fresh_document"]))
         progress = {}
+        active_attempt_id = attempt["attempt_id"] if payload["fresh_document"] else None
+        if active_attempt_id:
+            with _ACTIVE_ATTEMPTS_LOCK:
+                _ACTIVE_ATTEMPT_IDS.add(active_attempt_id)
         try:
-            response = self._run_feature_graph_attempt(job, payload, risk, progress)
-        except Exception as exc:
-            response = self._uncertain_attempt_response(job, payload, risk, progress, exc)
+            try:
+                response = self._run_feature_graph_attempt(job, payload, risk, progress)
+            except Exception as exc:
+                response = self._uncertain_attempt_response(job, payload, risk, progress, exc)
+        finally:
+            if active_attempt_id:
+                with _ACTIVE_ATTEMPTS_LOCK:
+                    _ACTIVE_ATTEMPT_IDS.discard(active_attempt_id)
         if not payload["fresh_document"]:
             return response
         with job_store.recovery_chain() as ledger:

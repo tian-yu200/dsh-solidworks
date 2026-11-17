@@ -567,8 +567,10 @@ def _plan_node(port, node, state_version, node_features, graph_thread_defaults=N
     if ntype == "circular_pattern":
         return lowering.lower_circular_pattern(node)
     if ntype == "hole":
-        face_index, info = resolve_top_face(port, state_version, node_id=node.get("id"))
         ref = node.get("ref") or {}
+        hole_at = ref.get("at") if ref.get("position") == "point" else None
+        face_index, info = resolve_top_face(port, state_version, node_id=node.get("id"),
+                                            at=hole_at)
         if ref.get("position") == "point":
             # BATCH 10a — off-centre placement. Plan-time checks, all read-only:
             #   1. the point must lie ON the face's plane (check_hole_on_face);

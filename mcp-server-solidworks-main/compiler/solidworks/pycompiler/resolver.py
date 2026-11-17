@@ -121,9 +121,21 @@ def invalidate(state_version):
     MEMO.invalidate(state_version)
 
 
-def resolve_top_face(port, state_version, node_id=None):
+HOLE_AMBIGUOUS_TOP_HINT = (
+    " Disambiguate by setting ref.position='point' with ref.at=[x, y, z] (meters) on the "
+    "intended upward face, or build the bore as a circle sketch + extrude with operation 'cut'."
+)
+
+
+def resolve_top_face(port, state_version, node_id=None, at=None):
     """Return (face_index, info) for the semantic 'top' face. Raises FeatureError on
     REFERENCE_UNRESOLVED (no upward face / analyze failed) or REFERENCE_AMBIGUOUS (a tie).
+
+    When `at` ([x, y, z] model meters, from ref.position='point') is supplied, upward planar
+    faces whose plane contains `at` (within _PLANE_TOL) are selected first and ranked by
+    distance to each face's representative point — resolving equal-height symmetric bosses
+    (H25) as well as stepped upward decks. If `at` lies on no upward face's plane, the highest
+    upward face is returned so check_hole_on_face reports PLACEMENT_OFF_FACE as before.
 
     Routed through _analyze_payload so it shares the per-run memo (SPEED task A): a hole, an
     up-to face anchor and an offset sketch on the same body all want this same dump."""
@@ -146,13 +158,52 @@ def resolve_top_face(port, state_version, node_id=None):
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step="resolve_top_face")
 
     candidates.sort(key=lambda c: c[0], reverse=True)
+
+    if at is not None and isinstance(at, (list, tuple)) and len(at) >= 3:
+        at_pt = (float(at[0]), float(at[1]), float(at[2]))
+        on_plane = []  # (dist_to_rep, -area, centroid_y, face_index, face)
+        for cy, fi, face in candidates:
+            if fi < 0:
+                continue
+            n = face["normal"]
+            p = face["point"]
+            plane_dist = abs((at_pt[0] - float(p[0])) * float(n[0])
+                             + (at_pt[1] - float(p[1])) * float(n[1])
+                             + (at_pt[2] - float(p[2])) * float(n[2]))
+            if plane_dist <= _PLANE_TOL:
+                rep = (float(p[0]), float(p[1]), float(p[2]))
+                area = float(face.get("area") or 0.0)
+                on_plane.append((_dist3(at_pt, rep), -area, cy, fi, face))
+        if on_plane:
+            on_plane.sort(key=lambda c: (c[0], c[1], c[3]))
+            if len(on_plane) > 1 and abs(on_plane[1][0] - on_plane[0][0]) < _TIE_EPS:
+                tied_pts = [c[4].get("point") for c in on_plane[:4]
+                            if abs(c[0] - on_plane[0][0]) < _TIE_EPS]
+                raise FeatureError(
+                    ("top face is ambiguous at ref.at=%s — %d coplanar upward faces are "
+                     "equidistant (%s)." % (list(at), len(tied_pts), tied_pts))
+                    + HOLE_AMBIGUOUS_TOP_HINT,
+                    code="REFERENCE_AMBIGUOUS", node_id=node_id, step="resolve_top_face")
+            _d, _neg_area, best_y, best_i, best_face = on_plane[0]
+            return best_i, {"face_index": best_i, "centroid_y": best_y,
+                            "point": best_face.get("point"), "face": best_face}
+        # `at` is off every upward face's plane: hand the highest valid face to check_hole_on_face
+        # so the caller gets PLACEMENT_OFF_FACE with the plane height and axis hint.
+        for cy, fi, face in candidates:
+            if fi >= 0:
+                return fi, {"face_index": fi, "centroid_y": cy,
+                            "point": face.get("point"), "face": face}
+
     top_y, top_i, top_face = candidates[0]
     if top_i < 0:
         raise FeatureError("resolved top face has no valid index",
                            code="REFERENCE_UNRESOLVED", node_id=node_id, step="resolve_top_face")
     if len(candidates) > 1 and abs(candidates[1][0] - top_y) < _TIE_EPS:
-        raise FeatureError("top face is ambiguous — multiple upward faces at the same height",
-                           code="REFERENCE_AMBIGUOUS", node_id=node_id, step="resolve_top_face")
+        tied = [c[2].get("point") for c in candidates if abs(c[0] - top_y) < _TIE_EPS][:4]
+        raise FeatureError(
+            ("top face is ambiguous — multiple upward faces share height Y=%.6g m (%s)."
+             % (top_y, tied)) + HOLE_AMBIGUOUS_TOP_HINT,
+            code="REFERENCE_AMBIGUOUS", node_id=node_id, step="resolve_top_face")
 
     return top_i, {"face_index": top_i, "centroid_y": top_y, "point": top_face.get("point"),
                     "face": top_face}

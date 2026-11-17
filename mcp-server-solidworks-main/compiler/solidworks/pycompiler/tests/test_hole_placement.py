@@ -431,3 +431,60 @@ def test_counterbore_thread_anchor_uses_the_face_normal_not_hardcoded_up():
     # No usable normal in the payload -> the historical +Y fallback still applies.
     a_fallback = _c._thread_anchor(node, {"face": {"point": [0.0, 0.010, 0.0]}})["edge_anchor"]["near"]
     assert a_fallback[1] == pytest.approx(0.010 - 0.0065)
+
+
+# ---------------------------------------------------------------------------
+# 5. H25: Equal-height & stepped upward planar faces disambiguated by `at`.
+# ---------------------------------------------------------------------------
+def test_equal_height_bosses_disambiguate_top_face_by_hole_point():
+    boss_faces = [
+        {"i": 5, "planar": True, "area": 0.0004, "point": [-0.020, 0.015, 0.0], "normal": [0.0, 1.0, 0.0]},
+        {"i": 6, "planar": True, "area": 0.0004, "point": [0.020, 0.015, 0.0], "normal": [0.0, 1.0, 0.0]},
+    ]
+    left_frame = _frame((-0.020, 0.015, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, -1.0))
+    right_frame = _frame((0.020, 0.015, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, -1.0))
+
+    # Left boss hole selects face_index=5
+    port_l = FakePort(left_frame, faces=boss_faces, bbox=([-0.030, 0.0, -0.020], [0.030, 0.015, 0.020]))
+    res_l = compile_and_run(port_l, _plate_and_hole((-0.020, 0.015, 0.002), diameter=0.005))
+    assert res_l.status == "COMPLETED", res_l.to_dict()
+    sketch_calls_l = [p for (t, p) in port_l.calls if t == "create_sketch" and p.get("on_face")]
+    assert sketch_calls_l[0]["face_index"] == 5
+
+    # Right boss hole selects face_index=6
+    port_r = FakePort(right_frame, faces=boss_faces, bbox=([-0.030, 0.0, -0.020], [0.030, 0.015, 0.020]))
+    res_r = compile_and_run(port_r, _plate_and_hole((0.020, 0.015, -0.002), diameter=0.005))
+    assert res_r.status == "COMPLETED", res_r.to_dict()
+    sketch_calls_r = [p for (t, p) in port_r.calls if t == "create_sketch" and p.get("on_face")]
+    assert sketch_calls_r[0]["face_index"] == 6
+
+    # Centre placement without `at` fails with actionable remediation hint
+    centred = _plate_and_hole((0.0, 0.015, 0.0), diameter=0.005)
+    centred["nodes"][1]["ref"] = {"node_face": {"node": "b1", "selector": "top"}, "position": "center"}
+    port_c = FakePort(left_frame, faces=boss_faces)
+    res_c = compile_and_run(port_c, centred)
+    assert res_c.status == "FAILED"
+    assert res_c.error["code"] == "REFERENCE_AMBIGUOUS"
+    assert "ref.position='point'" in res_c.error["message"]
+    assert "operation 'cut'" in res_c.error["message"]
+
+    # Equidistant midpoint between the two bosses remains ambiguous
+    port_mid = FakePort(left_frame, faces=boss_faces)
+    res_mid = compile_and_run(port_mid, _plate_and_hole((0.0, 0.015, 0.0), diameter=0.005))
+    assert res_mid.status == "FAILED"
+    assert res_mid.error["code"] == "REFERENCE_AMBIGUOUS"
+    assert "ref.position='point'" in res_mid.error["message"]
+
+
+def test_stepped_deck_below_higher_boss_resolves_to_deck_face_at_point():
+    stepped_faces = [
+        {"i": 5, "planar": True, "area": 0.0018, "point": [0.015, 0.010, 0.0], "normal": [0.0, 1.0, 0.0]},
+        {"i": 9, "planar": True, "area": 0.0004, "point": [-0.015, 0.025, 0.0], "normal": [0.0, 1.0, 0.0]},
+    ]
+    deck_frame = _frame((0.015, 0.010, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, -1.0))
+    port = FakePort(deck_frame, faces=stepped_faces, bbox=([-0.030, 0.0, -0.020], [0.030, 0.025, 0.020]))
+    res = compile_and_run(port, _plate_and_hole((0.020, 0.010, 0.0), diameter=0.005))
+    assert res.status == "COMPLETED", res.to_dict()
+    sketch_calls = [p for (t, p) in port.calls if t == "create_sketch" and p.get("on_face")]
+    assert sketch_calls[0]["face_index"] == 5
+
