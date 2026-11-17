@@ -12,7 +12,7 @@ SOURCES = {"explicit", "derived", "user", "unknown"}
 DIMENSION_FIELDS = {"id", "label", "value", "source_kind", "view", "node_ids", "check"}
 CHECK_FIELDS = {
     "bbox_extent": {"kind", "axis", "tolerance_mm"},
-    "cylinder": {"kind", "axis", "through", "tolerance_mm", "selector_tolerance_mm"},
+    "cylinder": {"kind", "axis", "through", "surface_point", "tolerance_mm", "selector_tolerance_mm"},
     "plane_distance": {
         "kind", "normal", "point_a", "point_b", "tolerance_mm", "selector_tolerance_mm",
     },
@@ -88,8 +88,10 @@ def validate_graph_ledger(graph):
             errors.append("%s.value must be a finite drawing value (mm or count)." % prefix)
         if source == "derived" and (not isinstance(item.get("label"), str) or not item["label"].strip()):
             errors.append("%s derived dimensions need their callout/formula in label." % prefix)
+        if check is None:
+            continue
         if not isinstance(check, dict) or check.get("kind") not in CHECK_FIELDS:
-            errors.append("%s.check.kind must be bbox_extent|cylinder|plane_distance." % prefix)
+            errors.append("%s.check.kind must be bbox_extent|cylinder|plane_distance (or check=null)." % prefix)
             continue
         check_extra = set(check) - CHECK_FIELDS[check["kind"]]
         if check_extra:
@@ -106,6 +108,8 @@ def validate_graph_ledger(graph):
             elif check["kind"] == "cylinder":
                 axis = _vec3(check.get("axis"), prefix + ".check.axis")
                 through = _vec3(check.get("through"), prefix + ".check.through")
+                if check.get("surface_point") is not None:
+                    _vec3(check.get("surface_point"), prefix + ".check.surface_point")
                 if math.sqrt(sum(v * v for v in axis)) < 1e-9:
                     errors.append("%s.check.axis must be nonzero." % prefix)
             elif check["kind"] == "plane_distance":
@@ -468,7 +472,11 @@ def _select_plane_offset(faces, edges, point, normal, selector_tol_m):
     return on_face[0], None
 
 
-def _cylinder_candidates(faces, axis, through, selector_tol_m):
+def _cylinder_candidates(faces, axis, through, selector_tol_m, surface_point=None):
+    target_radius = (
+        _distance(_cross([surface_point[i] - through[i] for i in range(3)], axis), [0, 0, 0])
+        if surface_point is not None else None
+    )
     found = []
     for face in faces:
         if not isinstance(face, dict) or face.get("kind") != "cylinder":
@@ -482,6 +490,8 @@ def _cylinder_candidates(faces, axis, through, selector_tol_m):
             continue
         line_distance = _distance(_cross([origin[i] - through[i] for i in range(3)], axis), [0, 0, 0])
         if line_distance > selector_tol_m:
+            continue
+        if target_radius is not None and abs(float(radius) - target_radius) > selector_tol_m:
             continue
         if not any(abs(radius - old) <= 1e-6 for old in found):
             found.append(float(radius))
@@ -534,7 +544,11 @@ def evaluate_graph_ledger(graph, verification, faces_response=None, edges_respon
         source = dimension.get("source_kind")
         value = dimension.get("value")
         reason, actual = None, None
-        if source == "unknown" or not isinstance(check, dict):
+        if source == "unknown":
+            reason = "unresolved_or_invalid_check"
+        elif check is None:
+            continue
+        elif not isinstance(check, dict):
             reason = "unresolved_or_invalid_check"
         elif check.get("kind") == "bbox_extent":
             axis = {"x": 0, "y": 1, "z": 2}.get(check.get("axis"))
@@ -545,11 +559,13 @@ def evaluate_graph_ledger(graph, verification, faces_response=None, edges_respon
             reason = face_error
         elif check.get("kind") == "cylinder":
             axis, through = _unit(_vector(check.get("axis")) or []), _vector(check.get("through"))
-            if axis is None or through is None:
+            raw_sp = check.get("surface_point")
+            surface_point = _vector(raw_sp) if raw_sp is not None else None
+            if axis is None or through is None or (raw_sp is not None and surface_point is None):
                 reason = "invalid_cylinder_selector"
             else:
                 tolerance = float(check.get("selector_tolerance_mm", DEFAULT_SELECTOR_TOLERANCE_MM)) / 1000.0
-                candidates = _cylinder_candidates(faces, axis, through, tolerance)
+                candidates = _cylinder_candidates(faces, axis, through, tolerance, surface_point=surface_point)
                 if len(candidates) != 1:
                     reason = "cylinder_candidate_count_%d" % len(candidates)
                 else:

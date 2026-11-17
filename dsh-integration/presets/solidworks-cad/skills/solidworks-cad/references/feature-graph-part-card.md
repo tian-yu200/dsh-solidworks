@@ -9,9 +9,9 @@ Node IDs are graph IDs, not face indices. Omit graph.material when unspecified.
 Save a new working-directory file; no overwrite.
 New part REQUIRES graph.expect from approved plan: bbox_mm:[a,b,c] (MM, any order),
 volume_mm3?, features?:{"fillet":n,"chamfer":n}. Off-plan build: PLAN_MISMATCH.
-dimension_ledger (exact keys; value/tolerance_mm/selector_tolerance_mm in mm; unknown->value:null,check:null):
+dimension_ledger (exact keys; value/tolerance_mm/selector_tolerance_mm in mm; unknown->value:null,check:null; angle/chamfer/hex->check:null):
 [{id,label,value,source_kind:"explicit"|"derived"|"user"|"unknown",view,node_ids:[id,...],check}].
-check: {kind:"bbox_extent",axis:"x"|"y"|"z",tolerance_mm?} | {kind:"cylinder",axis:[dx,dy,dz],through:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (through m-pt, value=dia mm) | {kind:"plane_distance",normal:[nx,ny,nz],point_a:[x,y,z],point_b:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (m-pts).
+check: {kind:"bbox_extent",axis:"x"|"y"|"z",tolerance_mm?} | {kind:"cylinder",axis:[dx,dy,dz],through:[x,y,z],surface_point?:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (through=axis m-pt, value=dia mm; coaxial cylinders MUST pass surface_point on that face) | {kind:"plane_distance",normal:[nx,ny,nz],point_a:[x,y,z],point_b:[x,y,z],tolerance_mm?,selector_tolerance_mm?} (m-pts).
 
 Datum frames (sketch x,y; +extrude normal): front=+X,+Y;+Z. top=+X,-Z;+Y. right=-Z,+Y;+X.
 ref={"datum":"top",offset?:m}. ref={"node_face":{"node":"base","selector":"top"},"position":"center"}

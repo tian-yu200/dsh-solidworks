@@ -277,6 +277,39 @@ class DimensionLedgerTests(unittest.TestCase):
         graph["dimension_ledger"][0]["label"] = ""
         self.assertTrue(any("derived callout" in error for error in validate_graph_ledger(graph)))
 
+    def test_coaxial_cylinders_disambiguate_by_surface_point_without_guessing(self):
+        faces = check_response({"faces": [
+            {"kind": "cylinder", "origin": [0, 0, 0], "axis": [0, 1, 0], "radius": 0.011},
+            {"kind": "cylinder", "origin": [0, 0.006, 0], "axis": [0, 1, 0], "radius": 0.0225},
+            {"kind": "cylinder", "origin": [0, 0, 0], "axis": [0, 1, 0], "radius": 0.035},
+        ]})
+        graph = graph_with(
+            dimension("D-bore", 22, {
+                "kind": "cylinder", "axis": [0, 1, 0], "through": [0, 0, 0],
+                "surface_point": [0.011, 0.003, 0],
+            }),
+            dimension("D-step", 45, {
+                "kind": "cylinder", "axis": [0, 1, 0], "through": [0, 0, 0],
+                "surface_point": [0, 0.009, 0.0225],
+            }),
+            dimension("D-od", 70, {
+                "kind": "cylinder", "axis": [0, 1, 0], "through": [0, 0, 0],
+                "surface_point": [-0.035, 0.003, 0],
+            }),
+        )
+        self.assertEqual(validate_graph_ledger(graph), [])
+        self.assertEqual(evaluate_graph_ledger(graph, {}, faces), [])
+
+    def test_explicit_non_checkable_dimension_with_null_check_does_not_invalidate_ledger(self):
+        graph = graph_with(
+            dimension("D-len", 20, {"kind": "bbox_extent", "axis": "x"}),
+            dimension("D-cone-angle", 60, None, source="explicit", label="60°"),
+        )
+        self.assertEqual(validate_graph_ledger(graph), [])
+        verification = {"deep_checks": [geometry_response([0.02, 0.02, 0.02])]}
+        self.assertEqual(evaluate_graph_ledger(graph, verification), [])
+
+
 
 if __name__ == "__main__":
     unittest.main()
