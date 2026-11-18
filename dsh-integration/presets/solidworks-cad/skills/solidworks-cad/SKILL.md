@@ -101,18 +101,19 @@ analyzed before any job exists.
 Node A directly views the original drawing first. OCR and crops are OPTIONAL aids.
 Crop WHOLE VIEWS as source-pixel boxes at zoom 2 in one batch (front, top/side, sections,
 lettered views, notes); never grid cells or zoom 3-4 fragments, which cut a dimension off
-its dimension line and feature. Classify dimensions as EXPLICIT / DERIVED / USER / UNKNOWN.
-DERIVED includes its formula and evidence; an absent numeric label is not necessarily
-an absent constraint. Never infer dimensions from pixel proportions, even with approval.
-Use mm unless the drawing states another unit; omit unspecified material; save a new
-file in the working directory without overwriting existing files. Infer projection from
-drawing evidence; ask only if unresolved projection would produce different parts.
-Write the reading conclusion and compact plan in your message text, then ONE
-ask_user_question call: three check lines, ALL genuinely missing dimensions and plan
-approval, at most 600 characters (the DSH dialog does not scroll); no three-question cap.
-After the answer, build directly. Ask again only if that answer introduces a new
-contradiction. “接受/继续” approves the plan but supplies no missing numeric value.
-Read [drawing intake](solidworks://skill/references/drawing-intake.md); for axial sections or intersecting cast silhouettes, follow [construction strategies](solidworks://skill/references/construction-strategies.md).
+its dimension line and feature. Internally classify dimensions as EXPLICIT / DERIVED /
+USER / UNKNOWN (DERIVED retains formula and evidence; an absent label is not necessarily
+an absent constraint; NEVER infer dimensions from pixel proportions). Use mm unless the
+drawing states another unit; omit unspecified material; save a new file in the working
+directory without overwriting; ask about projection only if alternatives create different
+parts. Never expose internal tags, topology IDs, Feature Graph keys, or meter/radian values
+to the user: present a plain-Chinese mechanical 10-second dimension checklist and SolidWorks
+step summary in your message text, then ONE `ask_user_question` call (three check lines, ALL
+genuinely missing dimensions with recommended values, and approval, at most 600 characters /
+10 lines; no three-question cap). After the answer (including plain-Chinese corrections of
+any misread number), build directly; ask again only on a new contradiction. “接受/继续”
+approves the plan, not a missing value. Read [drawing intake](solidworks://skill/references/drawing-intake.md);
+for axial sections, cast silhouettes, or editability rules, follow [construction strategies](solidworks://skill/references/construction-strategies.md).
 
 ```mermaid
 flowchart TD
@@ -381,89 +382,42 @@ control true shape/size of inclined faces. Generate a missing view only by
 projecting resolved 3D topology. If topology remains nonunique after all supplied
 evidence, set `RECONSTRUCTION_STATUS: BLOCKED` rather than guessing.
 
-### PLAN.md
+### Plan And User-Facing Mechanical Checklist
 
-Before the first mutation, present one plan inline: the reply is the plan of record (no
-file tool here; write PLAN.md only if one exists). Simple drawing: about 10 lines of key
-fields. Complex drawing: the template below, under 70 lines and 4 KB.
+Resolve the full reconstruction plan internally before mutating, but translate all
+user-facing text into plain Simplified Chinese mechanical drafting language (see the
+full template and translation rules in [drawing intake](solidworks://skill/references/drawing-intake.md)):
 
-```markdown
-# CAD Reconstruction Plan
-PLAN_VERSION: 1
-PLAN_STATUS: DRAFT
-LOOP_COUNTS: L1=0; L2=0; L3={}; L4={}; L5=0
-TARGET: <source and requested output>
-MODE: <exact|schematic>
-DRAWING_META: <title/no/rev; units/scale; projection; part/assembly; standard/unique>
-PROJECTION: <first-angle|third-angle>
-NORMALIZATION: <dimensions or schematic scale>
-MODEL_FRAME: +X=right; +Y=up; +Z=front
-CAD_AXIS_MAP: <canonical -> document signed axes>
-SIDE_VIEW: <left|right>
-VIEW_DATUMS: <shared X/Y/Z datums>
-PICTORIAL: <status; source; findings; conflicts>
-SECTIONS: <not_present or IDs; type; parent; sightline; plane/offsets; confidence>
-DETAIL_COVERAGE: <detected/resolved/explained/unresolved>
-SURFACE_COVERAGE: <F## resolved/explained/unresolved across views>
-DIMENSION_BASIS: <explicit/baseline/chain/derived/schematic; datums; conflicts>
-FEATURE_ANNOTATIONS: <holes/threads/nuts/fasteners/depth/count/pattern/radii/chamfers or none>
-MATERIAL_FINISH_TOLERANCE: <material/finish/roughness/tolerance/GD&T/notes/unresolved>
-RECONSTRUCTION_STATUS: <DRAFT|READY|BLOCKED|COMPLETE>
-MANUFACTURING_STATUS: <COMPLETE|INCOMPLETE|UNRESOLVED>
-## View Ledger
-| View | Envelope | F/E/V/S evidence | Hidden/depth evidence |
-| --- | --- | --- | --- |
-| Front | ... | ... | ... |
-| Top | ... | ... | ... |
-| Side | ... | ... | ... |
-| Section/Aux | ... | ... | material/void or true-shape evidence |
-## Detail Correspondence
-| ID | Front | Top | Side/Section/Aux | 3D inference/status |
-| --- | --- | --- | --- | --- |
-| F01/E01/V01/S01 | ... | ... | ... | resolved/explained/unresolved |
-## Feature Sequence And Todo
-- [x] Analyze pictorial, orthographic, sectional, auxiliary, and part evidence
-- [x] Lock projection, axes, surfaces, details, missing views, and statuses
-- [ ] Approve this PLAN_VERSION
-- [ ] M1 <F/E/V/S IDs; sketch plane; signed direction; end condition; dimension source>
-- [ ] M2 <same fields>
-- [ ] Validate Front
-- [ ] Validate Top
-- [ ] Validate Side
-- [ ] Validate supplied Sections/Auxiliary views
-- [ ] Save/export requested outputs
-## Validation Matrix
-| View | Planned checks | Result |
-| --- | --- | --- |
-| Front | ... | pending |
-| Top | ... | pending |
-| Side | ... | pending |
-| Section/Aux | cut material/void; transitions; depth; true shape | pending or N/A |
-LAST_CHECKPOINT: none
-REPLAN_LOG: none
-```
-
-Use `exact` mode for dimensioned work; never offer a schematic alternative for a
-dimensioned drawing, and check every whole view showing a feature before marking it UNKNOWN.
-A schematic exercise (only when the user asks) needs USER normalization; never
-turn pixel proportions into graph coordinates. Unresolved values remain UNKNOWN.
-
-Set `PLAN_STATUS: READY` only when view roles, axis signs, topology, handedness,
-missing views, section/auxiliary conventions, dimensions or normalization,
-`F##/E##/V##/S##`, feature order, signed directions, end conditions, dimension
-sources, standard-part identity, thread semantics, and measurable checks are
-coherent. Every nonconstruction detail must be `resolved`, `explained`, or
-explicitly `unresolved`. Keep reconstruction and manufacturing completeness as
-separate statuses. Consult the
-[capability map](solidworks://skill/references/feature-graph-capability-map.md) only when a feature's
-expressibility is unclear; record inexpressible features as `CAPABILITY_GAP`.
-
-If any required constraint remains UNKNOWN, collect it with ALL other missing
-constraints in ONE ask_user_question, including approval (plan text in the message).
-Waiting does not consume L2. The source/default/one-round rules here govern any
-older reference prose; do not split the same matter into another approval round.
-Only then set `APPROVED` and check its approval todo. Any changed topology,
-orientation, dimension, direction, or feature order creates a new version.
+- **Internal reasoning coverage (keep internal — NEVER dump raw headers or tokens to the user)**:
+  Verify view roles, first/third-angle projection, canonical frame (`+X=right; +Y=up; +Z=front`),
+  signed `CAD_AXIS_MAP`, pictorial/section/auxiliary findings, `F##/E##/V##/S##` cross-view
+  correspondence, `EXPLICIT/DERIVED/USER/UNKNOWN` dimension basis, thread/fastener semantics,
+  manufacturing vs. reconstruction completeness, ordered milestones (`M1`, `M2`, ...), `PLAN_VERSION`,
+  loop counters (`L1–L5`), and per-view validation checks. Use `exact` mode for dimensioned
+  drawings (never offer a schematic option; check every whole view before marking UNKNOWN;
+  `schematic` applies only when requested and still requires USER normalization, never pixel
+  ratios). Consult the [capability map](solidworks://skill/references/feature-graph-capability-map.md)
+  when expressibility is unclear and log inexpressible constructs as `CAPABILITY_GAP`.
+- **Strict human-language isolation**: Never show `EXPLICIT`, `DERIVED`, `USER`, `UNKNOWN`,
+  `F01/E01/V01/S01`, `MODEL_FRAME`, `CAD_AXIS_MAP`, `PLAN_VERSION`, `LOOP_COUNTS`, `expect`,
+  `dimension_ledger`, `fresh_document`, Feature Graph node/field names, or meter (`0.012 m`) /
+  radian (`1.57 rad`) conversions in message text, questions, or final replies. Always use
+  Chinese mechanical and SolidWorks terms with **`mm`** and **`°`** (`Ø`, `R`, `M`, `C`).
+- **Pre-question message text — 10-second engineer checklist (breaks `dimension_ledger` same-source blind spot)**:
+  Because `dimension_ledger` is authored from the same reading as the graph, a misread digit
+  (e.g. `Ø12` read as `Ø20`) passes self-checks silently. In the message text accompanying the
+  single `ask_user_question`, always present three concise Chinese sections:
+  1. **总包络核对**: Include `“总包络 长×宽×高 = a×b×c mm”` with drawing directions and volume (`未算` if non-closed).
+  2. **已读出的关键特征与尺寸核对清单**: Group by Chinese feature names (底板/法兰、凸台/圆筒、内腔/槽宽、
+     通孔/沉头孔/螺纹孔直径与中心距、壁厚/筋厚、圆角/倒角) and list key `mm`/`°` numbers with source views
+     so the engineer can spot any misread number in 10 seconds.
+  3. **建模分步简述**: 3–6 lines using SolidWorks terms (基准面拉伸凸台、旋转、拉伸切除、打孔、镜像/阵列、圆角/倒角).
+- **One compact `ask_user_question` round**: Keep the dialog payload `<= 600` chars and `<= 10`
+  lines (three summary check lines + ALL genuine missing dimensions with concrete recommended
+  values + approval; never offer an empty “提供数值” option). Plain-Chinese answers or corrections
+  (e.g. “孔改成 M6”, “厚度是 8”, “大孔是 Ø12”) immediately update the graph, `expect`, and ledger
+  and proceed to `submit_feature_graph` without a repeat question unless a new contradiction arises.
+  Waiting does not consume `L2`; any later revision to topology, dimensions, or order increments `PLAN_VERSION`.
 
 ### Execute, Checkpoint, And Validate
 
@@ -472,10 +426,13 @@ and references were prepared before the question, so submit at once: one complet
 `submit_feature_graph(..., fresh_document=true)` for a new model. Do not split a
 complete graph merely to create checkpoints.
 
-Encode design intent: anchor the first datum/sketch to the origin when reasonable;
-establish geometric relations, then location dimensions, then shape dimensions;
-keep sketches simple and preferably fully constrained; use mirror or pattern when
-the evidence establishes symmetry or repetition.
+Encode design intent and human editability (see [construction strategies](solidworks://skill/references/construction-strategies.md)):
+anchor primary sketches to the origin and standard datum/offset planes rather than
+fragile derived edges; center symmetric parts with `mid_plane` extrusions; keep each
+sketch single-purpose and cleanly constrained; use `through_all` for through cuts/holes;
+use mirror/pattern for evidenced symmetry/repetition; and order features from base stock ->
+secondary bosses/ribs -> major cuts/slots -> holes/threads -> patterns -> **all `fillet`
+and `chamfer` nodes strictly last** so manual dimension tweaks in SolidWorks do not cascade into rebuild errors.
 
 For every thread, nut, bolt, screw, or stud todo, record the axis, internal or
 external role, cosmetic/symbolic or physical representation, designation source,
@@ -538,13 +495,15 @@ outputs and `finish_job` succeed.
 
 ## Final Report
 
-Report:
+Report to the user in plain Simplified Chinese mechanical language (`mm` and `°`,
+no raw JSON status keys, node IDs, or meter/radian decimals):
 
-- document and requested outputs
-- operations actually completed
-- objective verification performed
-- final `status`, `verification_status`, `recovery_status`, and `trust_level`
-- assumptions, unavailable checks, or capability gaps
+- saved document path and requested outputs (plus any superseded draft document left open)
+- SolidWorks features actually built
+- objective verification performed across views and key dimensions (reflecting the true
+  outcome of `status`, `verification_status`, `recovery_status`, and `trust_level` honestly
+  in plain Chinese — never claim verified when `unverified` or `built_unverified`)
+- adopted defaults/recommendations, unavailable checks, or capability gaps
 
 Never claim success from appearance or a tool return code alone. Keep this main
 skill at or below 550 lines; disclose detail through the linked reference files.

@@ -2023,6 +2023,12 @@ namespace SolidworksExecution.Services
                 var allNames = new List<string>();
                 var feature = FindFeatureByName(modelDoc, featureName, allNames);
                 if (feature == null)
+                {
+                    var deepEntry = WalkFeatureTree(modelDoc)
+                        .FirstOrDefault(e => e.Feature != null && string.Equals(e.Name, featureName, StringComparison.OrdinalIgnoreCase));
+                    feature = deepEntry?.Feature;
+                }
+                if (feature == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "FEATURE_NOT_FOUND",
                         $"Feature '{featureName}' not found. Available features: [{string.Join(", ", allNames)}].");
@@ -2045,8 +2051,20 @@ namespace SolidworksExecution.Services
                         if (string.IsNullOrEmpty(newName))
                             return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                                 "MISSING_PARAMETER", "new_name is required for action='rename'.");
-                        feature.Name = newName;
-                        resultName = newName;
+                        if (!string.Equals(featureName, newName, StringComparison.Ordinal))
+                        {
+                            feature.Name = newName;
+                            string actualName = null;
+                            try { actualName = feature.Name; } catch { }
+                            if (!string.IsNullOrEmpty(actualName) &&
+                                !string.Equals(actualName, newName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                    "FEATURE_RENAME_REJECTED",
+                                    $"SolidWorks refused to rename feature '{featureName}' to '{newName}' (current name remained '{actualName}', e.g. duplicate or reserved characters).");
+                            }
+                            resultName = string.IsNullOrEmpty(actualName) ? newName : actualName;
+                        }
                         break;
                     case "delete":
                         // Select the FOUND IFeature directly (type-agnostic) then EditDelete. The old

@@ -1,0 +1,493 @@
+{
+  "schema_version": "1.0.0",
+  "benchmark_name": "dsh-solidworks 2D-to-3D 规则机械件可复跑基准评测集",
+  "updated_at": "2026-11-18",
+  "description": "面向中小制造私企（非标自动化、机加工、钣金、工业3D打印）与专职CAD代画熟手场景构建的 2D-to-3D 基准评测清单。摒弃单纯追求『无人干预炫技生成率』，建立以『熟手人效比 (T_ai + T_edit) / T_human』与『特征树可编辑性（改主尺寸不连锁报错）』为双核心的客观工程评测体系。",
+  "evaluation_policy": {
+    "north_star_formula": "(t_ai_minutes + t_edit_minutes) / human_baseline_minutes",
+    "commercial_viable_ratio_max": 0.50,
+    "negative_roi_warning_ratio_min": 0.80,
+    "require_editability_pass_for_commercial_ready": true,
+    "bbox_tolerance_rule": "max(1.0 mm, 2.0%) per sorted axis (strict golden mode: ±0.5 mm)",
+    "default_volume_tolerance_ratio": 0.02,
+    "strict_volume_tolerance_ratio": 0.01,
+    "require_single_solid_body": true
+  },
+  "category_taxonomy": {
+    "bracket": {
+      "label": "支架类",
+      "typical_parts": "叉耳支架、U形支座、传感器安装架、带筋角码支座",
+      "core_features": ["sketch", "extrude", "hole", "slot", "rib", "fillet", "chamfer"]
+    },
+    "shaft_flange": {
+      "label": "轴套法兰类",
+      "typical_parts": "阶梯轴、带扁位/键槽传动轴、端盖、法兰盘、衬套",
+      "core_features": ["revolve", "extrude", "hole", "circular_pattern", "cosmetic_thread", "chamfer"]
+    },
+    "housing_valve": {
+      "label": "座体箱体类",
+      "typical_parts": "中小型阀体、脚踏座、轴承座、规则泵盖壳座",
+      "core_features": ["sketch", "extrude", "revolve", "shell", "hole", "fillet", "cosmetic_thread"]
+    },
+    "plate_block": {
+      "label": "板块连接件",
+      "typical_parts": "异形多孔安装底板、高台支座、斜面定位垫块、工装治具块、扁平轮廓件",
+      "core_features": ["box", "sketch", "extrude", "hole", "linear_pattern", "slot", "rounded_rect"]
+    },
+    "sheet_metal": {
+      "label": "钣金件",
+      "typical_parts": "U形电控折弯护罩、机箱安装托架、带边线法兰与腰形槽钣金件",
+      "core_features": ["sheet_metal", "edge_flange", "sketched_bend", "extrude", "mirror"]
+    }
+  },
+  "excluded_categories": [
+    {
+      "code": "freeform_surface",
+      "label": "高阶自由曲面与外观造型件",
+      "examples": "汽车A级曲面、汽轮机复杂扭曲叶片流道、人体工学鼠标外壳、卡通雕塑造物",
+      "reason": "超出规则机械特征图（Feature Graph）确定性编译边界，强行承接会导致极高试错税与不可控重建报错。"
+    },
+    {
+      "code": "drawingless_concept",
+      "label": "无二维图纸输入的凭空概念设计",
+      "examples": "一句话生成整台非标设备、无尺寸约束的工业创意发散",
+      "reason": "本产品核心护城河为『有明确工程图纸输入的确定性核验翻模』，拒绝编造CAD工程尺寸与公差。"
+    }
+  ],
+  "entry_schema": {
+    "required_fields": [
+      "id",
+      "name",
+      "category",
+      "status",
+      "difficulty",
+      "drawing_paths",
+      "expect_mm",
+      "theoretical_volume_mm3",
+      "dimension_ledger",
+      "human_baseline_minutes",
+      "editability_checks"
+    ],
+    "allowed_statuses": ["active", "pending_retest", "reserved_slot"],
+    "allowed_difficulties": ["simple", "medium", "complex"]
+  },
+  "cases": [
+    {
+      "id": "shaft_stepped_m5",
+      "name": "M5双端盲孔带扁位阶梯轴（QC01-02）",
+      "category": "shaft_flange",
+      "status": "active",
+      "difficulty": "simple",
+      "source_note": "仓库根目录多视图实测件（PLAN.md / stepped_shaft_M5.SLDPRT），含推导链凸缘厚度与双端同轴盲孔。",
+      "drawing_paths": [
+        "main.png",
+        "end.png",
+        "section.png",
+        "right_detail.png"
+      ],
+      "reference_artifacts": {
+        "feature_graph": "benchmarks/fixtures/sample_stepped_shaft_graph.json",
+        "plan_doc": "PLAN.md",
+        "sldprt_candidates": [
+          "image_reconstruction_stepped_shaft_M5.SLDPRT",
+          "stepped_shaft_M5.SLDPRT"
+        ]
+      },
+      "expect_mm": [37.0, 12.0, 12.0],
+      "theoretical_volume_mm3": 1934.63,
+      "volume_tolerance_ratio": 0.01,
+      "dimension_ledger": [
+        {"id": "d_total_len", "label": "总长 37", "value_mm": 37.0, "source_kind": "explicit", "view": "Main", "critical": true},
+        {"id": "d_left_seg", "label": "左轴段 Ø10×8", "value_mm": 10.0, "source_kind": "explicit", "view": "Main", "critical": true},
+        {"id": "d_flange_od", "label": "凸缘外径 Ø12", "value_mm": 12.0, "source_kind": "explicit", "view": "Main", "critical": true},
+        {"id": "d_flange_w", "label": "推导凸缘厚度 37-8-5.5-22=1.5", "value_mm": 1.5, "source_kind": "derived", "view": "Main", "critical": true},
+        {"id": "d_right_od", "label": "右段外径 Ø8×22", "value_mm": 8.0, "source_kind": "explicit", "view": "Main", "critical": true},
+        {"id": "d_flats_af", "label": "双侧对称扁位对边宽 AF7（半高 3.5）", "value_mm": 7.0, "source_kind": "explicit", "view": "Section A-A", "critical": true},
+        {"id": "d_tap_drill", "label": "两端同轴底孔 Ø4.2 深 12.4（M5-6H 深 10）", "value_mm": 4.2, "source_kind": "explicit", "view": "Section A-A / End", "critical": true}
+      ],
+      "human_baseline_minutes": 12.0,
+      "human_baseline_notes": "SW熟手识读主视/端视/A-A全剖视图并口算凸缘厚1.5mm（2min）+ 旋转阶梯主体（3min）+ 右端面双侧对称扁位切除（3min）+ 两端异形孔向导M5盲孔与保存核对（4min）。",
+      "editability_checks": [
+        {
+          "check_id": "edit_right_seg_length",
+          "parameter": "右段轴长度（Ø8扁位段）",
+          "from_mm": 22.0,
+          "to_mm": 28.0,
+          "expected_effect": "总长联动变为 43.0 mm，扁位切除贯穿新轴段且右端 Ø4.2 盲孔随右端面同步平移，中间隔墙增厚。",
+          "must_not_trigger": ["REBUILD_ERROR", "DANGLING_SKETCH_PLANE", "OPEN_CONTOUR"]
+        },
+        {
+          "check_id": "edit_flange_diameter",
+          "parameter": "凸缘外径",
+          "from_mm": 12.0,
+          "to_mm": 14.0,
+          "expected_effect": "旋转截面闭合阶梯正常外扩，包络变为 [37.0, 14.0, 14.0]，零重建警告。",
+          "must_not_trigger": ["REBUILD_ERROR", "SELF_INTERSECTING_CONTOUR"]
+        }
+      ]
+    },
+    {
+      "id": "bracket_2_25",
+      "name": "2-25 规则圆头长槽支架",
+      "category": "bracket",
+      "status": "active",
+      "difficulty": "simple",
+      "source_note": "README.md 实测基准件（读图到提问 5.8 min，批准到出模 1.3 min），对应 Bracket.SLDPRT。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/bracket_2_25.png"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": [
+          "Bracket.SLDPRT",
+          "projection_U_bracket_V1.SLDPRT"
+        ]
+      },
+      "expect_mm": [32.0, 42.0, 81.0],
+      "theoretical_volume_mm3": 21467.0,
+      "volume_tolerance_ratio": 0.02,
+      "dimension_ledger": [
+        {"id": "d_height", "label": "支架总高 81", "value_mm": 81.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_width", "label": "底板宽 42", "value_mm": 42.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_depth", "label": "底板深 32", "value_mm": 32.0, "source_kind": "explicit", "view": "Left", "critical": true},
+        {"id": "d_top_round", "label": "立板顶部圆头 R11（Ø22）", "value_mm": 22.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_holes_8", "label": "2×Ø8 通孔", "value_mm": 8.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_main_slot", "label": "立板腰形长槽两端 R5", "value_mm": 10.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_base_slots", "label": "底板双避空槽两端 4×R2", "value_mm": 4.0, "source_kind": "explicit", "view": "Top", "critical": false}
+      ],
+      "human_baseline_minutes": 15.0,
+      "human_baseline_notes": "SW熟手识读三视图（2min）+ 底板与双小槽拉伸（4min）+ 立板R11圆头外轮廓与R5腰形槽（6min）+ 双Ø8孔及自查（3min）。",
+      "editability_checks": [
+        {
+          "check_id": "edit_bracket_height",
+          "parameter": "支架总高度",
+          "from_mm": 81.0,
+          "to_mm": 90.0,
+          "expected_effect": "立板高度伸长至 90.0 mm，顶部 R11 圆弧与圆心孔保持同心相切，不出现轮廓断开。",
+          "must_not_trigger": ["REBUILD_ERROR", "ARC_ENDPOINT_MISMATCH"]
+        },
+        {
+          "check_id": "edit_hole_diameter",
+          "parameter": "2×Ø8 安装通孔直径",
+          "from_mm": 8.0,
+          "to_mm": 9.0,
+          "expected_effect": "两处通孔同步扩孔至 Ø9.0 mm，壁厚充足无破边报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "ZERO_THICKNESS"]
+        }
+      ]
+    },
+    {
+      "id": "housing_footpedal_ljt05",
+      "name": "脚踏座 LJT05.12（轮毂与R100内切肋板座体）",
+      "category": "housing_valve",
+      "status": "active",
+      "difficulty": "complex",
+      "source_note": "README.md 完整未剪辑录屏基准件（v2.1.0 附件），对应 footpedal_LJT05.12.SLDPRT，检验复杂相切圆心几何推导与多向特征组合。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/footpedal_ljt05_12.png"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": [
+          "footpedal_LJT05.12.SLDPRT",
+          "脚踏座_推定模型.SLDPRT"
+        ]
+      },
+      "expect_mm": [90.0, 93.75, 157.0],
+      "theoretical_volume_mm3": null,
+      "volume_tolerance_ratio": 0.03,
+      "dimension_ledger": [
+        {"id": "d_total_h", "label": "总高 157", "value_mm": 157.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_base_w", "label": "底板总宽 90", "value_mm": 90.0, "source_kind": "explicit", "view": "Left", "critical": true},
+        {"id": "d_derived_env_x", "label": "R100与Ø38轮毂内切外鼓包络 93.75", "value_mm": 93.75, "source_kind": "derived", "view": "Front", "critical": true},
+        {"id": "d_hub_od", "label": "轮毂外径 Ø38", "value_mm": 38.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_hub_bore", "label": "主轴孔 Ø20H7", "value_mm": 20.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_top_boss", "label": "顶部凸台 Ø16 与通孔 Ø8", "value_mm": 16.0, "source_kind": "explicit", "view": "Top", "critical": true}
+      ],
+      "human_baseline_minutes": 28.0,
+      "human_baseline_notes": "含 R100 偏心内切几何作图约束、底板耳座、Ø38轮毂、Ø16顶部凸台及多处肋板/孔系，SW熟手从零看图建模平均需 25~30 分钟。",
+      "editability_checks": [
+        {
+          "check_id": "edit_shaft_bore_dia",
+          "parameter": "轮毂主轴孔 Ø20H7",
+          "from_mm": 20.0,
+          "to_mm": 22.0,
+          "expected_effect": "主轴贯通孔扩至 Ø22.0 mm，与 Ø38 外圆同轴，不影响外围 R100 肋板相切状态。",
+          "must_not_trigger": ["REBUILD_ERROR", "DANGLING_REFERENCE"]
+        },
+        {
+          "check_id": "edit_base_width",
+          "parameter": "底板宽度 90",
+          "from_mm": 90.0,
+          "to_mm": 96.0,
+          "expected_effect": "底板对称加宽至 96.0 mm，上部轮毂与腹板居中关系不变，Rebuild 零报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "DISJOINT_BODIES"]
+        }
+      ]
+    },
+    {
+      "id": "housing_valve_ht200",
+      "name": "阀体 HT200（正交管腔带方法兰与四孔底座）",
+      "category": "housing_valve",
+      "status": "active",
+      "difficulty": "complex",
+      "source_note": "README.md 首页动图演示件与 batch_build.py 压测基准件（artifacts/demo/阀体_9bfd53ef.json，44节点确定性重放约 28~31s）。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/valve_body_ht200.png"
+      ],
+      "reference_artifacts": {
+        "feature_graph": "artifacts/demo/阀体_9bfd53ef.json",
+        "runlog_doc": "docs/valve-pipeline-runlog.md",
+        "sldprt_candidates": [
+          "阀体_工图重建.SLDPRT",
+          "阀体_骨架v6.SLDPRT"
+        ]
+      },
+      "expect_mm": [120.0, 125.0, 130.0],
+      "theoretical_volume_mm3": null,
+      "volume_tolerance_ratio": 0.03,
+      "dimension_ledger": [
+        {"id": "d_len_bb", "label": "B-B 轴向总长 130", "value_mm": 130.0, "source_kind": "explicit", "view": "Section B-B", "critical": true},
+        {"id": "d_width_aa", "label": "A-A 横向总宽 120", "value_mm": 120.0, "source_kind": "explicit", "view": "Section A-A", "critical": true},
+        {"id": "d_height_derived", "label": "总高 80+90/2=125", "value_mm": 125.0, "source_kind": "derived", "view": "Front / B-B", "critical": true},
+        {"id": "d_main_barrel", "label": "主管外圆 Ø76 / 内孔 Ø60H7", "value_mm": 60.0, "source_kind": "explicit", "view": "Section B-B", "critical": true},
+        {"id": "d_side_bore", "label": "侧向孔 Ø25H8", "value_mm": 25.0, "source_kind": "explicit", "view": "Section A-A", "critical": true},
+        {"id": "d_cross_bore", "label": "连通内孔 Ø16H8", "value_mm": 16.0, "source_kind": "explicit", "view": "Section A-A", "critical": true},
+        {"id": "d_mount_holes", "label": "方法兰 4×Ø10 + 底板 4×Ø10", "value_mm": 10.0, "source_kind": "explicit", "view": "Front / Top", "critical": true}
+      ],
+      "human_baseline_minutes": 35.0,
+      "human_baseline_notes": "涵盖跑道形底腔、方法兰、Ø76主筒、左右不对称支管（需从实体内部起草防止相切零厚报错）、M42×2-6H螺纹与退刀槽、8×Ø10孔及倒角圆角，SW熟手纯手绘需 32~38 分钟。",
+      "editability_checks": [
+        {
+          "check_id": "edit_flange_bolt_holes",
+          "parameter": "方法兰与底板安装孔径 8×Ø10",
+          "from_mm": 10.0,
+          "to_mm": 11.0,
+          "expected_effect": "8 处安装通孔同步改为 Ø11.0 mm，不穿透内腔侧壁，Rebuild 零报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "PLACEMENT_OFF_FACE"]
+        },
+        {
+          "check_id": "edit_front_flange_thickness",
+          "parameter": "前端 90×90 方法兰厚度",
+          "from_mm": 12.0,
+          "to_mm": 14.0,
+          "expected_effect": "方法兰增厚 2 mm，4×Ø10 法兰孔仍完整贯通法兰盘且主孔 Ø60 口部倒角不丢失。",
+          "must_not_trigger": ["REBUILD_ERROR", "BLIND_CUT_SHORTFALL"]
+        }
+      ]
+    },
+    {
+      "id": "plate_pedestal_q21",
+      "name": "异形五边底板高台支座（Q21 三视图重建件）",
+      "category": "plate_block",
+      "status": "active",
+      "difficulty": "medium",
+      "source_note": "仓库根目录 five_side_plate_pedestal.SLDPRT / 异形底板高台支座_重建.SLDPRT 代表性多边形切角板块支座件。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/five_side_plate_pedestal.png"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": [
+          "five_side_plate_pedestal.SLDPRT",
+          "异形底板高台支座_重建.SLDPRT",
+          "Q21_projection_model_V3.SLDPRT"
+        ]
+      },
+      "expect_mm": [80.0, 60.0, 48.0],
+      "theoretical_volume_mm3": 98400.0,
+      "volume_tolerance_ratio": 0.02,
+      "dimension_ledger": [
+        {"id": "d_plate_len", "label": "五边底板总长 80", "value_mm": 80.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_plate_wid", "label": "五边底板总宽 60", "value_mm": 60.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_total_height", "label": "高台总高 48", "value_mm": 48.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_base_thick", "label": "底板厚度 12", "value_mm": 12.0, "source_kind": "explicit", "view": "Front", "critical": true}
+      ],
+      "human_baseline_minutes": 14.0,
+      "human_baseline_notes": "SW熟手核对斜切角五边形轮廓与三视图投影对应关系（3min）+ 底板拉伸与高台槽口切除（8min）+ 孔特征与检查（3min）。",
+      "editability_checks": [
+        {
+          "check_id": "edit_base_plate_thickness",
+          "parameter": "五边底板厚度",
+          "from_mm": 12.0,
+          "to_mm": 15.0,
+          "expected_effect": "底板增厚至 15.0 mm，上部高台保持单实体融合无悬空缝隙。",
+          "must_not_trigger": ["REBUILD_ERROR", "DISJOINT_BODIES"]
+        },
+        {
+          "check_id": "edit_pedestal_height",
+          "parameter": "高台总高度",
+          "from_mm": 48.0,
+          "to_mm": 54.0,
+          "expected_effect": "高台高度增至 54.0 mm，顶部切槽同步跟随顶面，Rebuild 零报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "DANGLING_REFERENCE"]
+        }
+      ]
+    },
+    {
+      "id": "plate_notched_block",
+      "name": "斜面耳板缺口定位块（非标治具垫块）",
+      "category": "plate_block",
+      "status": "active",
+      "difficulty": "simple",
+      "source_note": "仓库实测简单机加工定位块基准件（42×30×30 mm，带 R10 同心圆弧耳板、Ø10 通孔与阶梯斜面）。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/notched_block_42x30x30.png"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": []
+      },
+      "expect_mm": [30.0, 30.0, 42.0],
+      "theoretical_volume_mm3": 23700.0,
+      "volume_tolerance_ratio": 0.01,
+      "dimension_ledger": [
+        {"id": "d_len_42", "label": "底板总长 42", "value_mm": 42.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_wid_30", "label": "总宽 30", "value_mm": 30.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_hei_30", "label": "总高 30", "value_mm": 30.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_ear_r10", "label": "后段耳板外圆弧 R10（Ø20）", "value_mm": 20.0, "source_kind": "explicit", "view": "Left", "critical": true},
+        {"id": "d_hole_10", "label": "耳板同心通孔 Ø10", "value_mm": 10.0, "source_kind": "explicit", "view": "Left", "critical": true}
+      ],
+      "human_baseline_minutes": 10.0,
+      "human_baseline_notes": "SW熟手读懂三段进深阶梯斜面投影（2.5min）+ 分段草图拉伸与耳板圆弧孔构建（5.5min）+ 体积核验（2min）。",
+      "editability_checks": [
+        {
+          "check_id": "edit_ear_hole_dia",
+          "parameter": "耳板同心通孔 Ø10",
+          "from_mm": 10.0,
+          "to_mm": 12.0,
+          "expected_effect": "通孔扩至 Ø12.0 mm，与 R10 耳板保持同心且单侧壁厚 4.0 mm 完好。",
+          "must_not_trigger": ["REBUILD_ERROR", "ZERO_THICKNESS"]
+        }
+      ]
+    },
+    {
+      "id": "sheet_metal_u_guard",
+      "name": "非标电控钣金 U 形折弯护罩（SPCC t=2.0）",
+      "category": "sheet_metal",
+      "status": "reserved_slot",
+      "difficulty": "simple",
+      "source_note": "覆盖中小钣金加工厂激光切割+折弯高频场景，检验 Feature Graph 中 sheet_metal + edge_flange + 腰形安装孔及平板展开能力。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/sheet_metal_u_guard.png"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": []
+      },
+      "expect_mm": [160.0, 110.0, 65.0],
+      "theoretical_volume_mm3": 58200.0,
+      "volume_tolerance_ratio": 0.02,
+      "dimension_ledger": [
+        {"id": "d_sm_thick", "label": "板厚 t=2.0", "value_mm": 2.0, "source_kind": "explicit", "view": "Note", "critical": true},
+        {"id": "d_sm_length", "label": "基体长 160", "value_mm": 160.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_sm_width", "label": "U形外宽 110", "value_mm": 110.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_sm_flange_h", "label": "双侧 90° 折弯边高 65", "value_mm": 65.0, "source_kind": "explicit", "view": "Front", "critical": true},
+        {"id": "d_sm_slots", "label": "4×腰形安装孔 6.5×12", "value_mm": 6.5, "source_kind": "explicit", "view": "Top", "critical": false}
+      ],
+      "human_baseline_minutes": 12.0,
+      "human_baseline_notes": "SW熟手创建基体法兰（2min）+ 两侧边线法兰设置材料在内与折弯半径（4min）+ 4处腰形槽切除及检查平板型式展开无干涉（6min）。",
+      "editability_checks": [
+        {
+          "check_id": "edit_sheet_thickness",
+          "parameter": "钣金全局板厚 t",
+          "from_mm": 2.0,
+          "to_mm": 2.5,
+          "expected_effect": "板厚变更为 2.5 mm，折弯处自动重算内R，保持外包络 110×65 mm 不变且平板展开（Flat-Pattern）零报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "FLAT_PATTERN_FAILURE"]
+        },
+        {
+          "check_id": "edit_flange_height",
+          "parameter": "双侧边线法兰高度",
+          "from_mm": 65.0,
+          "to_mm": 75.0,
+          "expected_effect": "两侧折弯边同步升高至 75.0 mm，折弯止裂槽正常。",
+          "must_not_trigger": ["REBUILD_ERROR", "BEND_RELIEF_CONFLICT"]
+        }
+      ]
+    },
+    {
+      "id": "retest_senior_key_part",
+      "name": "【实测复验 #1】下弯渐缩圆头扳手/钥匙手柄件（144.5×50×18.5）",
+      "category": "plate_block",
+      "status": "active",
+      "difficulty": "medium",
+      "source_note": "首轮用户实测时因误配无视觉模型导致看图失效；换回主力视觉模型实机复验已一次生成闭合单实体（实测包络 144.5×50.0×18.5 mm，含 R7 鼓形圆头、Ø38 沉腔、18×10 腰形孔与下弯手柄，仅根部 R3/R2 变圆角需人工 0.5min 微调）。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/retest_senior_key_part.jpg"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": []
+      },
+      "expect_mm": [144.5, 50.0, 18.5],
+      "theoretical_volume_mm3": null,
+      "volume_tolerance_ratio": 0.05,
+      "dimension_ledger": [
+        {"id": "d_key_len", "label": "全长 144.5", "value_mm": 144.5, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_key_head_d", "label": "头部外圆 R25（Ø50）", "value_mm": 50.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_key_height", "label": "A-A 总落差高度 18.5", "value_mm": 18.5, "source_kind": "explicit", "view": "Section A-A", "critical": true},
+        {"id": "d_key_bore", "label": "头部下沉腔 Ø38×深8", "value_mm": 38.0, "source_kind": "explicit", "view": "Top / A-A", "critical": true},
+        {"id": "d_key_slot", "label": "中心双圆弧腰形孔 18×10（R8）", "value_mm": 18.0, "source_kind": "explicit", "view": "Top", "critical": true}
+      ],
+      "human_baseline_minutes": 22.0,
+      "human_baseline_notes": "SW熟手完成 R7 鼓形圆头旋转、A-A 相切下弯与俯视 20->15 渐缩复合手柄、Ø38 沉腔、18×10 腰形孔及边缘圆角约 20~25 分钟。",
+      "editability_checks": [
+        {
+          "check_id": "edit_key_slot_width",
+          "parameter": "中心腰形孔宽度 10",
+          "from_mm": 10.0,
+          "to_mm": 11.0,
+          "expected_effect": "slotprofile 宽度扩至 11.0 mm，保持完全贯通顶部壁厚且后续圆角不报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "BLIND_CUT_SHORTFALL"]
+        },
+        {
+          "check_id": "edit_handle_fillet_radius",
+          "parameter": "手柄根部圆角 handle_edge_rounds",
+          "from_mm": 2.0,
+          "to_mm": 3.0,
+          "expected_effect": "手柄根部棱边改为 R3 圆角，单实体闭合零报错。",
+          "must_not_trigger": ["REBUILD_ERROR"]
+        }
+      ]
+    },
+    {
+      "id": "retest_senior_bracket_part",
+      "name": "【实测复验 #2】椭圆截面弯臂支座件（80×60×58）",
+      "category": "bracket",
+      "status": "active",
+      "difficulty": "medium",
+      "source_note": "首轮用户实测时曾出现轴套偏置与平直弯臂偏差；换回主力视觉模型实机复验实测包络 80.0×60.0×58.0 mm（误差 0.00mm）、体积 48.16 cm³（距参考 47.5 cm³ 仅 +1.39%），轴套居中、4×Ø6 沉头孔 Ø10↓3 与 R70/R32.5 椭圆弯臂全部到位。",
+      "drawing_paths": [
+        "benchmarks/drawings/local/retest_senior_bracket_part.jpg"
+      ],
+      "reference_artifacts": {
+        "sldprt_candidates": []
+      },
+      "expect_mm": [80.0, 60.0, 58.0],
+      "theoretical_volume_mm3": 47500.0,
+      "volume_tolerance_ratio": 0.05,
+      "dimension_ledger": [
+        {"id": "d_sr_base_l", "label": "底板长 50（四角 R10）", "value_mm": 50.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_sr_base_w", "label": "底板宽 60", "value_mm": 60.0, "source_kind": "explicit", "view": "Top", "critical": true},
+        {"id": "d_sr_base_h", "label": "底板厚 8", "value_mm": 8.0, "source_kind": "explicit", "view": "Left", "critical": true},
+        {"id": "d_sr_sleeve", "label": "顶部轴套 Ø20×25（内孔 Ø12，中心高 48）", "value_mm": 20.0, "source_kind": "explicit", "view": "Front / Left", "critical": true},
+        {"id": "d_sr_cbore", "label": "4×Ø6 通孔带 Ø10×3 沉孔（孔距 30×40）", "value_mm": 6.0, "source_kind": "explicit", "view": "Top / Left", "critical": true}
+      ],
+      "human_baseline_minutes": 20.0,
+      "human_baseline_notes": "SW熟手完成圆角底板、4组沉头孔、居中轴套、45×15 椭圆弯臂过渡及未注 C1 倒角约 18~22 分钟。",
+      "editability_checks": [
+        {
+          "check_id": "edit_sr_hole_pitch",
+          "parameter": "底板安装孔中心距 30×40",
+          "from_mm": 30.0,
+          "to_mm": 32.0,
+          "expected_effect": "对称孔距调整后，沉孔与通孔仍精确贯通底板，不触发 PLACEMENT_OFF_FACE。",
+          "must_not_trigger": ["REBUILD_ERROR", "PLACEMENT_OFF_FACE", "REFERENCE_AMBIGUOUS"]
+        },
+        {
+          "check_id": "edit_sr_bore_dia",
+          "parameter": "顶部轴套内通孔 Ø12",
+          "from_mm": 12.0,
+          "to_mm": 14.0,
+          "expected_effect": "bore_cut 内孔扩至 Ø14.0 mm，保持轴向对称贯通且单实体零报错。",
+          "must_not_trigger": ["REBUILD_ERROR", "EXTRUSION_FAILED"]
+        }
+      ]
+    }
+  ]
+}

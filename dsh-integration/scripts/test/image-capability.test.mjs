@@ -97,3 +97,38 @@ test('provider scope verifies GPT without changing unrelated text-only providers
   assert.doesNotMatch(scoped.output, /unclassified/);
   assert.equal(run(t, config, undefined, ['--provider', 'missing']).status, 2);
 });
+
+test('proxy-declared DeepSeek Flash text-only default models are intercepted with Chinese guidance', t => {
+  const misdeclared = dump(
+    {
+      'magpie-responses': {
+        defaultInput: ['text', 'image'],
+        models: [
+          { id: 'azure-sub2/deepseek-v4.1-flash', input: ['text', 'image'] },
+          { id: 'copilot/gpt-6.1-sol', input: ['text', 'image'] },
+        ],
+      },
+    },
+    'magpie-responses',
+    'azure-sub2/deepseek-v4.1-flash',
+  );
+  const blocked = run(t, misdeclared);
+  assert.equal(blocked.status, 1, blocked.output);
+  assert.match(blocked.output, /FAIL:.*deepseek-v4\.1-flash/i);
+  assert.match(blocked.output, /中文拦截提示/);
+
+  // Switching default model to a real vision model passes even if DeepSeek Flash stays in the candidate list.
+  const switched = run(t, misdeclared, {
+    'agent-default-model': { provider: 'magpie-responses', model: 'copilot/gpt-6.1-sol' },
+  });
+  assert.equal(switched.status, 0, switched.output);
+  assert.match(switched.output, /WARN: known text-only DeepSeek model/);
+
+  // Explicit multimodal DeepSeek VL / Janus variants remain allowed.
+  const vlModel = dump(
+    { custom: { models: [{ id: 'deepseek-vl2', input: ['text', 'image'] }] } },
+    'custom',
+    'deepseek-vl2',
+  );
+  assert.equal(run(t, vlModel).status, 0);
+});

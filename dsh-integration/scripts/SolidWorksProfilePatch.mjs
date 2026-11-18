@@ -61,6 +61,7 @@ function includesFields(actual, expected) {
 }
 
 export const KNOWN_GPT_VISION_MODELS = Object.freeze(['gpt-5.6-sol', 'gpt-6-sol', 'gpt-6.1-sol']);
+export const SAFE_PERMISSION_PRESET = 'workspace-write';
 
 export function repairKnownGptVision(rows) {
   const result = clone(sequence(rows));
@@ -75,6 +76,65 @@ export function repairKnownGptVision(rows) {
     }
   }
   return result;
+}
+
+export function detectFullAccessDefault(rows) {
+  const findings = [];
+  for (const { row } of occurrences(sequence(rows), 'permission')) {
+    if (row.config?.defaultPreset === 'danger-full-access') {
+      findings.push('permission.defaultPreset=danger-full-access');
+    }
+  }
+  for (const { row } of occurrences(sequence(rows), 'sandbox-policy')) {
+    if (row.config?.mode === 'danger-full-access') {
+      findings.push('sandbox-policy.mode=danger-full-access');
+    }
+  }
+  for (const { row } of occurrences(sequence(rows), 'approval')) {
+    if (row.config?.policy === 'never') {
+      findings.push('approval.policy=never');
+    }
+  }
+  return findings;
+}
+
+export function normalizeSafePermission(rows) {
+  const result = clone(sequence(rows));
+  for (const { row } of occurrences(result, 'permission')) {
+    if (row.config?.defaultPreset === 'danger-full-access') {
+      row.config.defaultPreset = SAFE_PERMISSION_PRESET;
+    }
+  }
+  for (const { row } of occurrences(result, 'sandbox-policy')) {
+    if (row.config?.mode === 'danger-full-access') {
+      row.config.mode = SAFE_PERMISSION_PRESET;
+    }
+  }
+  for (const { row } of occurrences(result, 'approval')) {
+    if (row.config?.policy === 'never') {
+      row.config.policy = 'ask';
+    }
+  }
+  return result;
+}
+
+export function extractDefaultModel(profileRows, settingsObj) {
+  let provider = '';
+  let model = '';
+  if (Array.isArray(profileRows)) {
+    for (const { row } of occurrences(profileRows, 'agent-default-model')) {
+      if (row.config?.provider !== undefined) provider = String(row.config.provider ?? '');
+      if (row.config?.model !== undefined) model = String(row.config.model ?? '');
+    }
+  }
+  if (settingsObj && typeof settingsObj === 'object' && !Array.isArray(settingsObj)) {
+    const override = settingsObj['agent-default-model'];
+    if (override && typeof override === 'object') {
+      if (override.provider !== undefined) provider = String(override.provider ?? '');
+      if (override.model !== undefined) model = String(override.model ?? '');
+    }
+  }
+  return { provider, model };
 }
 
 function presetPersona(preset) {
@@ -193,11 +253,30 @@ function main() {
     }
     return;
   }
+  if (required('--mode') === 'inspect-default-model') {
+    const dshHome = required('--dsh-home');
+    const profilePatch = path.join(dshHome, 'profiles', 'solidworks', 'cordis.patch.yml');
+    const settingsPath = path.join(dshHome, 'settings.yaml');
+    const profileRows = fs.existsSync(profilePatch) ? yaml.load(fs.readFileSync(profilePatch, 'utf8')) : [];
+    const settingsObj = fs.existsSync(settingsPath) ? yaml.load(fs.readFileSync(settingsPath, 'utf8')) : null;
+    console.log(JSON.stringify(extractDefaultModel(profileRows, settingsObj)));
+    return;
+  }
+  if (required('--mode') === 'check-permission') {
+    const source = required('--source');
+    const rows = fs.existsSync(source) ? yaml.load(fs.readFileSync(source, 'utf8')) : [];
+    const findings = detectFullAccessDefault(rows);
+    const ok = findings.length === 0;
+    console.log(ok ? 'permission preset safety: OK (no danger-full-access default)' : `permission preset risk: ${findings.join(', ')}`);
+    process.exitCode = ok ? 0 : 1;
+    return;
+  }
   if (required('--mode') === 'repair-vision') {
     const source = required('--source');
     const original = fs.readFileSync(source, 'utf8');
     const rows = yaml.load(original);
-    const repaired = repairKnownGptVision(rows);
+    let repaired = repairKnownGptVision(rows);
+    if (args.includes('--normalize-permission')) repaired = normalizeSafePermission(repaired);
     fs.writeFileSync(required('--destination'), isDeepStrictEqual(rows, repaired) ? original : yaml.dump(repaired), 'utf8');
     console.log('known GPT vision input declarations prepared; credentials not displayed');
     return;

@@ -37,11 +37,16 @@ from intake import _open_source
 _HELPER = r'''
 param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][string]$OutFile)
 $ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null
-[Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime] | Out-Null
-[Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
-[Windows.Storage.Streams.IRandomAccessStream, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null
+try {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Storage.Streams.IRandomAccessStream, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null
+} catch [System.PlatformNotSupportedException] {
+    Write-Error ("PLATFORM_NOT_SUPPORTED: " + $_.Exception.Message)
+    exit 2
+}
 $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
     $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
     $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
@@ -55,7 +60,15 @@ $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Wind
 $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
 $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-if ($null -eq $engine) { throw "no OCR engine for the user profile languages" }
+if ($null -eq $engine) {
+    $avail = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages)
+    $preferred = $avail | Where-Object { $_.LanguageTag -like 'zh*' -or $_.LanguageTag -like 'en*' } | Select-Object -First 1
+    if ($null -eq $preferred -and $avail.Count -gt 0) { $preferred = $avail[0] }
+    if ($null -ne $preferred) {
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($preferred)
+    }
+}
+if ($null -eq $engine) { throw "NO_OCR_LANGUAGE_PACK: no OCR engine for user profile or installed recognizer languages" }
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
 $rows = @()
 foreach ($line in @($result.Lines)) {
@@ -99,23 +112,70 @@ class OcrUnavailable(RuntimeError):
     """The engine or its helper could not run (not a drawing error)."""
 
 
+_OCR_FALLBACK_GUIDANCE = (
+    "Windows 内置 OCR 在当前机器不可用（它是可选辅助工具，不是图纸尺寸缺失）："
+    "请直接查看原图并使用 read_drawing_region 裁图放大读取尺寸，不要再重试 read_drawing_text。"
+)
+
+
+def _format_ocr_unavailable(detail):
+    raw = (detail or "").strip()
+    if "PlatformNotSupportedException" in raw or "PLATFORM_NOT_SUPPORTED" in raw:
+        reason = "Windows WinRT OCR projection is not supported in this runtime/OS build (PlatformNotSupportedException)"
+    elif "NO_OCR_LANGUAGE_PACK" in raw or "no OCR engine" in raw or "no OCR recognizer" in raw:
+        reason = "no Windows OCR recognizer language pack is installed"
+    else:
+        reason = "the OCR helper produced no result"
+    snippet = (" [%s]" % raw[:240]) if raw else ""
+    return "OCR_UNAVAILABLE: %s.%s %s" % (reason, snippet, _OCR_FALLBACK_GUIDANCE)
+
+
+def _windows_powershell():
+    """Resolve 64-bit Windows PowerShell 5.1 explicitly so pwsh/.NET Core never hijacks WinRT."""
+    if os.name != "nt":
+        raise OcrUnavailable(
+            _format_ocr_unavailable("PLATFORM_NOT_SUPPORTED: Windows.Media.Ocr requires Windows 10/11")
+        )
+    sys_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    for sub in ("Sysnative", "System32"):
+        candidate = Path(sys_root) / sub / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not found:
+        raise OcrUnavailable(_format_ocr_unavailable("Windows PowerShell 5.1 executable not found"))
+    return found
+
+
 def engine_languages():
     """The OCR languages installed on this machine, as tags (['en-US', ...])."""
+    ps_exe = _windows_powershell()
     ps = (
-        "Add-Type -AssemblyName System.Runtime.WindowsRuntime;"
-        "[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null;"
+        "try { "
+        "Add-Type -AssemblyName System.Runtime.WindowsRuntime; "
+        "[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null; "
         "([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | "
-        "ForEach-Object { $_.LanguageTag }) -join ','"
+        "ForEach-Object { $_.LanguageTag }) -join ',' "
+        "} catch [System.PlatformNotSupportedException] { "
+        "Write-Error ('PLATFORM_NOT_SUPPORTED: ' + $_.Exception.Message); exit 2 }"
     )
     try:
-        out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                              "-Command", ps],
-                             capture_output=True, text=True, timeout=60)
+        out = subprocess.run(
+            [ps_exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise OcrUnavailable("could not query the OCR engine: %s" % exc)
+        raise OcrUnavailable(_format_ocr_unavailable("could not query the OCR engine: %s" % exc))
+    if out.returncode != 0 and ("PlatformNotSupportedException" in (out.stderr or "") or "PLATFORM_NOT_SUPPORTED" in (out.stderr or "")):
+        raise OcrUnavailable(_format_ocr_unavailable(out.stderr))
     tags = [t.strip() for t in (out.stdout or "").strip().split(",") if t.strip()]
     if not tags:
-        raise OcrUnavailable("no OCR recognizer language is installed on this Windows machine")
+        raise OcrUnavailable(
+            _format_ocr_unavailable(out.stderr or "NO_OCR_LANGUAGE_PACK: no OCR recognizer language is installed")
+        )
     return tags
 
 
@@ -153,17 +213,29 @@ def _prepare(path, workdir, rotate=0):
 
 
 def _run_helper(image_path, workdir, timeout=180):
+    ps_exe = _windows_powershell()
     helper = Path(workdir) / "ocr.ps1"
     helper.write_text(_HELPER, encoding="utf-8")
     out = Path(workdir) / "out.json"
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-File", str(helper), "-Path", str(image_path), "-OutFile", str(out)],
-        capture_output=True, text=True, timeout=timeout)
+    try:
+        proc = subprocess.run(
+            [ps_exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(helper), "-Path", str(image_path), "-OutFile", str(out)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OcrUnavailable(_format_ocr_unavailable(str(exc)))
     if not out.exists():
-        raise OcrUnavailable("the OCR helper produced no result: %s"
-                             % ((proc.stderr or proc.stdout or "").strip()[:400]))
-    return json.loads(out.read_text(encoding="utf-8"))
+        raise OcrUnavailable(
+            _format_ocr_unavailable((proc.stderr or proc.stdout or "").strip()[:400])
+        )
+    try:
+        return json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise OcrUnavailable(_format_ocr_unavailable("invalid OCR JSON output: %s" % exc))
 
 
 def _to_source_box(box, scale, rotate, out_size, src_size):

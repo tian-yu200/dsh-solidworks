@@ -60,10 +60,14 @@ class AdapterExecutionPort(ExecutionPort):
         return get_state()
 
 
-def run_feature_graph(graph):
+def run_feature_graph(graph, *, semantic_feature_names=True):
     """Compile + run a Feature Graph IR (dict) against the live execution layer.
 
     Returns a pycompiler CompileResult. Does NOT touch the adapter's state_version global — the
     caller (server.submit_feature_graph) resyncs that afterwards via GET /state (first-class).
+    By default `semantic_feature_names=True` renames created features/sketches/planes in the
+    SolidWorks FeatureManager tree to human-readable node names (best-effort, non-fatal).
     """
-    return compile_and_run(AdapterExecutionPort(), graph)
+    return compile_and_run(
+        AdapterExecutionPort(), graph, semantic_feature_names=semantic_feature_names
+    )

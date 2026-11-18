@@ -122,6 +122,19 @@ function effectiveInput(provider, modelId, entry) {
     return declaredInput(entry ?? {}) ?? catalog.find((m) => m.id === modelId)?.input ?? providers[provider].defaultInput;
 }
 
+// Official and proxy-forwarded DeepSeek text/reasoning/flash models (e.g. DeepSeek-V4.1-Flash,
+// azure-sub2/deepseek-v4.1-flash, deepseek-chat, deepseek-reasoner, deepseek-v3*, deepseek-r1*)
+// do not have a vision encoder even when a gateway marks every route as `input: [text, image]`.
+// Multimodal variants carrying `vl`, `vision`, or `janus` in the model name remain allowed.
+const KNOWN_TEXT_ONLY_DEEPSEEK_RE = /(?:^|[/:-])deepseek(?![^/]*?(?:vl|vision|janus))(?:$|[-._/0-9a-z])/i;
+
+function isKnownTextOnlyModel(modelId) {
+    return typeof modelId === "string" && KNOWN_TEXT_ONLY_DEEPSEEK_RE.test(modelId.trim());
+}
+
+const VISION_REMEDIATION_ZH =
+    "请在 DSH 界面或 ~/.dsh/settings.yaml 中将默认模型切换为支持视觉识图的多模态模型（如 GPT-6.1-Sol / Claude / GLM 多模态系列），切勿使用纯文本或无视觉 Flash 模型进行看图建模。";
+
 const problems = [];
 const report = [];
 
@@ -147,18 +160,25 @@ for (const [name, provider] of Object.entries(providers)) {
     }
     for (const [modelId, entry] of entries) {
         const effective = effectiveInput(name, modelId, entry);
-        report.push(`  ${name}/${modelId}: effective input = ${JSON.stringify(effective)}`);
+        const textOnlyNote = isKnownTextOnlyModel(modelId) && effective.includes("image")
+            ? " (WARN: known text-only DeepSeek model; do not select as default for CAD drawings)"
+            : "";
+        report.push(`  ${name}/${modelId}: effective input = ${JSON.stringify(effective)}${textOnlyNote}`);
     }
 }
 
 if (selectedProvider && defaultModel?.provider !== selectedProvider) {
     report.push("  default model is outside selected provider scope");
 } else if (!defaultModel?.provider || !defaultModel?.model) {
-    problems.push("agent-default-model is not set; DSH will fall back to a built-in default that may not accept images");
+    problems.push(
+        `agent-default-model is not set; DSH will fall back to a built-in default that may not accept images ` +
+        `（【中文拦截提示】尚未设置默认模型 agent-default-model；${VISION_REMEDIATION_ZH}）`
+    );
 } else if (!providers[defaultModel.provider]) {
     problems.push(
         `agent-default-model names provider "${defaultModel.provider}", which is not configured under llm-pi-ai.providers ` +
-        `(official DeepSeek adapter routes are text-only and cannot serve the CAD reference-image workflow)`
+        `(official DeepSeek adapter routes are text-only and cannot serve the CAD reference-image workflow；` +
+        `【中文拦截提示】当前默认路由 "${defaultModel.provider}/${defaultModel.model}" 为纯文本通道，不支持看图建模！${VISION_REMEDIATION_ZH})`
     );
 } else {
     const provider = providers[defaultModel.provider];
@@ -167,14 +187,25 @@ if (selectedProvider && defaultModel?.provider !== selectedProvider) {
         ...Object.entries(provider.modelOverrides ?? {}).map(([id, o]) => [id, { id, ...o }]),
     ].find(([id]) => id === defaultModel.model)?.[1];
     if (!entry && !catalogRoutes.has(defaultModel.provider)) {
-        problems.push(`agent-default-model names model "${defaultModel.model}", which is not declared under provider "${defaultModel.provider}"`);
+        problems.push(
+            `agent-default-model names model "${defaultModel.model}", which is not declared under provider "${defaultModel.provider}" ` +
+            `（【中文拦截提示】默认模型 "${defaultModel.model}" 未在 provider "${defaultModel.provider}" 下声明；${VISION_REMEDIATION_ZH}）`
+        );
     } else if (!entry && catalogRoutes.has(defaultModel.provider)) {
         const catalog = piAiProviders.getBuiltinModels(defaultModel.provider).find((m) => m.id === defaultModel.model);
-        if (!catalog) problems.push(`agent-default-model names model "${defaultModel.model}", which the "${defaultModel.provider}" catalog does not list`);
-        else {
+        if (!catalog) {
+            problems.push(
+                `agent-default-model names model "${defaultModel.model}", which the "${defaultModel.provider}" catalog does not list ` +
+                `（【中文拦截提示】内置目录 "${defaultModel.provider}" 中不存在模型 "${defaultModel.model}"；${VISION_REMEDIATION_ZH}）`
+            );
+        } else {
             report.push(`  default model ${defaultModel.provider}/${defaultModel.model}: effective input = ${JSON.stringify(catalog.input)}`);
-            if (!catalog.input.includes("image")) {
-                problems.push(`default model ${defaultModel.provider}/${defaultModel.model} resolves to input ${JSON.stringify(catalog.input)} without "image"; the CAD reference-image workflow cannot run`);
+            if (!catalog.input.includes("image") || isKnownTextOnlyModel(defaultModel.model)) {
+                problems.push(
+                    `default model ${defaultModel.provider}/${defaultModel.model} resolves to input ${JSON.stringify(catalog.input)} without "image"; ` +
+                    `the CAD reference-image workflow cannot run ` +
+                    `（【中文拦截提示】当前默认模型 "${defaultModel.model}" 无视觉识图能力，无法看懂工程图纸！${VISION_REMEDIATION_ZH}）`
+                );
             }
         }
     }
@@ -182,7 +213,17 @@ if (selectedProvider && defaultModel?.provider !== selectedProvider) {
         const effective = effectiveInput(defaultModel.provider, defaultModel.model, entry);
         report.push(`  default model ${defaultModel.provider}/${defaultModel.model}: effective input = ${JSON.stringify(effective)}`);
         if (!effective.includes("image")) {
-            problems.push(`default model ${defaultModel.provider}/${defaultModel.model} resolves to input ${JSON.stringify(effective)} without "image"; the CAD reference-image workflow cannot run`);
+            problems.push(
+                `default model ${defaultModel.provider}/${defaultModel.model} resolves to input ${JSON.stringify(effective)} without "image"; ` +
+                `the CAD reference-image workflow cannot run ` +
+                `（【中文拦截提示】当前默认模型 "${defaultModel.model}" 未启用图片输入能力，无法看懂工程图纸！${VISION_REMEDIATION_ZH}）`
+            );
+        } else if (isKnownTextOnlyModel(defaultModel.model)) {
+            problems.push(
+                `default model ${defaultModel.provider}/${defaultModel.model} is a known text-only model without "image" vision capability ` +
+                `(even when a proxy declares "image", DeepSeek text/Flash models cannot inspect engineering drawings; the CAD reference-image workflow cannot run；` +
+                `【中文拦截提示】当前默认模型 "${defaultModel.model}" 属于纯文本模型（无视觉识图能力），看图建模会彻底失败！${VISION_REMEDIATION_ZH})`
+            );
         }
     }
 }

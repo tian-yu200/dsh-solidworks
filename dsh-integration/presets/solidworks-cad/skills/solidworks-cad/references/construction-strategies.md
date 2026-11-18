@@ -18,6 +18,27 @@ Resolve the sketch normal and cut direction before choosing the end condition. A
 
 Use the sketch `fillet` primitive for a specified local blend between adjacent profile elements. For a dimensioned tangent arc that defines the main contour, solve its circle center and tangent endpoints, then encode an `arc`. Internal tangency requires center distance equal to the radius difference; external tangency requires the radius sum. Verify the tangent endpoints against both circles and the adjoining profile before submission.
 
+## Editability And Robust Feature Trees
+
+Generated SolidWorks parts must remain clean and easy for a human mechanical engineer to tweak parametrically in SolidWorks without triggering cascading rebuild errors (red/yellow feature-tree warnings):
+
+1. **Datum-first anchoring over fragile derived geometry**:
+   - Anchor primary base features, symmetric cuts, secondary bosses, and cross-bores to the three standard datum planes (`front`, `top`, `right`) or explicit datum offsets (`ref: {"datum": ..., "offset": ...}`) whenever possible.
+   - Center symmetric parts on the origin and use `mid_plane` extrusions so editing overall width or length automatically preserves symmetry and hole centering.
+   - Reference a body face (`node_face`) only when child design intent genuinely tracks that major planar face (such as mounting holes on a top flange). **Never** anchor sketches, planes, or holes to fillet faces, chamfer faces, narrow sliver faces, or incidental edges created by intersecting cuts.
+2. **Strict feature-tree order — fillets, chamfers, and holes near the end**:
+   - Order Feature Graph nodes from coarse structural stock to fine detail:
+     1) Primary base solid (`box`, base `extrude` boss, or main `revolve`);
+     2) Secondary structural bosses, flanges, ears, and ribs/webs;
+     3) Major internal bores, cavities, pockets, and profile-trimming cuts;
+     4) Hole features, counterbores/countersinks, and `cosmetic_thread` annotations;
+     5) Linear/circular patterns and mirrors;
+     6) **Dress-up `fillet` and `chamfer` nodes strictly LAST** (structural larger radii before small general-note rounds and edge-break chamfers).
+   - Never place sketch extrusions, cuts, or holes *after* `fillet`/`chamfer` nodes on adjacent faces unless a downstream feature (such as uniform-wall `shell`) geometrically requires the outer round first. Keeping dress-up features at the bottom ensures an engineer can suppress or resize radii without breaking upstream sketches or edge selections.
+3. **Single-intent sketches and semantic end conditions**:
+   - Keep each sketch simple and focused on one engineering feature: put the outer contour (and major contour-defining tangent arcs) in the base sketch, and keep hole groups, keyways, slots, and local corner rounds as separate downstream `hole`, cut, or `fillet` features so dimensions are easy to find and edit in the SolidWorks FeatureManager tree.
+   - Express true design intent in end conditions: use `through_all` (or `mid_plane` with explicit clearance) for through holes and through slots rather than a `blind` depth equal to the current wall thickness, so thickening a plate later does not turn a through hole into a blind hole.
+
 ## Verification Boundary
 
 Treat schema validation and mock compilation as checks of representation compatibility. A live core or contour probe establishes only the included component and operations; record its covered and omitted features explicitly.

@@ -3,7 +3,9 @@ param(
     [string]$DshHome = "$HOME\.dsh",
     [string]$DshRoot = "D:\deepseek-harness",
     [string]$ProjectRoot = "",
-    [string]$Python = ""
+    [string]$Python = "",
+    [string]$DumpPath = "",
+    [switch]$SkipDump
 )
 
 $ErrorActionPreference = "Continue"
@@ -54,7 +56,15 @@ $PolicyTemplate = Join-Path $ProjectRoot "dsh-integration/plugins/solidworks-pol
 $ResolvedPolicy = Join-Path $ProfileRoot "node_modules/@dsh-solidworks/policy/index.js"
 $PolicyPackage = Join-Path $DshHome "plugins\solidworks-policy\package.json"
 $ModLensPackage = Join-Path $ProfileRoot "node_modules\@liustack\modlens\package.json"
-$DumpPath = Join-Path $ProjectRoot "state\solidworks-profile.dump.txt"
+$DumpPath = if ($DumpPath) { [System.IO.Path]::GetFullPath($DumpPath) } else { Join-Path $ProjectRoot "state\solidworks-profile.dump.txt" }
+
+. (Join-Path $PSScriptRoot "SolidWorksEnvHelpers.ps1")
+
+$ArchStatus = Test-SolidWorks64BitEnvironment
+Add-Check "64-bit environment" $ArchStatus.Ok $ArchStatus.Detail
+
+$DotNetStatus = Get-DotNetFramework48Status
+Add-Check ".NET Framework 4.8" $DotNetStatus.Ok $DotNetStatus.Detail
 
 $DshVersion = Read-PackageVersion $DshPackage
 $DshDetail = if ($DshVersion) { "version $DshVersion" } else { $DshPackage }
@@ -62,6 +72,21 @@ Add-Check "DSH launcher" ((Test-Path -LiteralPath $Dsh) -and $null -ne $DshVersi
 Add-Check "Python venv" (Test-Path -LiteralPath $Python) $Python
 Add-Check "High-level MCP" (Test-Path -LiteralPath $Server) $Server
 Add-Check "Execution server" (Test-Path -LiteralPath $Execution) $Execution
+
+$PeStatus = Get-ExecutablePeArchitecture -ExePath $Execution
+$MsBuildFound = Find-SolidWorksMsBuild
+$PeDetail = if ($PeStatus.ValidPe) {
+    $PeStatus.Detail
+} elseif ($MsBuildFound) {
+    "$($PeStatus.Detail) (MSBuild available to auto-compile: $MsBuildFound)"
+} else {
+    "$($PeStatus.Detail) (MSBuild not found; ship prebuilt x64 SolidworksExecution.exe or install VS Build Tools)"
+}
+Add-Check "Execution binary (PE/CLR)" $PeStatus.ValidPe $PeDetail
+
+$SwComStatus = Get-SolidWorksComStatus
+Add-Check "SolidWorks COM registration" $SwComStatus.Registered $SwComStatus.Detail
+
 Add-Check "Web profile" (Test-Path -LiteralPath $WebProfile) $WebProfile
 Add-Check "SolidWorks profile" (Test-Path -LiteralPath $Profile) $Profile
 Add-Check "SolidWorks preset" (Test-Path -LiteralPath $Preset) $Preset
@@ -108,6 +133,38 @@ foreach ($Patch in @(
     Add-Check "Installed $($Patch.Name) profile synchronized" ($PatchExitCode -eq 0) $PatchOutput.Trim()
 }
 
+# Check permission preset safety (prevent danger-full-access warnings in SolidWorks sessions).
+$PermissionIssues = [System.Collections.Generic.List[string]]::new()
+if ($env:DSH_PERMISSION_MODE -eq "danger-full-access") {
+    $PermissionIssues.Add("env DSH_PERMISSION_MODE=danger-full-access")
+}
+if ($ProfileSource -match "(?m)^\s*defaultPreset:\s*['""]?danger-full-access['""]?\s*$") {
+    $PermissionIssues.Add("solidworks profile defaultPreset=danger-full-access")
+}
+$SettingsYaml = Join-Path $DshHome "settings.yaml"
+if (Test-Path -LiteralPath $SettingsYaml -PathType Leaf) {
+    $SettingsText = Get-Content -Raw -LiteralPath $SettingsYaml
+    if ($SettingsText -match "(?ms)^permission:\s*\r?\n(?:[ \t]+.*\r?\n)*?[ \t]+defaultPreset:\s*['""]?danger-full-access['""]?\s*$") {
+        $PermissionIssues.Add("settings.yaml permission.defaultPreset=danger-full-access")
+    }
+}
+$TauriPatch = Join-Path $DshHome "profiles/tauri/cordis.patch.yml"
+$TauriHasFullAccess = $false
+if (Test-Path -LiteralPath $TauriPatch -PathType Leaf) {
+    $TauriSource = Get-Content -Raw -LiteralPath $TauriPatch
+    if ($TauriSource -match "(?m)^\s*defaultPreset:\s*['""]?danger-full-access['""]?\s*$") {
+        $TauriHasFullAccess = $true
+    }
+}
+$PermissionDetail = if ($PermissionIssues.Count -gt 0) {
+    "risk: " + ($PermissionIssues -join "; ")
+} elseif ($TauriHasFullAccess) {
+    "solidworks profile uses workspace-write (note: tauri desktop patch has danger-full-access; prefer Start-SolidWorksDsh.ps1)"
+} else {
+    "workspace-write (approval: ask; no danger-full-access warning)"
+}
+Add-Check "Permission preset safety" ($PermissionIssues.Count -eq 0) $PermissionDetail
+
 $PresetSynchronized = (
     (Test-Path -LiteralPath $Preset) -and
     (Test-Path -LiteralPath $PresetTemplate) -and
@@ -116,7 +173,6 @@ $PresetSynchronized = (
 )
 Add-Check "Installed preset synchronized" $PresetSynchronized $PresetTemplate
 
-$TauriPatch = Join-Path $DshHome "profiles/tauri/cordis.patch.yml"
 if (Test-Path -LiteralPath $TauriPatch) {
     $TauriOutput = & node $ProfilePatchScript --mode check-tauri --dsh-root $DshRoot `
         --source $TauriPatch --preset $PresetTemplate 2>&1 | Out-String
@@ -265,7 +321,7 @@ if (Test-Path -LiteralPath $Python) {
 }
 
 $DumpOk = $false
-if (Test-Path -LiteralPath $Dsh) {
+if (-not $SkipDump -and (Test-Path -LiteralPath $Dsh)) {
     $PreviousDshHome = $env:DSH_HOME
     try {
         $env:DSH_HOME = $DshHome
@@ -281,20 +337,24 @@ if (Test-Path -LiteralPath $Dsh) {
     Add-Check "Redacted config dump" $DumpOk $DumpPath
     $HasPolicy = $DumpOk -and $RawDump.Contains("@dsh-solidworks/policy")
     Add-Check "Policy in profile" $HasPolicy "solidworks profile dump"
+} elseif ($SkipDump -and (Test-Path -LiteralPath $DumpPath -PathType Leaf)) {
+    $DumpOk = $true
 }
 
 $ImageCapabilityScript = Join-Path $PSScriptRoot "Check-ModelImageCapability.mjs"
+$CapabilityDetailFull = ""
 if ($DumpOk -and (Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $ImageCapabilityScript)) {
     $CapabilityOutput = & node $ImageCapabilityScript `
         --profile-dump $DumpPath `
         --profiles (Join-Path $DshHome "profiles") 2>&1 | Out-String
     $CapabilityExitCode = $LASTEXITCODE
+    $CapabilityDetailFull = $CapabilityOutput.Trim()
     $CapabilityLines = $CapabilityOutput -split "`n" |
         Where-Object { $_ -match "default model|FAIL|ERROR:|image capability:" } |
         ForEach-Object { $_.Trim() }
     if (-not $CapabilityLines) { $CapabilityLines = @("Image checker returned exit $CapabilityExitCode without a capability report") }
     Add-Check "Model image capability" ($CapabilityExitCode -eq 0) ($CapabilityLines -join " | ")
-} else {
+} elseif (-not $SkipDump) {
     Add-Check "Model image capability" $false "fresh profile dump or image checker unavailable"
 }
 
@@ -311,7 +371,59 @@ $PortDetail = if ($Port) { "listening" } else { "not listening (adapter can auto
 Add-Check "Execution port 5000" ($null -ne $Port) $PortDetail
 
 $Checks | Format-Table -AutoSize
-$Optional = @("SolidWorks process", "Execution port 5000")
-if ($Checks.Where({ -not $_.Ok -and $_.Check -notin $Optional }).Count) {
+$Optional = @("SolidWorks process", "Execution port 5000", "SolidWorks COM registration")
+$FailedRequired = @($Checks.Where({ -not $_.Ok -and $_.Check -notin $Optional }))
+
+Write-Host ""
+Write-Host "================ SolidWorks AI 环境中文诊断摘要 ================" -ForegroundColor Cyan
+Write-Host "【硬件提示】AI 推理运算全部在云端完成，不占用本机显卡/CPU 算力；只要电脑能正常打开 SolidWorks 即可流畅使用。" -ForegroundColor Gray
+
+if (-not $SwComStatus.Registered) {
+    Write-Host "【提醒】$($SwComStatus.RemediationZh)" -ForegroundColor Yellow
+}
+if ($PeStatus.ValidPe -and $PeStatus.Prefer32Bit) {
+    Write-Host "【提示】当前 SolidworksExecution.exe 为 AnyCPU (Prefer32Bit=True)；如遇 COM 位数异常，可运行 Setup-SolidWorksEasy.ps1 -RebuildExecution 重编译为原生 x64。" -ForegroundColor DarkYellow
+}
+if ($TauriHasFullAccess) {
+    Write-Host "【安全说明】检测到桌面端配置含 danger-full-access；请优先使用 Start-SolidWorksDsh.ps1 启动专属 solidworks 模式（默认锁定为安全的 workspace-write，无高危权限弹窗）。" -ForegroundColor DarkYellow
+}
+
+if ($FailedRequired.Count -gt 0) {
+    Write-Host "【自检未通过】共发现 $($FailedRequired.Count) 项必选配置问题，请按以下提示修复：" -ForegroundColor Red
+    foreach ($Item in $FailedRequired) {
+        switch ($Item.Check) {
+            "64-bit environment" {
+                Write-Host "  - [64位环境] $($ArchStatus.RemediationZh)" -ForegroundColor Red
+            }
+            ".NET Framework 4.8" {
+                Write-Host "  - [.NET 4.8] $($DotNetStatus.RemediationZh)" -ForegroundColor Red
+            }
+            "Execution server" {
+                Write-Host "  - [C# 执行服务] 未找到 SolidworksExecution.exe。请运行 .\dsh-integration\scripts\Setup-SolidWorksEasy.ps1 自动调用 MSBuild 编译，或解压预编译运行包。" -ForegroundColor Red
+            }
+            "Execution binary (PE/CLR)" {
+                Write-Host "  - [执行程序校验] $($Item.Detail)。请运行 .\dsh-integration\scripts\Setup-SolidWorksEasy.ps1 重新准备 C# 执行服务。" -ForegroundColor Red
+            }
+            "Permission preset safety" {
+                Write-Host "  - [权限模式告警] 检测到 $($Item.Detail)。请运行 .\dsh-integration\scripts\Install-SolidWorksDsh.ps1 同步最新安全配置，避免出现 danger-full-access 高危警告。" -ForegroundColor Red
+            }
+            "Model image capability" {
+                Write-Host "  - [视觉模型拦截] 当前默认模型不支持看图建模（如误用了 DeepSeek-V4.1-Flash 等纯文本模型）！" -ForegroundColor Red
+                Write-Host "    修复方法：打开 DSH 界面或修改 ~/.dsh/settings.yaml，将默认模型切换为带视觉识图能力的多模态模型（如 GPT-6.1-Sol / Claude / GLM 多模态系列），重启 DSH 后重试。" -ForegroundColor Yellow
+                if ($CapabilityDetailFull) {
+                    Write-Host "    详细原因：$($Item.Detail)" -ForegroundColor DarkGray
+                }
+            }
+            default {
+                Write-Host "  - [$($Item.Check)] 异常详情：$($Item.Detail)（建议运行 .\dsh-integration\scripts\Setup-SolidWorksEasy.ps1 一键修复同步）" -ForegroundColor Red
+            }
+        }
+    }
     exit 1
+}
+
+Write-Host "【自检通过】所有核心环境、安全白名单与多模态视觉模型检查均已就绪！" -ForegroundColor Green
+$SavedWs = Get-SavedSolidWorksWorkspaceDir -DshHome $DshHome
+if ($SavedWs) {
+    Write-Host "【工作目录】当前默认零件保存目录：$SavedWs（不占用 C 盘系统空间）" -ForegroundColor Green
 }

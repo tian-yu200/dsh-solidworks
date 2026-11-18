@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { mergeManagedPatch, managedPatchMatches, repairKnownGptVision, syncEmbeddedPersona, embeddedPersonaMatches } from '../SolidWorksProfilePatch.mjs';
+import {
+  mergeManagedPatch,
+  managedPatchMatches,
+  repairKnownGptVision,
+  syncEmbeddedPersona,
+  embeddedPersonaMatches,
+  detectFullAccessDefault,
+  normalizeSafePermission,
+} from '../SolidWorksProfilePatch.mjs';
 
 const mcp = { id: 'mcp-solidworks-orchestrator', name: '@deepseek-ai/dsh-mcp-client', config: { command: 'new/python', args: ['new/server.py'], cwd: 'new/adapter', serverName: 'solidworks', transport: 'stdio', toolCallTimeoutMs: 300000, failOnStartupError: true } };
 const template = [{ insert: [mcp] }, { id: 'agent-presets', config: { default: 'solidworks-cad' } }];
@@ -85,4 +95,30 @@ test('known GPT models get explicit vision input and installation preserves ever
   assert.deepEqual(installed[0], fixed[0]);
   assert.equal(installed[0].config.providers.gpt.modelOverrides['gpt-6.1-sol'].maxTokens, 5);
   assert.deepEqual(installed[0].config.providers.gpt.modelOverrides['gpt-6.1-sol'].input, ['text', 'image']);
+});
+
+test('shipped solidworks profile template locks default permission to workspace-write and clears danger-full-access', () => {
+  const patchPath = fileURLToPath(new URL('../../profiles/solidworks/cordis.patch.yml', import.meta.url));
+  const raw = fs.readFileSync(patchPath, 'utf8');
+  assert.match(raw, /defaultPreset:\s*workspace-write/);
+  assert.match(raw, /mode:\s*workspace-write/);
+  assert.match(raw, /policy:\s*ask/);
+
+  const riskyRows = [
+    { id: 'llm-pi-ai', config: { providers: { gpt: { apiKey: 'fixture-secret' } } } },
+    { id: 'sandbox-policy', config: { mode: 'danger-full-access' } },
+    { id: 'approval', config: { policy: 'never' } },
+    { id: 'permission', config: { defaultPreset: 'danger-full-access', presets: { 'workspace-write': { sandbox: 'workspace-write', approval: 'ask' }, 'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' } } } },
+  ];
+  assert.deepEqual(detectFullAccessDefault(riskyRows), [
+    'permission.defaultPreset=danger-full-access',
+    'sandbox-policy.mode=danger-full-access',
+    'approval.policy=never',
+  ]);
+  const normalized = normalizeSafePermission(riskyRows);
+  assert.deepEqual(detectFullAccessDefault(normalized), []);
+  assert.equal(normalized[0].config.providers.gpt.apiKey, 'fixture-secret');
+  assert.equal(normalized[1].config.mode, 'workspace-write');
+  assert.equal(normalized[2].config.policy, 'ask');
+  assert.equal(normalized[3].config.defaultPreset, 'workspace-write');
 });

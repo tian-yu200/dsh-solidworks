@@ -1,4 +1,7 @@
 # SolidWorks-specific profile: host tools plus the default CAD preset.
+# Permission defaults to 'workspace-write' (approval: ask) rather than 'danger-full-access':
+# host shell tools are disabled and solidworks-policy restricts the agent to the 17 approved
+# CAD/support tools, while 'ask' preserves the native confirmation dialog for confirm_action.
 
 - insert:
     - id: mcp-solidworks-orchestrator
@@ -18,3 +21,25 @@
 - id: agent-presets
   config:
     default: solidworks-cad
+
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+
+- id: approval
+  config:
+    policy: ask
+
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: workspace-write

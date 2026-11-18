@@ -36,6 +36,15 @@ RECOVERY_PROBE_INTERVAL_SECONDS = 5.0
 DOCUMENTS_ENDPOINT = IDENTITY_ENDPOINT.rsplit("/", 1)[0] + "/documents"
 
 
+def _windows_powershell_path():
+    sys_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    for sub in ("Sysnative", "System32"):
+        candidate = os.path.join(sys_root, sub, "WindowsPowerShell", "v1.0", "powershell.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return "powershell.exe"
+
+
 def _process_snapshot():
     """Read process identities without contacting a possibly blocked SolidWorks STA."""
     empty = {"solidworks_pids": [], "execution_service_pids": []}
@@ -49,7 +58,7 @@ def _process_snapshot():
         "[PSCustomObject]@{ solidworks_pids = $sw; execution_service_pids = $svc } | ConvertTo-Json -Compress"
     )
     try:
-        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        result = subprocess.run([_windows_powershell_path(), "-NoProfile", "-NonInteractive", "-Command", command],
                                 capture_output=True, text=True, timeout=2.0, check=False,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode != 0 or not result.stdout.strip():

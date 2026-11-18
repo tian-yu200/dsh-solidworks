@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Threading;
 using Microsoft.Owin.Hosting;
 using SolidworksExecution.Infrastructure;
@@ -25,15 +26,26 @@ namespace SolidworksExecution
             {
                 try
                 {
+                    string arch = Environment.Is64BitProcess ? "x64" : "x86";
+                    if (!HttpListener.IsSupported)
+                    {
+                        throw new PlatformNotSupportedException(
+                            "System.Net.HttpListener is not supported on this Windows configuration (HTTP.sys unavailable).");
+                    }
                     string baseAddress = "http://localhost:5000/";
                     using (WebApp.Start<Startup>(url: baseAddress))
                     {
-                        Console.WriteLine("SolidworksExecution server running at " + baseAddress);
+                        Console.WriteLine("SolidworksExecution server running at " + baseAddress + " (" + arch + ")");
                         Console.WriteLine("Press Ctrl+C to stop.");
-                        ExecLog.Write("server started at " + baseAddress);
+                        ExecLog.Write("server started at " + baseAddress + " (arch=" + arch + ")");
                         _shutdown.Wait();
                         ExecLog.Write("server shutting down");
                     }
+                }
+                catch (PlatformNotSupportedException ex)
+                {
+                    threadException = ex;
+                    ExecLog.Write("FATAL platform compatibility error (arch=" + (Environment.Is64BitProcess ? "x64" : "x86") + "): " + ex);
                 }
                 catch (Exception ex)
                 {

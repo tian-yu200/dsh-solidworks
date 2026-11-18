@@ -71,6 +71,12 @@ def _error_payload(exc):
             "risk": "read",
             "error": {"code": "EXECUTION_LAYER_ERROR", "message": str(exc)},
         }
+    if isinstance(exc, ocr.OcrUnavailable):
+        return {
+            "status": "failed",
+            "risk": "read",
+            "error": {"code": _error_code_from(exc) or "OCR_UNAVAILABLE", "message": str(exc)},
+        }
     if isinstance(exc, ValueError):
         return {
             "status": "failed",

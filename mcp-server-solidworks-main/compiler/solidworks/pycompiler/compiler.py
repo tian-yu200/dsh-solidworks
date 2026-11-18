@@ -15,6 +15,7 @@ import json
 import math
 
 from . import diagnosis
+from . import editability
 from . import lowering
 from . import resolver
 from .errors import FeatureError
@@ -39,9 +40,11 @@ class CompileResult(object):
         self.final_state_version = None
         self.error = None                  # {code, message, [node_id, node_type, step]}
         self.warnings = []                 # non-fatal findings: the run still COMPLETED
+        self.feature_map = None
+        self._include_feature_map = False
 
     def to_dict(self):
-        return {
+        out = {
             "status": self.status,
             "nodes_total": self.nodes_total,
             "nodes_completed": self.nodes_completed,
@@ -51,6 +54,9 @@ class CompileResult(object):
             "warnings": self.warnings,
             "node_log": self.node_log,
         }
+        if self._include_feature_map and self.feature_map is not None:
+            out["feature_map"] = self.feature_map
+        return out
 
     def summary(self):
         """One-line human-readable summary for the MCP result string."""
@@ -77,7 +83,7 @@ class CompileResult(object):
                    self.nodes_completed, self.nodes_total))
 
 
-def compile_and_run(port, graph):
+def compile_and_run(port, graph, *, semantic_feature_names=False):
     """Public entry: one graph in, one CompileResult out.
 
     Opens the analyze-payload memo scope for THIS run and always closes it (SPEED task A) — a
@@ -85,12 +91,12 @@ def compile_and_run(port, graph):
     never be served here."""
     resolver.begin_run()
     try:
-        return _compile_and_run(port, graph)
+        return _compile_and_run(port, graph, semantic_feature_names=semantic_feature_names)
     finally:
         resolver.end_run()
 
 
-def _compile_and_run(port, graph):
+def _compile_and_run(port, graph, *, semantic_feature_names=False):
     result = CompileResult()
 
     # 1) Structural validation. If it fails, NO execution call is made.
@@ -121,10 +127,14 @@ def _compile_and_run(port, graph):
     # What has been built so far, for a failed extrude's explanation (findings H11).
     material = diagnosis.MaterialLog(nodes)
     hole_placements = []
+    created_entries = []
     for position, node in enumerate(nodes):
         nid = node.get("id")
         ntype = node.get("type")
         rec = {"id": nid, "type": ntype, "status": "PENDING", "ops": []}
+        node_sketch_count = 0
+        node_extrude_count = 0
+        has_cbore = bool(ntype == "hole" and node.get("counterbore"))
         try:
             ops = _plan_node(port, node, sv, node_features,
                              graph.get("thread_defaults"))  # may do a live (read-only) resolve
@@ -203,6 +213,14 @@ def _compile_and_run(port, graph):
                     ask = (resp.get("cadState") or {}).get("activeSketch")
                     if nid and ask:
                         node_features[nid] = ask
+                _record_created_entry(
+                    created_entries, nid, ntype, op.tool, params, resp,
+                    has_cbore, node_sketch_count, node_extrude_count,
+                )
+                if _echoes_frame(op):
+                    node_sketch_count += 1
+                if op.tool == "extrude_feature":
+                    node_extrude_count += 1
                 if _echoes_frame(op) and declared_frame is not None:
                     # The node records the ORIGINAL sketch's frame; the response carries the
                     # frame the op just MEASURED (create_sketch — or edge_flange_sketch, whose
@@ -313,6 +331,19 @@ def _compile_and_run(port, graph):
                             "node_id": nid, "node_type": ntype}
             result.final_state_version = sv
             return result
+
+    sv, rename_calls, feature_map = editability.apply_semantic_renames(
+        port, sv, nodes, created_entries, do_rename=bool(semantic_feature_names)
+    )
+    result.exec_calls += rename_calls
+    result.feature_map = feature_map
+    if semantic_feature_names:
+        result._include_feature_map = True
+        for rec_item in result.node_log:
+            finfo = feature_map.get(rec_item.get("id"))
+            if finfo:
+                rec_item["tree_features"] = finfo["tree_features"]
+                rec_item["depends_on"] = finfo["depends_on"]
 
     # 4) Graph-level material (v0.7.0) — document state, applied AFTER the geometry so a
     # material failure never aborts the build mid-tree. Part graphs only (validation enforced).
@@ -835,3 +866,46 @@ def _advance(resp, sv, nid, ntype, op):
                     "boss face — never a fixed inward offset.")
     raise FeatureError(message, code=err.get("code") or "TOOL_FAILED",
                        node_id=nid, node_type=ntype, step=op.tool)
+
+
+_RENAMEABLE_FEATURE_TOOLS = frozenset({
+    "extrude_feature",
+    "add_edge_feature",
+    "create_rib",
+    "create_shell",
+    "create_pattern",
+    "sheet_metal_feature",
+    "add_mate",
+})
+
+
+def _record_created_entry(entries, nid, ntype, tool, params, resp, has_cbore, sketch_idx, extrude_idx):
+    """Record a newly created SolidWorks feature/sketch/reference so editability can map or rename it."""
+    if not nid or not isinstance(resp, dict):
+        return
+    cad = resp.get("cadState") or {}
+    if tool == "create_sketch" or (tool == "sheet_metal_feature" and (params or {}).get("feature_type") == "edge_flange_sketch"):
+        ask = cad.get("activeSketch")
+        if ask:
+            if ntype == "sketch":
+                role = "primary_sketch"
+            elif has_cbore and sketch_idx == 0:
+                role = "cbore_sketch"
+            else:
+                role = "sketch"
+            entries.append({"node_id": nid, "node_type": ntype, "role": role, "runtime_name": ask})
+        return
+    feats = cad.get("features") or []
+    fname = feats[0] if feats and isinstance(feats[0], str) and feats[0] else None
+    if not fname:
+        return
+    if tool == "add_reference_geometry":
+        ref_kind = (params or {}).get("type")
+        role = "axis" if ref_kind == "axis" else "plane"
+        entries.append({"node_id": nid, "node_type": ntype, "role": role, "runtime_name": fname})
+    elif tool in ("add_cosmetic_thread", "insert_component"):
+        entries.append({"node_id": nid, "node_type": ntype, "role": "keep", "runtime_name": fname})
+    elif tool in _RENAMEABLE_FEATURE_TOOLS:
+        role = "cbore" if (has_cbore and tool == "extrude_feature" and extrude_idx == 0) else "primary"
+        entries.append({"node_id": nid, "node_type": ntype, "role": role, "runtime_name": fname})
+

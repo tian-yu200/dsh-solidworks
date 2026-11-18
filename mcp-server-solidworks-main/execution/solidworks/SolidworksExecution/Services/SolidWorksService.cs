@@ -92,7 +92,17 @@ namespace SolidworksExecution.Services
         public Dictionary<string, object> GetOpenDocumentsInfo()
         {
             if (_solidWorks == null || !IsAlive(_solidWorks))
-                _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+            {
+                try
+                {
+                    _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+                }
+                catch (PlatformNotSupportedException ex)
+                {
+                    ExecLog.Write($"documents: COM attach platform error (arch={(System.Environment.Is64BitProcess ? "x64" : "x86")}): {ex.Message}");
+                    throw new InvalidOperationException("COM attach is not supported in this runtime/architecture: " + ex.Message, ex);
+                }
+            }
             var documents = new List<Dictionary<string, object>>();
             var live = new HashSet<IntPtr>();
             var all = _solidWorks.GetDocuments() as object[] ?? new object[0];
@@ -167,6 +177,22 @@ namespace SolidworksExecution.Services
             catch (COMException)
             {
                 // Dead or absent — drop the cached reference so a later call re-attaches fresh.
+                _solidWorks = null;
+                _sessionVisibilityApplied = false;
+                IsConnected = false;
+                return false;
+            }
+            catch (PlatformNotSupportedException ex)
+            {
+                ExecLog.Write($"connect: platform not supported (arch={(System.Environment.Is64BitProcess ? "x64" : "x86")}): {ex.Message}");
+                _solidWorks = null;
+                _sessionVisibilityApplied = false;
+                IsConnected = false;
+                return false;
+            }
+            catch (InvalidCastException ex)
+            {
+                ExecLog.Write($"connect: COM interface cast failed (arch={(System.Environment.Is64BitProcess ? "x64" : "x86")}): {ex.Message}");
                 _solidWorks = null;
                 _sessionVisibilityApplied = false;
                 IsConnected = false;

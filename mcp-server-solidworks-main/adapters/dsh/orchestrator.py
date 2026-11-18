@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend import ExecutionLayerError, backend
+from diagnostic_attribution import build_diagnostic_attribution, extract_planned_by_model
 from job_store import job_store
 from models import (
     cad_state,
@@ -2377,13 +2378,22 @@ class CadOrchestrator:
                     )
                 ),
             }
+            exec_error = response.get("error") or {
+                "code": "FEATURE_GRAPH_FAILED",
+                "message": "Compiler failed.",
+            }
+            verification["diagnostic_attribution"] = build_diagnostic_attribution(
+                graph=payload["graph"],
+                verification=verification,
+                compiler=compiler,
+                error=exec_error,
+            )
             return self._transaction_failure_response(
                 job,
                 kind="feature_graph",
                 phase="execution",
                 risk=risk,
-                error=response.get("error")
-                or {"code": "FEATURE_GRAPH_FAILED", "message": "Compiler failed."},
+                error=exec_error,
                 verification=verification,
                 recovery_status=recovery_status,
                 recovery_event=recovery,
@@ -2418,18 +2428,25 @@ class CadOrchestrator:
                     newly_created=fresh_document,
                 )
             )
+            post_error = {
+                "code": "POST_VERIFICATION_FAILED",
+                "message": (
+                    "The Feature Graph executed, but objective "
+                    "post-verification did not pass."
+                ),
+            }
+            verification["diagnostic_attribution"] = build_diagnostic_attribution(
+                graph=payload["graph"],
+                verification=verification,
+                compiler=compiler,
+                error=post_error,
+            )
             return self._transaction_failure_response(
                 job,
                 kind="feature_graph",
                 phase="verification",
                 risk=risk,
-                error={
-                    "code": "POST_VERIFICATION_FAILED",
-                    "message": (
-                        "The Feature Graph executed, but objective "
-                        "post-verification did not pass."
-                    ),
-                },
+                error=post_error,
                 verification=verification,
                 recovery_status=recovery_status,
                 recovery_event=recovery,
@@ -2455,15 +2472,26 @@ class CadOrchestrator:
             progress["scope"] = "recovered"
             recovery_status, recovered_state, recovery = self._recover_transaction(
                 job, kind="feature_graph", previous_identity=previous_identity, newly_created=True)
+            mismatch_error = {
+                "code": "PLAN_MISMATCH",
+                "message": plan["message"] + "这个新零件已丢弃，修复从干净状态开始，计入 2 次修复预算。",
+                "expected_bbox_mm": plan["expected_bbox_mm"],
+                "built_bbox_mm": plan["built_bbox_mm"],
+                "attribution_category": "plan_vs_cad_mismatch",
+            }
+            verification["diagnostic_attribution"] = build_diagnostic_attribution(
+                graph=payload["graph"],
+                verification=verification,
+                compiler=compiler,
+                plan_check=plan,
+                error=mismatch_error,
+            )
             return self._transaction_failure_response(
                 job,
                 kind="feature_graph",
                 phase="verification",
                 risk=risk,
-                error={"code": "PLAN_MISMATCH",
-                       "message": plan["message"] + "这个新零件已丢弃，修复从干净状态开始，计入 2 次修复预算。",
-                       "expected_bbox_mm": plan["expected_bbox_mm"],
-                       "built_bbox_mm": plan["built_bbox_mm"]},
+                error=mismatch_error,
                 verification=verification,
                 recovery_status=recovery_status,
                 recovery_event=recovery,
@@ -2491,12 +2519,21 @@ class CadOrchestrator:
                     newly_created=fresh_document,
                 )
             )
+            commit_error = self._response_error(committed)
+            verification["diagnostic_attribution"] = build_diagnostic_attribution(
+                graph=payload["graph"],
+                verification=verification,
+                compiler=compiler,
+                plan_check=plan,
+                warnings=ledger_warnings,
+                error=commit_error,
+            )
             return self._transaction_failure_response(
                 job,
                 kind="feature_graph",
                 phase="commit",
                 risk=risk,
-                error=self._response_error(committed),
+                error=commit_error,
                 verification=verification,
                 recovery_status=recovery_status,
                 recovery_event=recovery,
@@ -2520,6 +2557,8 @@ class CadOrchestrator:
         self._record_built_features(job, compiler, payload["graph"],
                                     fresh_document=payload["fresh_document"])
         job["dimension_ledger_warnings"] = ledger_warnings
+        job["last_graph_plan_summary"] = extract_planned_by_model(payload["graph"])
+        job["last_compiler_warnings"] = list(compiler.get("warnings") or [])
         ledger = payload["graph"].get("dimension_ledger")
         job["dimension_ledger_measured"] = sum(
             1 for item in ledger
@@ -2534,7 +2573,19 @@ class CadOrchestrator:
         warnings = (list(compiler.get("warnings") or [])
                     + list((plan or {}).get("warnings") or [])
                     + ledger_warnings)
-        extras = {"warnings": warnings} if warnings else {}
+        attribution = build_diagnostic_attribution(
+            graph=payload["graph"],
+            planned_summary=job["last_graph_plan_summary"],
+            verification=verification,
+            compiler=compiler,
+            plan_check=plan,
+            warnings=warnings,
+            built_feature_types=job.get("built_feature_types"),
+        )
+        verification["diagnostic_attribution"] = attribution
+        extras = {"diagnostic_attribution": attribution}
+        if warnings:
+            extras["warnings"] = warnings
         return envelope(
             status="completed",
             risk=risk,
@@ -3947,6 +3998,16 @@ class CadOrchestrator:
                         "verification did not pass."
                     ),
                 }
+                if job.get("last_graph_plan_summary") or any(
+                    step.get("kind") == "feature_graph" for step in (job.get("completed_steps") or [])
+                ):
+                    verification["diagnostic_attribution"] = build_diagnostic_attribution(
+                        planned_summary=job.get("last_graph_plan_summary"),
+                        verification=verification,
+                        plan_check=job.get("plan_check"),
+                        error=error,
+                        built_feature_types=job.get("built_feature_types"),
+                    )
                 self._record_failure(
                     job,
                     kind="finish_job",
@@ -4016,6 +4077,18 @@ class CadOrchestrator:
                 close_fields["close_error"] = close_report["close_error"]
             if finish_warnings:
                 close_fields["warnings"] = finish_warnings
+            if job.get("last_graph_plan_summary") or any(
+                step.get("kind") == "feature_graph" for step in (job.get("completed_steps") or [])
+            ):
+                finish_attribution = build_diagnostic_attribution(
+                    planned_summary=job.get("last_graph_plan_summary"),
+                    verification=verification,
+                    plan_check=job.get("plan_check"),
+                    warnings=list(job.get("last_compiler_warnings") or []) + list(finish_warnings),
+                    built_feature_types=job.get("built_feature_types"),
+                )
+                verification["diagnostic_attribution"] = finish_attribution
+                close_fields["diagnostic_attribution"] = finish_attribution
             if gaps:
                 close_fields["verification_gaps"] = gaps
                 close_fields["trust_note"] = (
