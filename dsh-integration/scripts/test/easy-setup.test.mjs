@@ -132,7 +132,7 @@ test('all PowerShell onboarding and diagnostic scripts carry UTF-8 BOM and parse
 });
 
 test('SolidWorksEnvHelpers diagnoses 64-bit, .NET 4.8, PE headers, and non-C workspace persistence', t => {
-  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir()), 'sw-env-helpers-'));
+  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sw-env-helpers-')));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
 
   const fakeX64Exe = path.join(tempRoot, 'Fake64.exe');
@@ -184,7 +184,7 @@ test('SolidWorksEnvHelpers diagnoses 64-bit, .NET 4.8, PE headers, and non-C wor
 });
 
 test('Start-SolidWorksDsh clears danger-full-access env, switches to non-C workspace, and blocks text-only Flash models', t => {
-  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir()), 'sw-start-test-'));
+  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sw-start-test-')));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
 
   const dshRoot = createFakeDshRoot(tempRoot);
@@ -238,7 +238,7 @@ test('Start-SolidWorksDsh clears danger-full-access env, switches to non-C works
 });
 
 test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe via MSBuild, and guards vision models', t => {
-  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir()), 'sw-easy-wizard-'));
+  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sw-easy-wizard-')));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
 
   const dshRoot = createFakeDshRoot(tempRoot);
@@ -325,7 +325,7 @@ test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe
 });
 
 test('Doctor-SolidWorksDsh reports new 64-bit, .NET 4.8, PE binary, and permission safety checks', t => {
-  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir()), 'sw-doctor-checks-'));
+  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sw-doctor-checks-')));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
 
   const dshRoot = createFakeDshRoot(tempRoot);
