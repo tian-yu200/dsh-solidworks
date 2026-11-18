@@ -261,7 +261,9 @@ function Get-SolidWorksComStatus {
 
     $InstallDir = ""
     foreach ($Dir in $CandidateDirs) {
-        if ($Dir -and (Test-Path -LiteralPath (Join-Path $Dir "SLDWORKS.exe") -PathType Leaf)) {
+        # Path.Combine, not Join-Path: Join-Path resolves the drive and throws DriveNotFoundException
+        # for a candidate on a drive this machine lacks (e.g. E: on a CI runner or a laptop).
+        if ($Dir -and (Test-Path -LiteralPath ([System.IO.Path]::Combine($Dir, "SLDWORKS.exe")) -PathType Leaf)) {
             $InstallDir = [System.IO.Path]::GetFullPath($Dir)
             if (-not $ExePath) {
                 $ExePath = Join-Path $InstallDir "SLDWORKS.exe"

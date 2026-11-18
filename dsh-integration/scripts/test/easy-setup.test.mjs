@@ -183,6 +183,32 @@ test('SolidWorksEnvHelpers diagnoses 64-bit, .NET 4.8, PE headers, and non-C wor
   assert.equal(data.allowVl, false);
 });
 
+test('SolidWorks install probing survives candidate paths on drives this machine lacks', t => {
+  // CI runners have no E: drive; a developer machine with E: and a registered SolidWorks never
+  // reaches that candidate. An explicit dir on an absent drive is probed first, so it reproduces
+  // the runner's failure anywhere. Setup runs with ErrorActionPreference Stop, so mirror that.
+  const missingDrive = 'ZYXWVUTSRQPONMLKJIHG'.split('').find(letter => !fs.existsSync(`${letter}:\\`));
+  if (!missingDrive) {
+    t.skip('every drive letter G-Z is mounted');
+    return;
+  }
+  const missingDir = `${missingDrive}:\\Program Files\\SOLIDWORKS Corp\\SOLIDWORKS`;
+
+  const res = runPwsh([
+    '-Command',
+    `
+    $ErrorActionPreference = "Stop"
+    . '${envHelpersPath.replace(/'/g, "''")}'
+    $status = Get-SolidWorksComStatus -ExplicitInstallDir '${missingDir.replace(/'/g, "''")}'
+    [pscustomobject]@{ installDir = $status.InstallDir } | ConvertTo-Json -Compress
+    `,
+  ]);
+  assert.equal(res.status, 0, res.output);
+  assert.doesNotMatch(res.output, /DriveNotFound|Cannot find drive/);
+  const data = JSON.parse(res.stdout.trim());
+  assert.ok(!String(data.installDir ?? '').startsWith(`${missingDrive}:`), data.installDir);
+});
+
 test('Start-SolidWorksDsh clears danger-full-access env, switches to non-C workspace, and blocks text-only Flash models', t => {
   const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sw-start-test-')));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
