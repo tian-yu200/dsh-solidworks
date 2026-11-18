@@ -245,7 +245,8 @@ test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe
   const dshHome = path.join(tempRoot, 'dsh-home');
   const workspaceDir = path.join(tempRoot, 'NonC-Workspace');
   const fakeProject = path.join(tempRoot, 'project');
-  const realPython = path.join(repoRoot, 'mcp-server-solidworks-main', 'adapters', 'claude', '.venv', 'Scripts', 'python.exe');
+  const fakePython = path.join(tempRoot, 'fake-python.cmd');
+  fs.writeFileSync(fakePython, '@echo off\r\nexit /b 0\r\n');
 
   // Create minimal isolated project skeleton so no file in repoRoot is written
   const execProjDir = path.join(fakeProject, 'mcp-server-solidworks-main', 'execution', 'solidworks', 'SolidworksExecution');
@@ -277,7 +278,7 @@ test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe
   // 1. Pre-flight blocks 32-bit WOW64 terminal with Chinese PlatformNotSupportedException explanation
   const wowFail = runPwsh([
     '-Command',
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${realPython.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDoctor -TestOverrideArchMode wow64`,
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${fakePython.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDoctor -TestOverrideArchMode wow64`,
   ]);
   assert.equal(wowFail.status, 1, wowFail.output);
   assert.match(wowFail.output, /AI 算力在云端运行/);
@@ -286,7 +287,7 @@ test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe
   // 2. Pre-flight blocks missing .NET Framework 4.8
   const netFail = runPwsh([
     '-Command',
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${realPython.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDoctor -TestOverrideDotNetRelease 461808`,
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${fakePython.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDoctor -TestOverrideDotNetRelease 461808`,
   ]);
   assert.equal(netFail.status, 1, netFail.output);
   assert.match(netFail.output, /\.NET Framework 4\.8/);
@@ -296,7 +297,7 @@ test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe
   const autoBuildOk = runPwsh(
     [
       '-Command',
-      `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${realPython.replace(/'/g, "''")}' -WorkspaceDir '${workspaceDir.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDoctor`,
+      `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${fakePython.replace(/'/g, "''")}' -WorkspaceDir '${workspaceDir.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDoctor`,
     ],
     { SOLIDWORKS_MSBUILD_PATH: fakeMsBuild },
   );
@@ -316,7 +317,7 @@ test('Setup-SolidWorksEasy guides zero-CLI mechanical users, auto-builds x64 exe
   const dumpFile = path.join(tempRoot, 'dump.txt');
   const flashBlocked = runPwsh([
     '-Command',
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${realPython.replace(/'/g, "''")}' -WorkspaceDir '${workspaceDir.replace(/'/g, "''")}' -DumpPath '${dumpFile.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDump`,
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${setupScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -Python '${fakePython.replace(/'/g, "''")}' -WorkspaceDir '${workspaceDir.replace(/'/g, "''")}' -DumpPath '${dumpFile.replace(/'/g, "''")}' -NonInteractive -SkipInstall -SkipDump`,
   ]);
   assert.equal(flashBlocked.status, 1, flashBlocked.output);
   assert.match(flashBlocked.output, /重要告警：当前默认模型无法看图建模/);
@@ -329,6 +330,19 @@ test('Doctor-SolidWorksDsh reports new 64-bit, .NET 4.8, PE binary, and permissi
 
   const dshRoot = createFakeDshRoot(tempRoot);
   const dshHome = path.join(tempRoot, 'dsh-home');
+  const fakeProject = path.join(tempRoot, 'doctor-project');
+  const fakeExe = path.join(
+    fakeProject,
+    'mcp-server-solidworks-main',
+    'execution',
+    'solidworks',
+    'SolidworksExecution',
+    'bin',
+    'Debug',
+    'SolidworksExecution.exe',
+  );
+  fs.mkdirSync(path.dirname(fakeExe), { recursive: true });
+  fs.writeFileSync(fakeExe, buildMinimalX64PeBuffer());
   const dumpFile = path.join(tempRoot, 'profile.dump.txt');
   fs.mkdirSync(path.join(dshHome, 'profiles', 'solidworks'), { recursive: true });
   // Simulate a profile with danger-full-access to verify Permission preset safety flags it
@@ -339,7 +353,7 @@ test('Doctor-SolidWorksDsh reports new 64-bit, .NET 4.8, PE binary, and permissi
 
   const docRes = runPwsh([
     '-Command',
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${doctorScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${repoRoot.replace(/'/g, "''")}' -DumpPath '${dumpFile.replace(/'/g, "''")}' -SkipDump`,
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${doctorScriptPath.replace(/'/g, "''")}' -DshHome '${dshHome.replace(/'/g, "''")}' -DshRoot '${dshRoot.replace(/'/g, "''")}' -ProjectRoot '${fakeProject.replace(/'/g, "''")}' -DumpPath '${dumpFile.replace(/'/g, "''")}' -SkipDump`,
   ]);
   assert.equal(docRes.status, 1, docRes.output);
   assert.match(docRes.output, /64-bit environment\s+True/);
