@@ -14,6 +14,7 @@ if (-not (Test-Path -LiteralPath $Dsh)) {
     throw "未找到 DSH 启动器 (DSH launcher not found): $Dsh"
 }
 
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 . (Join-Path $PSScriptRoot "SolidWorksEnvHelpers.ps1")
 
 # Machine-consumed flags (--dump-config, --help, --version) must receive clean stdout without banners.

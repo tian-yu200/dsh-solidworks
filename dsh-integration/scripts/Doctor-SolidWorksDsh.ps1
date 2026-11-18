@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $ProjectRoot = if ($ProjectRoot) { [System.IO.Path]::GetFullPath($ProjectRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path }
 $Python = if ($Python) { [System.IO.Path]::GetFullPath($Python) } else { Join-Path $ProjectRoot "mcp-server-solidworks-main\adapters\claude\.venv\Scripts\python.exe" }
 $Checks = [System.Collections.Generic.List[object]]::new()
@@ -370,7 +371,7 @@ $Port = Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Silently
 $PortDetail = if ($Port) { "listening" } else { "not listening (adapter can auto-start it)" }
 Add-Check "Execution port 5000" ($null -ne $Port) $PortDetail
 
-$Checks | Format-Table -AutoSize
+$Checks | Format-Table -AutoSize | Out-String -Width 240
 $Optional = @("SolidWorks process", "Execution port 5000", "SolidWorks COM registration")
 $FailedRequired = @($Checks.Where({ -not $_.Ok -and $_.Check -notin $Optional }))
 

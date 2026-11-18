@@ -21,6 +21,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 . (Join-Path $PSScriptRoot "SolidWorksEnvHelpers.ps1")
 
 $ProjectRoot = if ($ProjectRoot) {
