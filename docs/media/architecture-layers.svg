@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" width="1200" height="430" role="img" aria-label="dsh-solidworks 6-Layer Security and Isolation Architecture">
+  <defs>
+    <linearGradient id="archBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#09101D" />
+      <stop offset="100%" stop-color="#111B30" />
+    </linearGradient>
+    <pattern id="archGrid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#18253E" stroke-width="0.7" />
+    </pattern>
+    <marker id="downArrow" viewBox="0 0 10 10" refX="5" refY="8" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 2 0 L 5 8 L 8 0 z" fill="#38BDF8" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="430" rx="16" fill="url(#archBg)" />
+  <rect x="0" y="0" width="1200" height="430" rx="16" fill="url(#archGrid)" opacity="0.8" />
+  <rect x="14" y="14" width="1172" height="402" rx="10" fill="none" stroke="#283E63" stroke-width="1.2" />
+
+  <!-- Header -->
+  <text x="34" y="45" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="11.5" font-weight="700" fill="#38BDF8" letter-spacing="1.2">ARCHITECTURE · PRIVILEGE ISOLATION</text>
+  <text x="34" y="70" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="21" font-weight="700" fill="#F8FAFC">六层受控隔离架构：把“大模型意图”与“真实 CAD 内核”彻底隔开</text>
+
+  <!-- Left Column: 6 Layer Stack (x=34..744, width=710) -->
+  <!-- Layer 1 -->
+  <g transform="translate(34, 90)">
+    <rect x="0" y="0" width="710" height="40" rx="9" fill="#101B30" stroke="#2C4870" stroke-width="1.2" />
+    <rect x="0" y="0" width="122" height="40" rx="9" fill="#172847" />
+    <text x="61" y="24" text-anchor="middle" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#93C5FD">01 · HARNESS</text>
+    <text x="140" y="25" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="13.5" font-weight="700" fill="#F8FAFC">DeepSeek Harness（solidworks-cad 预设 + policy 插件）</text>
+  </g>
+  <line x1="389" y1="130" x2="389" y2="142" stroke="#38BDF8" stroke-width="1.5" marker-end="url(#downArrow)" />
+
+  <!-- Layer 2 -->
+  <g transform="translate(34, 144)">
+    <rect x="0" y="0" width="710" height="40" rx="9" fill="#101B30" stroke="#92400E" stroke-width="1.3" />
+    <rect x="0" y="0" width="122" height="40" rx="9" fill="#2A1D0B" />
+    <text x="61" y="24" text-anchor="middle" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#FBBF24">02 · BOUNDARY</text>
+    <text x="140" y="25" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="13.5" font-weight="700" fill="#FEF3C7">12 个高层 MCP 工具 + 5 个支撑工具白名单（桌面端共 16 项）</text>
+  </g>
+  <line x1="389" y1="184" x2="389" y2="196" stroke="#38BDF8" stroke-width="1.5" marker-end="url(#downArrow)" />
+
+  <!-- Layer 3 -->
+  <g transform="translate(34, 198)">
+    <rect x="0" y="0" width="710" height="40" rx="9" fill="#101B30" stroke="#2C4870" stroke-width="1.2" />
+    <rect x="0" y="0" width="122" height="40" rx="9" fill="#172847" />
+    <text x="61" y="24" text-anchor="middle" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#38BDF8">03 · ORCHESTRATE</text>
+    <text x="140" y="25" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="13.5" font-weight="700" fill="#F8FAFC">Python 编排器：job_token 鉴权 · 文档身份锁 · 写前备份 · Undo</text>
+  </g>
+  <line x1="389" y1="238" x2="389" y2="250" stroke="#38BDF8" stroke-width="1.5" marker-end="url(#downArrow)" />
+
+  <!-- Layer 4 -->
+  <g transform="translate(34, 252)">
+    <rect x="0" y="0" width="710" height="40" rx="9" fill="#0E212B" stroke="#0D9488" stroke-width="1.3" />
+    <rect x="0" y="0" width="122" height="40" rx="9" fill="#0E3036" />
+    <text x="61" y="24" text-anchor="middle" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#2DD4BF">04 · COMPILER</text>
+    <text x="140" y="25" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="13.5" font-weight="700" fill="#CCFBF1">SolidPilot 确定性编译器（无 LLM · 草图自交/跨轴预检）+ C# 执行服务</text>
+  </g>
+  <line x1="389" y1="292" x2="389" y2="304" stroke="#38BDF8" stroke-width="1.5" marker-end="url(#downArrow)" />
+
+  <!-- Layer 5 -->
+  <g transform="translate(34, 306)">
+    <rect x="0" y="0" width="710" height="38" rx="9" fill="#0F192D" stroke="#2C4870" stroke-width="1.2" />
+    <rect x="0" y="0" width="122" height="38" rx="9" fill="#172847" />
+    <text x="61" y="23" text-anchor="middle" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#60A5FA">05 · KERNEL</text>
+    <text x="140" y="24" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="13.5" font-weight="700" fill="#F8FAFC">SolidWorks COM → 本机 SolidWorks 2025（33.0+）原生 .SLDPRT</text>
+  </g>
+
+  <!-- Layer 6: Denied Wall -->
+  <g transform="translate(34, 358)">
+    <rect x="0" y="0" width="710" height="42" rx="9" fill="#231117" stroke="#9F1239" stroke-width="1.3" stroke-dasharray="6 3" />
+    <rect x="0" y="0" width="122" height="42" rx="9" fill="#4C0519" />
+    <text x="61" y="25" text-anchor="middle" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#FDA4AF">DENIED ZONE</text>
+    <text x="140" y="26" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="13" font-weight="700" fill="#FECDD3">模型永久不可达：COM / Shell / VBA 宏 / 脚本 / 通用文件写入 / 旧低层 MCP</text>
+  </g>
+
+  <!-- Right Column: 6 Safety Guard Cards (x=766..1166, width=400) -->
+  <g transform="translate(766, 90)">
+    <rect x="0" y="0" width="400" height="310" rx="12" fill="#0B1323" stroke="#263D63" stroke-width="1.2" />
+    <text x="20" y="28" font-family="'Cascadia Mono', monospace" font-size="11" font-weight="700" fill="#FBBF24" letter-spacing="1">SAFETY &amp; SPEED CONTRACTS</text>
+    <line x1="18" y1="38" x2="382" y2="38" stroke="#1E3152" />
+
+    <g font-family="'Segoe UI', 'Microsoft YaHei', sans-serif">
+      <!-- Guard 1 -->
+      <circle cx="28" cy="64" r="5" fill="#38BDF8" />
+      <text x="44" y="68" font-size="13.5" font-weight="700" fill="#F8FAFC">活动文档身份锁（Document Identity）</text>
+      <text x="44" y="85" font-size="11.5" fill="#94A3B8">用户切走文档即拦截写入；只读任务严禁覆盖原文件</text>
+
+      <!-- Guard 2 -->
+      <circle cx="28" cy="112" r="5" fill="#F59E0B" />
+      <text x="44" y="116" font-size="13.5" font-weight="700" fill="#F8FAFC">危险操作一次性令牌确认</text>
+      <text x="44" y="133" font-size="11.5" fill="#94A3B8">覆盖、另存为、批量导出、删除、关闭均需精确摘要授权</text>
+
+      <!-- Guard 3 -->
+      <circle cx="28" cy="160" r="5" fill="#10B981" />
+      <text x="44" y="164" font-size="13.5" font-weight="700" fill="#F8FAFC">单步 Undo 作用域 + 新件自动丢弃</text>
+      <text x="44" y="181" font-size="11.5" fill="#94A3B8">建坏的新零件直接丢弃并单独报告恢复后的活动文档</text>
+
+      <!-- Guard 4 -->
+      <circle cx="28" cy="208" r="5" fill="#A78BFA" />
+      <text x="44" y="212" font-size="13.5" font-weight="700" fill="#F8FAFC">精确几何测量（GetExtremePoint）</text>
+      <text x="44" y="229" font-size="11.5" fill="#94A3B8">替代粗略 GetBodyBox；新增同轴圆柱 surface_point 选面</text>
+
+      <!-- Guard 5 -->
+      <circle cx="28" cy="256" r="5" fill="#2DD4BF" />
+      <text x="44" y="260" font-size="13.5" font-weight="700" fill="#F8FAFC">CommandInProgress + 状态缓存复用</text>
+      <text x="44" y="277" font-size="11.5" fill="#94A3B8">73 面读取 105s → 0.70s；本地 .SLDPRT 资产不离机</text>
+    </g>
+  </g>
+</svg>

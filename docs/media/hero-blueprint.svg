@@ -1,0 +1,249 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 390" width="1200" height="390" role="img" aria-label="dsh-solidworks Blueprint Hero Banner">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080E1A" />
+      <stop offset="52%" stop-color="#0E172A" />
+      <stop offset="100%" stop-color="#131E34" />
+    </linearGradient>
+
+    <radialGradient id="amberGlow" cx="28%" cy="42%" r="45%">
+      <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.14" />
+      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0" />
+    </radialGradient>
+
+    <radialGradient id="cyanGlow" cx="82%" cy="44%" r="42%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.16" />
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0" />
+    </radialGradient>
+
+    <linearGradient id="titleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FEF3C7" />
+      <stop offset="38%" stop-color="#FBBF24" />
+      <stop offset="72%" stop-color="#67E8F9" />
+      <stop offset="100%" stop-color="#38BDF8" />
+    </linearGradient>
+
+    <linearGradient id="wireGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#2DD4BF" />
+    </linearGradient>
+
+    <pattern id="gridMinor" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#18253E" stroke-width="0.7" />
+    </pattern>
+    <pattern id="gridMajor" width="120" height="120" patternUnits="userSpaceOnUse">
+      <rect width="120" height="120" fill="url(#gridMinor)" />
+      <path d="M 120 0 L 0 0 0 120" fill="none" stroke="#213354" stroke-width="1.1" />
+    </pattern>
+
+    <pattern id="sectionHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#38BDF8" stroke-opacity="0.24" stroke-width="1.4" />
+    </pattern>
+
+    <marker id="arrowStart" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 10 2 L 2 5 L 10 8 z" fill="#F59E0B" />
+    </marker>
+    <marker id="arrowEnd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 2 L 8 5 L 0 8 z" fill="#F59E0B" />
+    </marker>
+    <marker id="cyanArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M 0 2 L 8 5 L 0 8 z" fill="#38BDF8" />
+    </marker>
+  </defs>
+
+  <!-- Canvas & Ambient Blueprint Field -->
+  <rect x="0" y="0" width="1200" height="390" rx="16" fill="url(#bgGrad)" />
+  <rect x="0" y="0" width="1200" height="390" rx="16" fill="url(#gridMajor)" opacity="0.88" />
+  <rect x="0" y="0" width="1200" height="390" rx="16" fill="url(#amberGlow)" />
+  <rect x="0" y="0" width="1200" height="390" rx="16" fill="url(#cyanGlow)" />
+
+  <!-- Outer & Inner Engineering Drawing Frame -->
+  <rect x="12" y="12" width="1176" height="366" rx="10" fill="none" stroke="#283E63" stroke-width="1.2" />
+  <rect x="36" y="34" width="1128" height="324" rx="4" fill="none" stroke="#365382" stroke-width="1.5" />
+
+  <!-- Grid Frame Ticks: Columns A - H -->
+  <g font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10.5" font-weight="700" fill="#6482AE" text-anchor="middle">
+    <text x="106.5" y="27">A</text>
+    <text x="247.5" y="27">B</text>
+    <text x="388.5" y="27">C</text>
+    <text x="529.5" y="27">D</text>
+    <text x="670.5" y="27">E</text>
+    <text x="811.5" y="27">F</text>
+    <text x="952.5" y="27">G</text>
+    <text x="1093.5" y="27">H</text>
+
+    <text x="106.5" y="371">A</text>
+    <text x="247.5" y="371">B</text>
+    <text x="388.5" y="371">C</text>
+    <text x="529.5" y="371">D</text>
+    <text x="670.5" y="371">E</text>
+    <text x="811.5" y="371">F</text>
+    <text x="952.5" y="371">G</text>
+    <text x="1093.5" y="371">H</text>
+  </g>
+  <g stroke="#294066" stroke-width="1">
+    <line x1="177" y1="12" x2="177" y2="34" />
+    <line x1="318" y1="12" x2="318" y2="34" />
+    <line x1="459" y1="12" x2="459" y2="34" />
+    <line x1="600" y1="12" x2="600" y2="34" />
+    <line x1="741" y1="12" x2="741" y2="34" />
+    <line x1="882" y1="12" x2="882" y2="34" />
+    <line x1="1023" y1="12" x2="1023" y2="34" />
+  </g>
+
+  <!-- Grid Frame Ticks: Rows 1 - 5 -->
+  <g font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10.5" font-weight="700" fill="#6482AE" text-anchor="middle">
+    <text x="24" y="64">1</text>
+    <text x="24" y="116">2</text>
+    <text x="24" y="168">3</text>
+    <text x="24" y="220">4</text>
+    <text x="24" y="272">5</text>
+
+    <text x="1176" y="64">1</text>
+    <text x="1176" y="116">2</text>
+    <text x="1176" y="168">3</text>
+    <text x="1176" y="220">4</text>
+    <text x="1176" y="272">5</text>
+  </g>
+
+  <!-- Corner Crosshairs -->
+  <g stroke="#38BDF8" stroke-opacity="0.45" stroke-width="1.1">
+    <line x1="46" y1="46" x2="60" y2="46" />
+    <line x1="46" y1="46" x2="46" y2="60" />
+    <line x1="1154" y1="46" x2="1140" y2="46" />
+    <line x1="1154" y1="46" x2="1154" y2="60" />
+  </g>
+
+  <!-- Left Drafting Emblem: Projection Symbol & Compass Geometry -->
+  <g transform="translate(122, 162)">
+    <circle cx="0" cy="0" r="64" fill="#0B1323" fill-opacity="0.72" stroke="#2D4A73" stroke-width="1.3" stroke-dasharray="5 4" />
+    <circle cx="0" cy="0" r="50" fill="url(#sectionHatch)" stroke="#38BDF8" stroke-opacity="0.55" stroke-width="1.2" />
+    <circle cx="0" cy="0" r="35" fill="#0D1628" stroke="#F59E0B" stroke-opacity="0.65" stroke-width="1.2" />
+    <!-- Centerlines -->
+    <line x1="-74" y1="0" x2="74" y2="0" stroke="#64748B" stroke-width="0.9" stroke-dasharray="10 3 2 3" />
+    <line x1="0" y1="-74" x2="0" y2="74" stroke="#64748B" stroke-width="0.9" stroke-dasharray="10 3 2 3" />
+    <!-- ISO First-Angle Projection Symbol -->
+    <polygon points="-24,-10 2,-16 2,16 -24,10" fill="none" stroke="#E2E8F0" stroke-width="1.6" />
+    <circle cx="17" cy="0" r="10" fill="none" stroke="#38BDF8" stroke-width="1.6" />
+    <circle cx="17" cy="0" r="5" fill="none" stroke="#FBBF24" stroke-width="1.4" />
+    <text x="0" y="84" text-anchor="middle" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10" font-weight="700" fill="#7D96BA" letter-spacing="1.4">GB / ISO PROJECTION</text>
+  </g>
+
+  <!-- Center Brand & Headline -->
+  <g transform="translate(228, 66)">
+    <!-- Pill Kicker -->
+    <rect x="0" y="0" width="388" height="26" rx="13" fill="#111C31" stroke="#2E4973" stroke-width="1.1" />
+    <circle cx="16" cy="13" r="4" fill="#F59E0B" />
+    <text x="29" y="17" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="11.5" font-weight="700" fill="#93C5FD" letter-spacing="1.2">DEEPSEEK HARNESS · DETERMINISTIC CAD AGENT</text>
+
+    <!-- Main Title -->
+    <text x="0" y="82" font-family="'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif" font-size="54" font-weight="800" fill="url(#titleGrad)" letter-spacing="-1">dsh-solidworks</text>
+
+    <!-- Subtitle -->
+    <text x="2" y="120" font-family="'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="20.5" font-weight="600" fill="#E2E8F0" letter-spacing="0.4">把二维工程图纸，锻造成经过客观核验的 SolidWorks 零件</text>
+
+    <!-- Dimension Arrow Callout Line -->
+    <g transform="translate(2, 152)">
+      <line x1="0" y1="0" x2="0" y2="18" stroke="#F59E0B" stroke-opacity="0.6" stroke-width="1" />
+      <line x1="506" y1="0" x2="506" y2="18" stroke="#F59E0B" stroke-opacity="0.6" stroke-width="1" />
+      <line x1="4" y1="9" x2="502" y2="9" stroke="#F59E0B" stroke-width="1.3" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" />
+      <rect x="64" y="-3" width="378" height="24" rx="12" fill="#0D1627" stroke="#F59E0B" stroke-opacity="0.55" stroke-width="1" />
+      <text x="253" y="13" text-anchor="middle" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="11" font-weight="700" fill="#FDE68A" letter-spacing="0.7">177 → 12 MCP TOOLS · ZERO COM / SHELL · SW 2025+</text>
+    </g>
+
+    <!-- Bottom Caption -->
+    <text x="2" y="198" font-family="'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif" font-size="13.5" fill="#94A3B8">模型只读图并提交 Feature Graph 意图；C# 执行服务与客观实测守护每一次写入。</text>
+  </g>
+
+  <!-- Right Side: Isometric Blueprint Wireframe + Feature Graph Pipeline -->
+  <g transform="translate(792, 54)">
+    <!-- Backdrop panel -->
+    <rect x="0" y="0" width="352" height="222" rx="12" fill="#0B1323" fill-opacity="0.76" stroke="#243A5E" stroke-width="1.2" />
+    <text x="14" y="22" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10" font-weight="700" fill="#38BDF8" letter-spacing="0.8">FEATURE GRAPH → CAD B-REP</text>
+    <text x="338" y="22" text-anchor="end" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10" font-weight="700" fill="#34D399">TRUST: VERIFIED ✓</text>
+    <line x1="14" y1="32" x2="338" y2="32" stroke="#1E3152" stroke-width="1" />
+
+    <!-- Isometric Wireframe Stepped Flange Part -->
+    <g transform="translate(105, 134)">
+      <!-- Base plate isometric -->
+      <polygon points="-68,8 0,-26 68,8 0,42" fill="#132542" fill-opacity="0.55" stroke="url(#wireGrad)" stroke-width="1.7" />
+      <polygon points="-68,8 0,42 0,56 -68,22" fill="#0E1B33" fill-opacity="0.75" stroke="#38BDF8" stroke-width="1.5" />
+      <polygon points="0,42 68,8 68,22 0,56" fill="#0A1529" fill-opacity="0.85" stroke="#2DD4BF" stroke-width="1.5" />
+      <!-- Mounting hole ellipses -->
+      <ellipse cx="-38" cy="8" rx="7" ry="4" fill="none" stroke="#FBBF24" stroke-width="1.3" />
+      <ellipse cx="38" cy="8" rx="7" ry="4" fill="none" stroke="#FBBF24" stroke-width="1.3" />
+      <ellipse cx="0" cy="27" rx="7" ry="4" fill="none" stroke="#FBBF24" stroke-width="1.3" />
+      <!-- Central Cylindrical Boss -->
+      <path d="M -28,-4 L -28,-40 A 28 15 0 0 1 28,-40 L 28,-4" fill="#14294A" fill-opacity="0.65" stroke="#38BDF8" stroke-width="1.7" />
+      <path d="M -28,-4 A 28 15 0 0 0 28,-4" fill="none" stroke="#38BDF8" stroke-width="1.5" />
+      <path d="M -28,-4 A 28 15 0 0 1 28,-4" fill="none" stroke="#38BDF8" stroke-opacity="0.35" stroke-dasharray="3 3" stroke-width="1.1" />
+      <ellipse cx="0" cy="-40" rx="28" ry="15" fill="#183259" fill-opacity="0.75" stroke="#67E8F9" stroke-width="1.8" />
+      <!-- Inner Bore -->
+      <ellipse cx="0" cy="-40" rx="14" ry="7.5" fill="#09101D" stroke="#FBBF24" stroke-width="1.6" />
+      <line x1="-14" y1="-40" x2="-14" y2="-4" stroke="#FBBF24" stroke-opacity="0.45" stroke-dasharray="3 3" stroke-width="1" />
+      <line x1="14" y1="-40" x2="14" y2="-4" stroke="#FBBF24" stroke-opacity="0.45" stroke-dasharray="3 3" stroke-width="1" />
+      <!-- Center Axis -->
+      <line x1="0" y1="-64" x2="0" y2="28" stroke="#F59E0B" stroke-width="1" stroke-dasharray="8 3 2 3" />
+      <!-- Dimension Tick -->
+      <line x1="-38" y1="-40" x2="-38" y2="-4" stroke="#F59E0B" stroke-width="1" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" />
+      <text x="-45" y="-19" text-anchor="end" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="9.5" fill="#FCD34D">H</text>
+    </g>
+
+    <!-- Feature Graph Nodes Column -->
+    <g transform="translate(204, 48)" font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10.5">
+      <rect x="0" y="0" width="132" height="25" rx="6" fill="#13213B" stroke="#38BDF8" stroke-opacity="0.55" />
+      <text x="10" y="16" fill="#BAE6FD" font-weight="700">01 sketch_base</text>
+
+      <line x1="66" y1="25" x2="66" y2="35" stroke="#38BDF8" stroke-width="1.2" marker-end="url(#cyanArrow)" />
+
+      <rect x="0" y="37" width="132" height="25" rx="6" fill="#13213B" stroke="#38BDF8" stroke-opacity="0.55" />
+      <text x="10" y="53" fill="#BAE6FD" font-weight="700">02 extrude_boss</text>
+
+      <line x1="66" y1="62" x2="66" y2="72" stroke="#38BDF8" stroke-width="1.2" marker-end="url(#cyanArrow)" />
+
+      <rect x="0" y="74" width="132" height="25" rx="6" fill="#13213B" stroke="#F59E0B" stroke-opacity="0.65" />
+      <text x="10" y="90" fill="#FDE68A" font-weight="700">03 bore_pattern</text>
+
+      <line x1="66" y1="99" x2="66" y2="109" stroke="#38BDF8" stroke-width="1.2" marker-end="url(#cyanArrow)" />
+
+      <rect x="0" y="111" width="132" height="25" rx="6" fill="#0F2922" stroke="#10B981" stroke-opacity="0.75" />
+      <text x="10" y="127" fill="#6EE7B7" font-weight="700">04 ledger_check</text>
+
+      <rect x="0" y="143" width="132" height="18" rx="4" fill="none" stroke="#2B4268" stroke-dasharray="3 2" />
+      <text x="66" y="155" text-anchor="middle" font-size="9.5" fill="#7D96BA">Single Undo Scope</text>
+    </g>
+  </g>
+
+  <!-- GB-Style Engineering Drawing Title Block (Bottom Bar) -->
+  <g transform="translate(36, 294)">
+    <rect x="0" y="0" width="1128" height="64" fill="#0A1221" fill-opacity="0.92" stroke="#365382" stroke-width="1.4" />
+    <!-- Vertical Dividers -->
+    <line x1="258" y1="0" x2="258" y2="64" stroke="#365382" stroke-width="1.2" />
+    <line x1="448" y1="0" x2="448" y2="64" stroke="#365382" stroke-width="1.2" />
+    <line x1="668" y1="0" x2="668" y2="64" stroke="#365382" stroke-width="1.2" />
+    <line x1="848" y1="0" x2="848" y2="64" stroke="#365382" stroke-width="1.2" />
+    <line x1="1008" y1="0" x2="1008" y2="64" stroke="#365382" stroke-width="1.2" />
+    <!-- Horizontal Header Split -->
+    <line x1="0" y1="24" x2="1128" y2="24" stroke="#243A5E" stroke-width="1" />
+
+    <!-- Column Headers -->
+    <g font-family="'Cascadia Mono', 'Consolas', monospace" font-size="10" font-weight="700" fill="#7D96BA" letter-spacing="0.9">
+      <text x="16" y="16">PROJECT · REPO</text>
+      <text x="274" y="16">TOOL SURFACE</text>
+      <text x="464" y="16">GB BLIND BENCH (30 RUNS)</text>
+      <text x="684" y="16">ENVELOPE TOL</text>
+      <text x="864" y="16">WINDOWS CI</text>
+      <text x="1024" y="16">LICENSE</text>
+    </g>
+
+    <!-- Column Values -->
+    <g font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="14.5" font-weight="700">
+      <text x="16" y="49" fill="#F8FAFC">tian-yu200 / dsh-solidworks</text>
+      <text x="274" y="49" fill="#38BDF8">12 CAD + 5 Support</text>
+      <text x="464" y="49" fill="#34D399">86.7% Pass · 80% 3×Stable</text>
+      <text x="684" y="49" fill="#FDE68A">±max(1 mm, 2%)</text>
+      <text x="864" y="49" fill="#A5F3FC">950 Py + 62 Node</text>
+      <text x="1024" y="49" fill="#E2E8F0">AGPL-3.0</text>
+    </g>
+  </g>
+</svg>
