@@ -27,7 +27,7 @@
 | `read_drawing_text` | 只读 | 用 Windows 内置 OCR 一次读出图上所有文字及其位置和网格格；可选辅助，默认先直接看原图，不需要任务，不接触 CAD。 |
 | `read_drawing_region` | 只读 | 放大工程图局部，读取小尺寸文字；不需要任务，不接触 CAD。 |
 
-专用 profile 的策略插件只允许这 12 个 SolidWorks 工具，外加下方 6 个支撑工具。
+专用 profile 的策略插件只允许这 12 个 SolidWorks 工具，外加下方 5 个支撑工具。
 任何其他 `mcp__solidworks__*` 工具都不属于模型可调用接口。
 
 `read_drawing_region(image_path, region="", zoom=2)`：`image_path` 接受本地图片文件路径或当前 DSH 实例的 `sha256:<64位十六进制>` 附件 ID
