@@ -144,6 +144,8 @@ THREADABLE_PRODUCERS = frozenset(("hole", "extrude", "revolve", "sweep"))
 BEND_POSITIONS = frozenset(("centerline", "material_inside", "material_outside", "bend_outside"))
 # Edge flange adds 'bend_sharp' (swFlangePositionTypes_e 5) to the shared position set.
 EDGE_FLANGE_POSITIONS = BEND_POSITIONS | frozenset(("bend_sharp",))
+LOFT_TANGENCIES = frozenset(("none", "normal_to_profile", "all_faces"))
+LOFT_GUIDE_INFLUENCES = frozenset(("next_guide", "next_sharp", "next_edge", "global"))
 
 
 def _is_pos_number(v):
@@ -1181,11 +1183,12 @@ def _validate(graph):
                             errors.append("%s: anchor.radius must be a positive number when present." % swhere)
 
         elif ntype == "loft":
-            # Multi-profile boss loft. Unlike extrude/revolve/rib, the profile sketches are
-            # selected BY NAME (not the active sketch), so they need NOT immediately precede the
-            # loft — they only need to be EARLIER sketch nodes (the compiler threads each one's
-            # runtime name). >= 2 profiles, in loft order.
+            # Multi-profile boss loft with optional guide curves and start/end tangency.
+            # Unlike extrude/revolve/rib, profile and guide sketches are selected BY NAME,
+            # so they only need to be EARLIER sketch nodes. Guide sketches are open curves
+            # (each in its own sketch) and are NOT required to be closed contours.
             profiles = node.get("profiles")
+            profile_set = set()
             if not isinstance(profiles, list) or len(profiles) < 2:
                 errors.append("%s: 'profiles' must be an array of >= 2 sketch node ids "
                               "(the loft profiles, in order)." % label)
@@ -1195,6 +1198,39 @@ def _validate(graph):
                         errors.append("%s: each profile must be a sketch node id (non-empty string)." % label)
                     elif seen.get(pid) != "sketch":
                         errors.append("%s: profile '%s' must reference an earlier sketch node." % (label, pid))
+                    else:
+                        profile_set.add(pid)
+            guides = node.get("guides")
+            if guides is not None:
+                if not isinstance(guides, list):
+                    errors.append("%s: 'guides' must be an array of earlier open sketch node ids." % label)
+                else:
+                    seen_guides = set()
+                    for gid in guides:
+                        if not isinstance(gid, str) or not gid:
+                            errors.append("%s: each guide must be a sketch node id (non-empty string)." % label)
+                        elif seen.get(gid) != "sketch":
+                            errors.append("%s: guide '%s' must reference an earlier sketch node." % (label, gid))
+                        elif gid in profile_set:
+                            errors.append("%s: guide '%s' cannot reuse a sketch already listed in 'profiles'." % (label, gid))
+                        elif gid in seen_guides:
+                            errors.append("%s: duplicate guide sketch '%s'." % (label, gid))
+                        else:
+                            seen_guides.add(gid)
+            for tfield in ("start_tangency", "end_tangency"):
+                tval = node.get(tfield)
+                if tval is not None and tval not in LOFT_TANGENCIES:
+                    errors.append("%s: '%s' %r unsupported (one of %s)."
+                                  % (label, tfield, tval, sorted(LOFT_TANGENCIES)))
+            for lfield in ("start_tangent_length", "end_tangent_length"):
+                lval = node.get(lfield)
+                if lval is not None and (not _is_pos_number(lval) or float(lval) > 10.0):
+                    errors.append("%s: '%s' must be a finite number in (0, 10] (got %r)."
+                                  % (label, lfield, lval))
+            ginf = node.get("guide_influence")
+            if ginf is not None and ginf not in LOFT_GUIDE_INFLUENCES:
+                errors.append("%s: 'guide_influence' %r unsupported (one of %s)."
+                              % (label, ginf, sorted(LOFT_GUIDE_INFLUENCES)))
 
         if nid:
             seen[nid] = ntype

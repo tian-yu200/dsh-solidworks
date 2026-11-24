@@ -713,9 +713,9 @@ def _plan_node(port, node, state_version, node_features, graph_thread_defaults=N
             sides.append((comp_name, kind, index))
         return lowering.lower_mate(node, sides)
     if ntype == "loft":
-        # The profile sketches ran earlier (loft comes after them in tree order), so each one's
-        # runtime name is already recorded in node_features. Resolve them now; the loft selects
-        # by name (localization/numbering-proof).
+        # The profile and optional guide sketches ran earlier (loft comes after them in tree
+        # order), so each one's runtime name is already recorded in node_features. Resolve them
+        # now; the loft selects by name (localization/numbering-proof).
         names = []
         for pid in node["profiles"]:
             nm = node_features.get(pid)
@@ -724,7 +724,15 @@ def _plan_node(port, node, state_version, node_features, graph_thread_defaults=N
                                    "(it must be an earlier sketch node)" % pid,
                                    code="NODE_FEATURE_UNAVAILABLE", node_id=node.get("id"))
             names.append(nm)
-        return lowering.lower_loft(node, names)
+        guide_names = []
+        for gid in node.get("guides") or []:
+            nm = node_features.get(gid)
+            if not nm:
+                raise FeatureError("loft guide '%s' has no recorded runtime sketch name "
+                                   "(it must be an earlier sketch node)" % gid,
+                                   code="NODE_FEATURE_UNAVAILABLE", node_id=node.get("id"))
+            guide_names.append(nm)
+        return lowering.lower_loft(node, names, guide_names=guide_names or None)
     raise FeatureError("unknown node type '%s'" % ntype, code="UNKNOWN_NODE_TYPE", node_id=node.get("id"))
 
 

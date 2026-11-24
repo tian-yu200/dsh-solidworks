@@ -2664,3 +2664,28 @@ def test_fresh_rebuild_does_not_count_features_from_the_previous_document(cad_en
     warnings = cad_env.orchestrator._completeness_warnings(job, {})
     missing = next(w for w in warnings if w["code"] == "PLANNED_FEATURES_MISSING")
     assert missing["missing"] == {"fillet": 1}
+
+
+def test_multi_slice_guideless_loft_caps_trust_at_built_unverified(cad_env):
+    from repair_policy import REFERENCE_FIELDS
+
+    assert "guides" in REFERENCE_FIELDS
+    sliced = {"nodes": [{"id": "arm", "type": "loft", "profiles": ["s1", "s2", "s3", "s4"]}]}
+    guided = {"nodes": [{"id": "arm", "type": "loft", "profiles": ["s1", "s2"], "guides": ["g1", "g2"]}]}
+    simple = {"nodes": [{"id": "arm", "type": "loft", "profiles": ["s1", "s2"]}]}
+
+    sliced_warnings = cad_env.orchestrator._loft_slice_warnings(sliced)
+    assert len(sliced_warnings) == 1
+    assert sliced_warnings[0]["code"] == "LOFT_MULTI_SLICE_APPROXIMATION"
+    assert cad_env.orchestrator._loft_slice_warnings(guided) == []
+    assert cad_env.orchestrator._loft_slice_warnings(simple) == []
+
+    job = {
+        "document_origin": "created",
+        "completed_steps": [{"kind": "feature_graph"}],
+        "dimension_ledger_measured": 3,
+        "loft_slice_warnings": sliced_warnings,
+    }
+    completeness = cad_env.orchestrator._completeness_warnings(job, {})
+    gaps = cad_env.orchestrator._verification_gaps(job, completeness)
+    assert "LOFT_MULTI_SLICE_APPROXIMATION" in gaps

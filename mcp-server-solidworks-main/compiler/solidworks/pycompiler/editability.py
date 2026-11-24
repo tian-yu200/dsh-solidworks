@@ -121,6 +121,8 @@ def extract_node_dependencies(nodes):
         elif ntype == "loft":
             for pid in node.get("profiles") or []:
                 _add(pid)
+            for gid in node.get("guides") or []:
+                _add(gid)
         elif ntype == "hole":
             _add(((node.get("ref") or {}).get("node_face") or {}).get("node"))
         elif ntype == "shell":

@@ -30,6 +30,7 @@ Common nodes (consult schema for other end conditions):
 - hole: +Y (top) face only; diameter >0, depth:"through_all"|blind. Side bore: circle sketch + extrude cut.
 - fillet: radius >0, edges:[{near:[x,y,z]}] (MODEL point inside edge; full circle: anywhere on it;
   never shared vertex or arc center). Add every drawing fillet/chamfer; never silently omit one.
+- loft: profiles:[id,...] (>=2 closed); opt guides:[id,...] (1 open curve/sketch touching every profile), start/end_tangency. Never stack >=4 guideless slices.
 
 Example (grammar only): 50 mm cube, blind side pocket, top-center through hole, 1 mm round;
 submit_feature_graph(fresh_document=true).

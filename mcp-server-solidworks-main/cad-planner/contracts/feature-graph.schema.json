@@ -393,8 +393,14 @@
    "outward": "boolean (optional, default false) — false grows the wall INWARD, true adds material OUTSIDE"
   },
   "loft": {
-   "description": "Multi-profile boss loft / blend (COVERED since v0.5.4 — grown for level-2-2's Loft2 frustum). Lowers to extrude_feature(loft, profiles=[...]). UNLIKE extrude/revolve/rib, the loft selects its profile sketches BY NAME (not the active sketch), so the profile sketch nodes need NOT immediately precede the loft — they are ordinary earlier sketch nodes (each on its own plane/offset) that the loft references by id. The compiler threads each referenced sketch's RUNTIME name (recorded from create_sketch's activeSketch — localization/numbering-proof, same principle as circular_pattern's seed). v0.5.4 = a simple boss blend (no guide curves / start-end tangency); those are future growth.",
-   "profiles": "array of >= 2 sketch node ids, IN LOFT ORDER — the profiles the loft blends through (e.g. [\"n10\",\"n11\"] for a two-circle frustum). Each must reference an EARLIER sketch node."
+   "description": "Multi-profile boss loft / blend. Lowers to extrude_feature(loft). Selects profile and optional guide sketches BY NAME, so referenced sketch nodes need not immediately precede the loft (each must be an earlier sketch node).",
+   "profiles": "array of >= 2 earlier closed sketch node ids in loft order",
+   "guides": "array of earlier open sketch node ids (optional, one curve per sketch, each intersecting every profile contour)",
+   "start_tangency": "string (optional, default 'none': 'none' | 'normal_to_profile' | 'all_faces')",
+   "end_tangency": "string (optional, default 'none': 'none' | 'normal_to_profile' | 'all_faces')",
+   "start_tangent_length": "number (optional, default 1.0 when start_tangency != 'none'; finite > 0 and <= 10)",
+   "end_tangent_length": "number (optional, default 1.0 when end_tangency != 'none'; finite > 0 and <= 10)",
+   "guide_influence": "string (optional, default 'global': 'global' | 'next_guide' | 'next_sharp' | 'next_edge')"
   },
   "sheet_metal": {
    "description": "Sheet-metal BASE FLANGE (COVERED since v0.5.5 — grown for 4-1). Converts the referenced sketch profile into the sheet blank and establishes the sheet definition (thickness / default bend radius / K-factor). Lowers to sheet_metal_feature(base_flange). The tree's SheetMetal definition feature and Flat-Pattern are byproducts — they are NOT separate IR nodes.",

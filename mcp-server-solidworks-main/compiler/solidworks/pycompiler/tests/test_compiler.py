@@ -1106,6 +1106,81 @@ def test_loft_validation_rejections():
         assert port.calls == []
 
 
+def test_loft_with_guides_and_tangency():
+    # Open arc guide sketches pass closure validation (guides are open by design), their runtime
+    # names lower into guide_curves, and tangency/guide_influence parameters flow verbatim.
+    g = {
+        "schema_version": "0.8.0-draft", "units": "meters",
+        "nodes": [
+            {"id": "p_base", "type": "sketch", "ref": {"datum": "top", "offset": 0.008},
+             "profile": [{"kind": "ellipse", "cx": -0.0025, "cy": 0.0,
+                          "x1": 0.02, "y1": 0.0, "x2": -0.0025, "y2": 0.0075}]},
+            {"id": "p_hub", "type": "sketch", "ref": {"datum": "right", "offset": -0.045},
+             "profile": [{"kind": "ellipse", "cx": 0.0, "cy": 0.048,
+                          "x1": 0.0, "y1": 0.058, "x2": 0.0075, "y2": 0.048}]},
+            {"id": "g_outer", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [{"kind": "arc", "cx": -0.045, "cy": -0.012,
+                          "x1": 0.02, "y1": 0.008, "x2": -0.045, "y2": 0.058, "dir": 1}]},
+            {"id": "g_inner", "type": "sketch", "ref": {"datum": "front"},
+             "profile": [{"kind": "arc", "cx": -0.0575, "cy": 0.008,
+                          "x1": -0.025, "y1": 0.008, "x2": -0.045, "y2": 0.038, "dir": 1}]},
+            {"id": "arm", "type": "loft",
+             "profiles": ["p_base", "p_hub"],
+             "guides": ["g_outer", "g_inner"],
+             "start_tangency": "normal_to_profile",
+             "end_tangency": "normal_to_profile",
+             "start_tangent_length": 1.2,
+             "end_tangent_length": 0.8,
+             "guide_influence": "global"},
+        ],
+    }
+    port = FakePort()
+    r = compile_and_run(port, g)
+    assert r.status == "COMPLETED", r.to_dict()
+    loft_tool, loft_params = port.calls[-1]
+    assert loft_tool == "extrude_feature" and loft_params["feature_type"] == "loft"
+    prof_names = json.loads(loft_params["profiles"])
+    guide_names = json.loads(loft_params["guide_curves"])
+    assert len(prof_names) == 2 and len(guide_names) == 2
+    assert set(prof_names).isdisjoint(set(guide_names))
+    assert loft_params["start_tangency"] == "normal_to_profile"
+    assert loft_params["end_tangency"] == "normal_to_profile"
+    assert loft_params["start_tangent_length"] == 1.2
+    assert loft_params["end_tangent_length"] == 0.8
+    assert loft_params["guide_influence"] == "global"
+
+
+def test_loft_guides_and_tangency_validation_rejections():
+    base_sketches = [
+        {"id": "s1", "type": "sketch", "ref": {"datum": "top"},
+         "profile": [{"kind": "circle", "diameter": 0.02}]},
+        {"id": "s2", "type": "sketch", "ref": {"datum": "top", "offset": 0.03},
+         "profile": [{"kind": "circle", "diameter": 0.01}]},
+        {"id": "g1", "type": "sketch", "ref": {"datum": "front"},
+         "profile": [{"kind": "line", "x1": 0.01, "y1": 0.0, "x2": 0.005, "y2": 0.03}]},
+    ]
+    bads = [
+        # guide referencing non-existent / future sketch
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "guides": ["missing"]}],
+        # guide reusing a profile sketch
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "guides": ["s1"]}],
+        # duplicate guide
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "guides": ["g1", "g1"]}],
+        # invalid tangency enum
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "start_tangency": "curvature"}],
+        # out-of-range tangent length
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "start_tangent_length": 0.0}],
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "end_tangent_length": 15.0}],
+        # invalid guide_influence
+        base_sketches + [{"id": "l1", "type": "loft", "profiles": ["s1", "s2"], "guide_influence": "local"}],
+    ]
+    for nodes in bads:
+        port = FakePort()
+        r = compile_and_run(port, {"schema_version": "0.8.0-draft", "units": "meters", "nodes": nodes})
+        assert r.status == "FAILED" and r.error["code"] == "VALIDATION_FAILED", r.to_dict()
+        assert port.calls == []
+
+
 def test_revolve_lowering_axis_and_angle():
     # The 1-2 flange idiom: half-section profile + construction centerline as the axis;
     # IR angle in RADIANS (recipe SI) -> tool boundary DEGREES.

@@ -467,16 +467,30 @@ def lower_circular_pattern(node):
     ]
 
 
-def lower_loft(node, profile_names):
-    """loft -> ONE extrude_feature(loft) over 2+ profile sketches (COVERED since v0.5.4 — grown for
-    level-2-2's Loft2 frustum). The profiles are referenced by their RUNTIME sketch names, which the
-    compiler resolves from node_features (localization/numbering-proof, same principle as
-    circular_pattern's seed) and passes here. They are serialized as a JSON-array STRING — the tool's
-    contract. The profile sketches are ordinary earlier sketch nodes; the loft selects them by name,
-    so they need not immediately precede it (grammar relaxation vs extrude/revolve/rib)."""
-    return [Op("extrude_feature",
-               {"feature_type": "loft", "profiles": json.dumps(profile_names)},
-               "loft over %d profiles %s" % (len(profile_names), profile_names))]
+def lower_loft(node, profile_names, guide_names=None):
+    """loft -> ONE extrude_feature(loft) over 2+ profile sketches and optional open guide sketches.
+    Both profiles and guides are referenced by their RUNTIME sketch names (resolved from
+    node_features) and serialized as JSON-array STRINGS per the execution contract.
+    When guides are present, guide_influence defaults to 'global' (measured in SolidWorks to
+    merge tangent guide regions into one seamless loft face instead of splitting along each guide)."""
+    params = {"feature_type": "loft", "profiles": json.dumps(profile_names)}
+    if guide_names:
+        params["guide_curves"] = json.dumps(guide_names)
+        params["guide_influence"] = node.get("guide_influence") or "global"
+    elif node.get("guide_influence") and node.get("guide_influence") != "global":
+        params["guide_influence"] = node["guide_influence"]
+    if node.get("start_tangency") and node.get("start_tangency") != "none":
+        params["start_tangency"] = node["start_tangency"]
+    if node.get("end_tangency") and node.get("end_tangency") != "none":
+        params["end_tangency"] = node["end_tangency"]
+    if node.get("start_tangent_length") is not None:
+        params["start_tangent_length"] = float(node["start_tangent_length"])
+    if node.get("end_tangent_length") is not None:
+        params["end_tangent_length"] = float(node["end_tangent_length"])
+    note = "loft over %d profiles %s" % (len(profile_names), profile_names)
+    if guide_names:
+        note += " with %d guides %s" % (len(guide_names), guide_names)
+    return [Op("extrude_feature", params, note)]
 
 
 def lower_sheet_metal(node):

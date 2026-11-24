@@ -38,6 +38,9 @@ Generated SolidWorks parts must remain clean and easy for a human mechanical eng
 3. **Single-intent sketches and semantic end conditions**:
    - Keep each sketch simple and focused on one engineering feature: put the outer contour (and major contour-defining tangent arcs) in the base sketch, and keep hole groups, keyways, slots, and local corner rounds as separate downstream `hole`, cut, or `fillet` features so dimensions are easy to find and edit in the SolidWorks FeatureManager tree.
    - Express true design intent in end conditions: use `through_all` (or `mid_plane` with explicit clearance) for through holes and through slots rather than a `blind` depth equal to the current wall thickness, so thickening a plate later does not turn a through hole into a blind hole.
+4. **Guided lofts over multi-slice approximations**:
+   - For curved or variable-section arms, handles, and tapered transitions with planar controlling arcs (e.g. an elliptical base transitioning along front-view arcs to a hub section), use **2–3 clean closed profiles + 2D `loft.guides`** (one open curve per sketch, with endpoints intersecting every profile contour) and optional `start_tangency`/`end_tangency`.
+   - **Never** approximate a smooth curved surface by stacking 4+ parallel sliced profiles with hardcoded coordinates. Multi-slice lofts create spurious longitudinal surface seams, cannot be edited parametrically, and are capped at `built_unverified` by the orchestrator. If a surface genuinely requires 3D guide curves or boundary/surface tools not in the schema, declare a `CAPABILITY_GAP` honestly instead of faking a smooth loft.
 
 ## Verification Boundary
 

@@ -296,25 +296,113 @@ namespace SolidworksExecution.Services
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "INVALID_PARAMETER", "loft requires at least 2 profiles.");
 
+                    var profileNames = new List<string>();
+                    for (int i = 0; i < profileArray.Count; i++)
+                    {
+                        string skName = profileArray[i]?.Value<string>();
+                        if (string.IsNullOrWhiteSpace(skName))
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "INVALID_PARAMETER", $"profiles[{i}] must be a non-empty sketch name string.");
+                        profileNames.Add(skName);
+                    }
+
+                    // Optional guide curves (each its own open sketch, selected with Mark=2 per SolidWorks API).
+                    var guideNames = new List<string>();
+                    string guidesJson = p?.Value<string>("guide_curves");
+                    if (!string.IsNullOrWhiteSpace(guidesJson))
+                    {
+                        JArray guideArray;
+                        try { guideArray = JArray.Parse(guidesJson); }
+                        catch { return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", "guide_curves must be a valid JSON array of sketch name strings."); }
+                        for (int i = 0; i < guideArray.Count; i++)
+                        {
+                            string gName = guideArray[i]?.Value<string>();
+                            if (string.IsNullOrWhiteSpace(gName))
+                                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                    "INVALID_PARAMETER", $"guide_curves[{i}] must be a non-empty sketch name string.");
+                            guideNames.Add(gName);
+                        }
+                    }
+
+                    // Optional start/end tangency (swTangencyType_e: 0=none, 1=normal_to_profile, 3=all_faces).
+                    short startMatch = 0;
+                    short endMatch = 0;
+                    string startTanRaw = (p?.Value<string>("start_tangency") ?? "none").Trim().ToLowerInvariant();
+                    string endTanRaw = (p?.Value<string>("end_tangency") ?? "none").Trim().ToLowerInvariant();
+                    if (!TryParseLoftTangency(startTanRaw, out startMatch))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", $"Unsupported start_tangency '{startTanRaw}'. Supported: none, normal_to_profile, all_faces.");
+                    if (!TryParseLoftTangency(endTanRaw, out endMatch))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", $"Unsupported end_tangency '{endTanRaw}'. Supported: none, normal_to_profile, all_faces.");
+
+                    double? startTanLenOpt = p?.Value<double?>("start_tangent_length");
+                    double? endTanLenOpt = p?.Value<double?>("end_tangent_length");
+                    if (startTanLenOpt.HasValue && (double.IsNaN(startTanLenOpt.Value) || double.IsInfinity(startTanLenOpt.Value) || startTanLenOpt.Value <= 0.0 || startTanLenOpt.Value > 10.0))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "start_tangent_length must be a finite number in (0, 10].");
+                    if (endTanLenOpt.HasValue && (double.IsNaN(endTanLenOpt.Value) || double.IsInfinity(endTanLenOpt.Value) || endTanLenOpt.Value <= 0.0 || endTanLenOpt.Value > 10.0))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "end_tangent_length must be a finite number in (0, 10].");
+
+                    double startTanLen = startMatch == 0 ? 0.0 : (startTanLenOpt ?? 1.0);
+                    double endTanLen = endMatch == 0 ? 0.0 : (endTanLenOpt ?? 1.0);
+
+                    // Optional guide curve influence (swGuideCurveInfluence_e: 0=next_guide, 1=next_sharp, 2=next_edge, 3=global).
+                    // Default 'global' when guides are supplied so symmetric closed profiles blend into one seamless face.
+                    string guideInfRaw = (p?.Value<string>("guide_influence") ?? (guideNames.Count > 0 ? "global" : "next_guide")).Trim().ToLowerInvariant();
+                    int guideInfluence;
+                    switch (guideInfRaw)
+                    {
+                        case "next_guide": guideInfluence = (int)swGuideCurveInfluence_e.swGuideCurveInfluenceNextGuide; break;
+                        case "next_sharp": guideInfluence = (int)swGuideCurveInfluence_e.swGuideCurveInfluenceNextSharp; break;
+                        case "next_edge": guideInfluence = (int)swGuideCurveInfluence_e.swGuideCurveInfluenceNextEdge; break;
+                        case "global": guideInfluence = (int)swGuideCurveInfluence_e.swGuideCurveInfluenceNextGlobal; break;
+                        default:
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "INVALID_PARAMETER", $"Unsupported guide_influence '{guideInfRaw}'. Supported: next_guide, next_sharp, next_edge, global.");
+                    }
+
                     if (modelDoc.SketchManager.ActiveSketch != null)
                         modelDoc.SketchManager.InsertSketch(true);
 
+                    // SolidWorks InsertProtrusionBlend2 selection marks:
+                    // profiles use Mark=1 when guide curves are present (Mark=0 kept for legacy guide-less calls),
+                    // guide curves use Mark=2.
+                    int profileMark = guideNames.Count > 0 ? 1 : 0;
                     modelDoc.ClearSelection2(true);
-                    for (int i = 0; i < profileArray.Count; i++)
+                    for (int i = 0; i < profileNames.Count; i++)
                     {
-                        string skName = profileArray[i].Value<string>();
-                        bool sel = modelDoc.Extension.SelectByID2(skName, "SKETCH", 0, 0, 0, i > 0, 0, null, 0);
+                        string skName = profileNames[i];
+                        bool sel = modelDoc.Extension.SelectByID2(skName, "SKETCH", 0, 0, 0, i > 0, profileMark, null, 0);
                         if (!sel)
                             return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                                 "SKETCH_NOT_FOUND", $"Profile sketch '{skName}' not found.");
                     }
+                    for (int i = 0; i < guideNames.Count; i++)
+                    {
+                        string gName = guideNames[i];
+                        bool sel = modelDoc.Extension.SelectByID2(gName, "SKETCH", 0, 0, 0, true, 2, null, 0);
+                        if (!sel)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "SKETCH_NOT_FOUND", $"Guide curve sketch '{gName}' not found.");
+                    }
 
                     feature = featureMgr.InsertProtrusionBlend2(
                         false, false, false, 0.1,
-                        0, 0,
-                        0.0, 0.0, false, false,
+                        startMatch, endMatch,
+                        startTanLen, endTanLen, false, false,
                         false, 0.0, 0.0, 0,
-                        true, true, true, 0) as IFeature;
+                        true, true, true, guideInfluence) as IFeature;
+
+                    ExecLog.Write($"loft: profiles=[{string.Join(",", profileNames)}] guides=[{string.Join(",", guideNames)}] startTan={startTanRaw}({startTanLen}) endTan={endTanRaw}({endTanLen}) influence={guideInfRaw} -> feature={(feature != null)}");
+
+                    if (feature == null && guideNames.Count > 0)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "EXTRUSION_FAILED",
+                            $"Loft with guide curves failed (profiles=[{string.Join(", ", profileNames)}], guides=[{string.Join(", ", guideNames)}]). " +
+                            "Verify each guide curve is its own open sketch whose curve intersects/coincides with EVERY profile contour, " +
+                            "and try guide_influence='global' or start_tangency/end_tangency='none' if over-constrained.");
                 }
                 else if (featureType == "cut")
                 {
@@ -2272,6 +2360,25 @@ namespace SolidworksExecution.Services
             if (offAxisCenterlines > 0)
                 how += $" — WARNING: {offAxisCenterlines} other centerline(s) in the sketch, so the axis may be ambiguous";
             return true;
+        }
+
+        private static bool TryParseLoftTangency(string raw, out short matchType)
+        {
+            switch (raw)
+            {
+                case "none":
+                    matchType = (short)swTangencyType_e.swTangencyNone;
+                    return true;
+                case "normal_to_profile":
+                    matchType = (short)swTangencyType_e.swTangencyNormalToProfile;
+                    return true;
+                case "all_faces":
+                    matchType = (short)swTangencyType_e.swTangencyAllFaces;
+                    return true;
+                default:
+                    matchType = 0;
+                    return false;
+            }
         }
     }
 }

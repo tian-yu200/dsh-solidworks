@@ -27,7 +27,7 @@ selectors, or enum values not present in the runtime schema.
 | Blind hole, pocket, slot | circle/`slot`/closed-contour sketch + `extrude` cut with `end: "blind"` and a depth |
 | Counterbore/countersink | no dedicated node — compose concentric cuts (e.g. large shallow blind cut + small through cut) |
 | Keyway, flat, milled pocket | sketch on face or datum offset + `extrude` cut |
-| Tapered/lofted body | `loft` through >= 2 profile sketches referenced by id (simple blend, no guide curves) |
+| Tapered/lofted or curved-arm body | `loft` through >= 2 closed profile sketches by id, with optional `guides` (earlier open 2D sketch ids, one curve per sketch intersecting every profile), `start_tangency`/`end_tangency`, and `guide_influence` |
 | Swept boss (constant section) | `sweep`: earlier path sketch by id + profile sketch immediately preceding; boss only |
 | Rib/web | `rib` from an open profile sketch, thickness, one- or two-sided |
 | Fillet/chamfer | `fillet`/`chamfer` post-solid nodes; each edge anchored by its pre-feature `analyze_model(edges)` midpoint plus a semantic hint |
@@ -78,11 +78,11 @@ evidence requires them. Do not emulate them with invented node types:
   (`depth` accepts a meter value or `through_all` only in the covered subset —
   verify against the live schema before using a blind depth there; the sketch +
   cut path is always available).
-- Draft/taper on extrusions, `up_to_next`, sweep cut, loft guide curves or
-  tangency, second direction on a single `linear_pattern` (compose a grid as a
-  pattern of a pattern), mirror about a non-canonical plane, surface bodies,
-  multi-body combine/subtract, 3D sketches, equation-driven curves, embossed
-  text.
+- Draft/taper on extrusions, `up_to_next`, sweep cut, sweep guide curves,
+  second direction on a single `linear_pattern` (compose a grid as a
+  pattern of a pattern), mirror about a non-canonical plane, boundary/surface
+  bodies, multi-body combine/subtract, 3D sketches (including 3D loft guides),
+  equation-driven curves, embossed text.
 - Assembly graphs: in-context features, flexible subassemblies, component
   patterns, and configurations beyond the referenced one are outside the
   assembly sub-vocabulary.

@@ -108,7 +108,7 @@
   "output": "→ see execution-response.json"
  },
  "extrude_feature": {
-  "description": "Creates a 3D feature from the active sketch profile. Exits sketch mode automatically. feature_type discriminator: 'boss' (solid extrusion, default), 'cut' (material removal, requires existing solid body), 'revolve' (solid of revolution — requires angle and axis coords), 'sweep' (swept solid — requires path_sketch name; is_cut=true turns the same profile+path selection into a SWEPT CUT), 'loft' (lofted solid — requires profiles JSON array of ≥2 sketch names).",
+  "description": "Creates a 3D feature from the active sketch profile. Exits sketch mode automatically. feature_type discriminator: 'boss' (solid extrusion, default), 'cut' (material removal, requires existing solid body), 'revolve' (solid of revolution — requires angle and axis coords), 'sweep' (swept solid — requires path_sketch name; is_cut=true turns the same profile+path selection into a SWEPT CUT), 'loft' (lofted solid — requires profiles JSON array of ≥2 sketch names; optional guide_curves JSON array of open guide sketch names selected with Mark=2, start_tangency/end_tangency, start_tangent_length/end_tangent_length, and guide_influence).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -123,6 +123,12 @@
     "is_cut": "boolean (revolve and sweep — optional, default false. revolve: FeatureRevolve2's 4th argument IsCut, so the revolved profile removes material — the feature_graph revolve node's operation='cut' lowers to this. sweep: calls InsertCutSwept5 (22 args, reflected) instead of InsertProtrusionSwept4 (20 args) on the SAME profile mark 1 / path mark 4 selection, and the result is verified by a real volume DECREASE measured on the unrounded body volume plus the feature's presence in the tree, so a profile swept through air fails SWEEP_CUT_VOLUME_NOT_REDUCED instead of reporting success. Refused for 'boss' and 'loft' (INVALID_PARAMETER: a boss adds material, and no loft-cut form is exposed here); tolerated-but-redundant for feature_type='cut', which is already a removal)",
     "path_sketch": "string (sweep only — name of the sketch containing the sweep path)",
     "profiles": "string (loft only — JSON array of sketch names e.g. '[\"Sketch1\",\"Sketch2\"]', minimum 2)",
+    "guide_curves": "string (loft only, optional — JSON array of open guide-curve sketch names e.g. '[\"Sketch3\",\"Sketch4\"]', one curve per sketch, selected with Mark=2; each guide must intersect every profile contour)",
+    "start_tangency": "string (loft only, optional, default 'none': 'none' | 'normal_to_profile' | 'all_faces')",
+    "end_tangency": "string (loft only, optional, default 'none': 'none' | 'normal_to_profile' | 'all_faces')",
+    "start_tangent_length": "number (loft only, optional, default 1.0 when start_tangency != 'none'; finite in (0, 10])",
+    "end_tangent_length": "number (loft only, optional, default 1.0 when end_tangency != 'none'; finite in (0, 10])",
+    "guide_influence": "string (loft only, optional, default 'global' when guide_curves are given: 'global' | 'next_guide' | 'next_sharp' | 'next_edge')",
     "reverse": "boolean (boss/cut — flip feature direction; needed for a cut/boss sketched on a part face where material is on the opposite side)",
     "through": "boolean (boss/cut — through-all end condition; depth ignored)",
     "up_to_face_index": "integer (optional, default -1 = off; boss/cut — >= 0 selects the UP-TO-SURFACE end condition terminating exactly on that model face; index from analyze_model(faces), same enumeration as create_sketch face_index; depth ignored. The face is append-selected with Mark=1, the FeatureExtrusion3/FeatureCut4 end-condition reference mark)",

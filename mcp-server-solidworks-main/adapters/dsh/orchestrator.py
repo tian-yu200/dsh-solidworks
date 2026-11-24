@@ -119,9 +119,9 @@ VIEW_REVIEW_HELP = (
     "里有哪些轮廓/台阶/孔/槽/凸台\", \"model\": \"模型图里对应看到什么\", \"differences\": \"缺的、多的、"
     "位置不对的（没有写 无）\", \"notes\": \"可选\", \"verdict\": \"PASS\"|\"FAIL\"|\"N/A\"}。至少覆盖主视、俯视和一个侧视；"
     "图纸没有的视图写 N/A 并在 differences 里说明。differences 只写看得见的结构差异：孔、槽、台阶、凸台、筋、"
-    "轮廓、标了尺寸的圆角，缺了、多了、位置或形状不对；有这种差异就判 FAIL。技术要求里的未注圆角/倒角、螺纹的"
-    "表示方式（装饰螺纹或底孔）、粗糙度、材料、按推荐读法做的假设、图上没标而取的默认值，不是结构差异，写进 "
-    "notes，判 PASS（这些也要在最终回复里交代）。")
+    "轮廓、标了尺寸的圆角、以及多切片硬凑放样造成的多余曲面纵向接缝，缺了、多了、位置或形状不对；有这种差异就判 FAIL。"
+    "技术要求里的未注圆角/倒角、螺纹的表示方式（装饰螺纹或底孔）、粗糙度、材料、按推荐读法做的假设、图上没标而取的默认值，"
+    "不是结构差异，写进 notes，判 PASS（这些也要在最终回复里交代）。")
 
 
 def check_view_review(raw):
@@ -581,9 +581,38 @@ class CadOrchestrator:
                      "message": str(exc)[:240]}]
 
     @staticmethod
+    def _loft_slice_warnings(graph):
+        """Flag multi-slice guide-less loft approximations (>= 4 profiles, no guides).
+
+        Stacking 4+ sliced profiles without guides produces spurious surface seams and a
+        non-editable feature tree even when bbox and volume agree. Flagging it here warns
+        immediately and caps trust_level at built_unverified in finish_job.
+        """
+        warnings = []
+        for node in (graph or {}).get("nodes") or []:
+            if not isinstance(node, dict) or node.get("type") != "loft":
+                continue
+            profiles = node.get("profiles") or []
+            guides = node.get("guides") or []
+            if isinstance(profiles, list) and len(profiles) >= 4 and not guides:
+                warnings.append({
+                    "code": "LOFT_MULTI_SLICE_APPROXIMATION",
+                    "node_id": node.get("id"),
+                    "profile_count": len(profiles),
+                    "message": (
+                        "放样节点 %s 使用了 %d 个无引导线切片草图硬拟合曲面，容易产生多余纵向接缝且无法参数化改图。"
+                        "如为弯曲/变截面曲面，请优先改用 2~3 个主截面配合 loft.guides 引导线重建；否则最终核验上限为 "
+                        "built_unverified，交付时须如实告知用户需要人工重拉。"
+                        % (node.get("id") or "loft", len(profiles))
+                    ),
+                })
+        return warnings
+
+    @staticmethod
     def _completeness_warnings(job, state):
         warnings = list((job.get("plan_check") or {}).get("warnings") or [])
         warnings.extend(job.get("dimension_ledger_warnings") or [])
+        warnings.extend(job.get("loft_slice_warnings") or [])
         planned = job.get("planned_feature_types") or {}
         built = job.get("built_feature_types") or {}
         missing = {kind: count - built.get(kind, 0) for kind, count in planned.items()
@@ -2556,6 +2585,8 @@ class CadOrchestrator:
         )
         self._record_built_features(job, compiler, payload["graph"],
                                     fresh_document=payload["fresh_document"])
+        loft_slice_warnings = self._loft_slice_warnings(payload["graph"])
+        job["loft_slice_warnings"] = loft_slice_warnings
         job["dimension_ledger_warnings"] = ledger_warnings
         job["last_graph_plan_summary"] = extract_planned_by_model(payload["graph"])
         job["last_compiler_warnings"] = list(compiler.get("warnings") or [])
@@ -2572,7 +2603,8 @@ class CadOrchestrator:
         # never as `error`: a warning that reads as a failure invites a rollback of good work.
         warnings = (list(compiler.get("warnings") or [])
                     + list((plan or {}).get("warnings") or [])
-                    + ledger_warnings)
+                    + ledger_warnings
+                    + loft_slice_warnings)
         attribution = build_diagnostic_attribution(
             graph=payload["graph"],
             planned_summary=job["last_graph_plan_summary"],

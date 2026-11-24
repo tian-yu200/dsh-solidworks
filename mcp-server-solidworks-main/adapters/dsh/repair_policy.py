@@ -8,7 +8,7 @@ from policy import payload_hash
 DIMENSION_TOLERANCE = 1e-9
 DESCRIPTIVE = {"description", "hint", "comment", "metadata", "plan_version"}
 POSITION_FIELDS = {"ref", "frame", "reversed", "reverse", "flip", "axis", "direction", "origin", "position", "transform", "placement", "plane"}
-REFERENCE_FIELDS = {"node", "sketch", "seed", "body", "path", "profiles", "feature", "features"}
+REFERENCE_FIELDS = {"node", "sketch", "seed", "body", "path", "profiles", "guides", "feature", "features"}
 
 
 def _profile_contract(profile):

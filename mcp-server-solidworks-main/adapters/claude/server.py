@@ -486,6 +486,12 @@ def extrude_feature(
     is_cut: bool = False,
     path_sketch: str = "",
     profiles: str = "[]",
+    guide_curves: str = "[]",
+    start_tangency: Literal["none", "normal_to_profile", "all_faces"] = "none",
+    end_tangency: Literal["none", "normal_to_profile", "all_faces"] = "none",
+    start_tangent_length: Optional[float] = None,
+    end_tangent_length: Optional[float] = None,
+    guide_influence: Literal["global", "next_guide", "next_sharp", "next_edge"] = "global",
     reverse: bool = False,
     through: bool = False,
     up_to_face_index: int = -1,
@@ -504,6 +510,9 @@ def extrude_feature(
         swept through air fails SWEEP_CUT_VOLUME_NOT_REDUCED rather than reporting a cut you do not have.
     feature_type='sweep': sweeps profile along a path — requires path_sketch (name of the path sketch).
     feature_type='loft': lofts through multiple profiles — requires profiles (JSON array of sketch names, e.g. '[\"Sketch1\",\"Sketch2\"]').
+        Optional guide_curves (JSON array of open guide-curve sketch names, one curve per sketch, selected with Mark=2),
+        start_tangency/end_tangency ('none' | 'normal_to_profile' | 'all_faces'), start_tangent_length/end_tangent_length
+        (in (0, 10], default 1.0 when tangency != 'none'), and guide_influence ('next_guide' | 'next_sharp' | 'next_edge' | 'global').
     reverse (boss/cut): flip the feature direction. Needed e.g. for a cut/boss sketched on a part FACE, where the material is on the opposite side from the default.
     through (boss/cut): through-all end condition (depth is ignored). Use for through holes/cuts instead of guessing a depth.
     up_to_face_index (boss/cut): >= 0 selects the UP-TO-SURFACE end condition — the feature terminates
@@ -521,23 +530,34 @@ def extrude_feature(
     On COMPLETED the result includes result_geometry {volume, faces, edges} of the body after the feature
         — verify the step from this instead of a separate analyze_model + manual volume math.
     Exits sketch mode automatically before executing."""
-    return _call(
-        "extrude_feature",
-        {
-            "depth": depth,
-            "feature_type": feature_type,
-            "angle": angle,
-            "axis_x1": axis_x1, "axis_y1": axis_y1,
-            "axis_x2": axis_x2, "axis_y2": axis_y2,
-            "is_cut": is_cut,
-            "path_sketch": path_sketch,
-            "profiles": profiles,
-            "reverse": reverse,
-            "through": through,
-            "up_to_face_index": up_to_face_index,
-            "mid_plane": mid_plane,
-        },
-    )
+    params = {
+        "depth": depth,
+        "feature_type": feature_type,
+        "angle": angle,
+        "axis_x1": axis_x1, "axis_y1": axis_y1,
+        "axis_x2": axis_x2, "axis_y2": axis_y2,
+        "is_cut": is_cut,
+        "path_sketch": path_sketch,
+        "profiles": profiles,
+        "reverse": reverse,
+        "through": through,
+        "up_to_face_index": up_to_face_index,
+        "mid_plane": mid_plane,
+    }
+    if guide_curves and guide_curves != "[]":
+        params["guide_curves"] = guide_curves
+        params["guide_influence"] = guide_influence
+    elif guide_influence != "global":
+        params["guide_influence"] = guide_influence
+    if start_tangency != "none":
+        params["start_tangency"] = start_tangency
+    if end_tangency != "none":
+        params["end_tangency"] = end_tangency
+    if start_tangent_length is not None:
+        params["start_tangent_length"] = start_tangent_length
+    if end_tangent_length is not None:
+        params["end_tangent_length"] = end_tangent_length
+    return _call("extrude_feature", params)
 
 
 # ---------------------------------------------------------------------------
