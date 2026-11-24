@@ -255,91 +255,10 @@ function restrictableFromMessage(message) {
     .filter((toolName) => toolName && toolName !== "(none)");
 }
 
-const BUILD_RESULT_TOOLS = new Set([
-  "mcp__solidworks__submit_feature_graph",
-  "mcp__solidworks__confirm_action",
-]);
-const HEAVY_EFFORTS = new Set(["high", "xhigh", "max"]);
-const LIGHT_EFFORT = "medium";
-
-/** The JSON envelope a SolidWorks tool returned, or null. */
-function resultEnvelope(result) {
-  for (const part of Array.isArray(result?.content) ? result.content : []) {
-    if (part?.type !== "text" || typeof part.text !== "string") continue;
-    try {
-      const parsed = JSON.parse(part.text);
-      if (parsed && typeof parsed === "object") return parsed;
-    } catch {
-      // not an envelope
-    }
-  }
-  return null;
-}
-
-/**
- * Lower the reasoning effort for the mechanical steps after a successful build, and only those.
- *
- * Measured 2026-10-31 at gpt-6.1-sol/high: after the part existed, every verification, save and
- * finish step still cost 50–70 s of model time. The user chose (2026-10-31) to keep THEIR effort
- * for reading the drawing and writing the graph, drop to medium once the build in the current
- * turn has succeeded, and return to their effort the moment any SolidWorks result fails or a new
- * turn begins. The core logs a changed header and seeds the next step from it, so the chosen
- * effort is remembered here and restored explicitly. A model that does not offer medium is never
- * lowered: the core rejects an unsupported effort outright, so support is checked first.
- */
-function createEffortPolicy(ctx, diag) {
-  const agents = new WeakMap();
-  const support = new Map();
-  const entry = (agent) => {
-    let state = agents.get(agent);
-    if (!state) agents.set(agent, (state = { turn: undefined, builtTurn: undefined, failed: false,
-      chosen: undefined, loweredLast: false }));
-    return state;
-  };
-  const supportsLight = (config) => {
-    const key = `${config.provider}\u0000${config.model}`;
-    if (!support.has(key)) {
-      support.set(key, Promise.resolve().then(() => ctx.get("llm").resolveCallConfig({
-        provider: config.provider, model: config.model, reasoningEffort: LIGHT_EFFORT,
-      })).then(() => true, () => false));
-    }
-    return support.get(key);
-  };
-  return {
-    observe(exec, result) {
-      if (!exec?.agent || typeof exec.name !== "string" || !exec.name.startsWith(CAD_TOOL_PREFIX)) return;
-      const state = entry(exec.agent);
-      const envelope = resultEnvelope(result);
-      state.failed = result?.isError === true ||
-        ["failed", "partial", "verification_failed"].includes(envelope?.status);
-      if (!state.failed && BUILD_RESULT_TOOLS.has(exec.name) && envelope?.status === "completed" &&
-          Array.isArray(envelope.completed_steps) && envelope.completed_steps.length > 0) {
-        state.builtTurn = state.turn;
-      }
-    },
-    async request(event, next) {
-      const config = await next();
-      if (!event?.agent || !config || typeof config !== "object") return config;
-      const state = entry(event.agent);
-      state.turn = event.turn;
-      const seedIsOurs = state.loweredLast && config.reasoningEffort === LIGHT_EFFORT;
-      if (!seedIsOurs && config.reasoningEffort !== undefined) state.chosen = config.reasoningEffort;
-      const mechanical = state.builtTurn !== undefined && state.builtTurn === event.turn &&
-        !state.failed && HEAVY_EFFORTS.has(state.chosen);
-      if (mechanical && await supportsLight(config)) {
-        state.loweredLast = true;
-        diag("effort-lowered", { from: state.chosen, to: LIGHT_EFFORT, model: config.model });
-        return { ...config, reasoningEffort: LIGHT_EFFORT };
-      }
-      state.loweredLast = false;
-      if (seedIsOurs && state.chosen !== undefined && state.chosen !== LIGHT_EFFORT) {
-        diag("effort-restored", { to: state.chosen, model: config.model });
-        return { ...config, reasoningEffort: state.chosen };
-      }
-      return config;
-    },
-  };
-}
+// Per-step reasoningEffort auto-lowering via `agent/request` was disabled (2026-11-24):
+// newer DeepSeek Harness cores fix reasoningEffort during step preparation and reject
+// `agent/request` proposals that mutate it (requiring `agent.modelSelect()` before step
+// preparation instead). Keep the user's chosen effort across all steps for now.
 
 const CATALOG_OPEN = "<available_skills>\n";
 const CATALOG_CLOSE = "\n</available_skills>";
@@ -412,9 +331,7 @@ function apply(ctx) {
   const progress = createIntakeProgress(ctx.logger);
   const diag = createDiagnostics();
   const syncScope = createScopeRestriction(ctx, diag);
-  const effort = createEffortPolicy(ctx, diag);
   syncScope("apply");
-  ctx.on("agent/request", (event, next) => effort.request(event, next));
   // Prepended so this runs OUTSIDE dsh-tool-skill's listener and sees the catalog it appends.
   ctx.on("agent/pre-step", async (_event, next) => filterSkillCatalog(await next(), diag),
     { prepend: true });
@@ -441,7 +358,6 @@ function apply(ctx) {
   // tools/result also fires if cancellation or a later guard skips dispatch.
   ctx.on("tools/result", (exec, result) => {
     progress.observe(exec, result);
-    effort.observe(exec, result);
     if (exec.name === QUESTION_TOOL && exec.agent) endUserQuestion(exec);
   });
 

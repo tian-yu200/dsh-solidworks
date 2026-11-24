@@ -630,25 +630,17 @@ test('host pre-step and final result connect task isolation to the monotonic gua
   assert.equal(env.guards[0](exec), undefined);
 });
 
-// --- reasoning effort per step (user decision 2026-10-31: auto switching) ------------------------
+// --- reasoning effort per step (disabled 2026-11-24: DSH rejects agent/request effort changes) ---
 
-function effortEnv({ supportsMedium = true } = {}) {
+function effortEnv() {
   const env = harness(DESKTOP_KNOWN, { scoped: true });
-  env.ctx.get = (service) => service === "llm" ? {
-    resolveCallConfig: async (config) => {
-      if (config.reasoningEffort === "medium" && !supportsMedium) throw new Error("UNSUPPORTED_REASONING_EFFORT");
-      return config;
-    },
-  } : undefined;
   apply(env.ctx);
   let header = { provider: "gpt", model: "gpt-6.1-sol", reasoningEffort: "high" };
-  // The core seeds each step from the last logged header, and logs a header whenever it changes.
   env.request = async (turn) => {
     const config = await env.waterfall("agent/request", { agent: env.agent, turn }, async () => ({ ...header }));
     header = config;
     return config.reasoningEffort;
   };
-  env.chooseEffort = (effort) => { header = { ...header, reasoningEffort: effort }; };
   env.cadResult = (name, envelope) => env.result({ name, agent: env.agent, arguments: {} },
     { content: [{ type: "text", text: JSON.stringify(envelope) }] });
   return env;
@@ -656,40 +648,12 @@ function effortEnv({ supportsMedium = true } = {}) {
 
 const BUILT = { status: "completed", completed_steps: ["plate", "sleeve"] };
 
-test("reading and graph writing keep the chosen effort; steps after the build drop to medium", async () => {
+test("agent/request keeps the user's chosen reasoningEffort after a successful build", async () => {
   const env = effortEnv();
   assert.equal(await env.request(1), "high");
-  env.cadResult("mcp__solidworks__start_job", { status: "completed", completed_steps: ["ensure_ready"] });
-  assert.equal(await env.request(1), "high", "start_job is not a build");
   env.cadResult("mcp__solidworks__submit_feature_graph", BUILT);
-  assert.equal(await env.request(1), "medium");
+  assert.equal(await env.request(1), "high");
   env.cadResult("mcp__solidworks__inspect_state", { status: "completed" });
-  assert.equal(await env.request(1), "medium");
-  const log = fs.readFileSync(path.join(DSH_HOME, "logs", "solidworks-policy.log"), "utf8");
-  assert.match(log, /"event":"effort-lowered","from":"high","to":"medium"/);
-});
-
-test("a failed SolidWorks result and a new turn both return to the chosen effort", async () => {
-  const env = effortEnv();
-  await env.request(1);
-  env.cadResult("mcp__solidworks__submit_feature_graph", BUILT);
-  assert.equal(await env.request(1), "medium");
-  env.cadResult("mcp__solidworks__submit_feature_graph", { status: "failed", completed_steps: [] });
-  assert.equal(await env.request(1), "high", "a repair is reasoning work");
-  env.cadResult("mcp__solidworks__submit_feature_graph", BUILT);
-  assert.equal(await env.request(1), "medium");
-  assert.equal(await env.request(2), "high", "a new user turn may ask for design changes");
-});
-
-test("a model without medium, or a user who chose medium, is left alone", async () => {
-  const unsupported = effortEnv({ supportsMedium: false });
-  await unsupported.request(1);
-  unsupported.cadResult("mcp__solidworks__submit_feature_graph", BUILT);
-  assert.equal(await unsupported.request(1), "high");
-  const modest = effortEnv();
-  modest.chooseEffort("medium");
-  assert.equal(await modest.request(1), "medium");
-  modest.cadResult("mcp__solidworks__submit_feature_graph", BUILT);
-  assert.equal(await modest.request(1), "medium");
-  assert.equal(await modest.request(2), "medium", "never raised above what the user chose");
+  assert.equal(await env.request(1), "high");
+  assert.equal(await env.request(2), "high");
 });

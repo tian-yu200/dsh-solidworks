@@ -92,14 +92,8 @@ def _com(obj, name, *args):
     return member(*args) if type(member).__name__ == "method" else member
 
 
-def _view_fitter():
-    """Show the SolidWorks the execution layer drives, and fit each step's view through its COM object.
-
-    That instance is the first one in the Running Object Table, the same one GetActiveObject
-    returns here. It can be running without a window: on 2026-11-02 the replay built and saved
-    in a SolidWorks that had been hidden since noon, while the user watched a second instance.
-    So it is made visible and brought to the front before the countdown. View only: nothing in
-    the model changes. Returns a no-op when SolidWorks cannot be reached (press F to fit by hand)."""
+def _connect_view_fitter():
+    """Attach to the active SolidWorks COM object, show its window, and return (fit, None)."""
     try:
         import win32com.client
         import win32gui
@@ -115,13 +109,15 @@ def _view_fitter():
             win32gui.SetForegroundWindow(hwnd)
         except Exception:  # noqa: BLE001 — Windows may refuse focus stealing; the window is still shown
             pass
-        others = sorted(p for p in _solidworks_pids() if p != pid)
+        try:
+            others = sorted(p for p in _solidworks_pids() if p != pid)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            others = []
         if others:
             log(f"note: the build runs in SolidWorks PID {pid}; PID {', '.join(map(str, others))} "
                 "is another SolidWorks window that will NOT change")
     except Exception as exc:  # noqa: BLE001 — any COM failure only costs the auto view
-        log(f"could not reach SolidWorks over COM ({exc}); show its window yourself and press F to fit")
-        return lambda: None
+        return None, exc
 
     def fit():
         try:
@@ -131,13 +127,80 @@ def _view_fitter():
                 _com(doc, "ViewZoomtofit2")
         except Exception:  # noqa: BLE001
             pass
-    return fit
+    return fit, None
+
+
+class _LazyViewFitter:
+    """Lazily bind to the active SolidWorks COM object and fit each step's view.
+
+    Avoids calling GetActiveObject before begin_job() starts SolidWorks: the first attach() or
+    call after SolidWorks comes up binds over COM, brings the window forward, and caches the
+    handle for reuse. An early failure on a cold machine never permanently degrades to a no-op.
+    """
+
+    def __init__(self):
+        self._fit = None
+        self._last_error = None
+
+    @property
+    def attached(self):
+        return self._fit is not None
+
+    def reset(self):
+        """Drop the cached COM handle so the next attach() or call rebinds."""
+        self._fit = None
+        self._last_error = None
+
+    def attach(self):
+        """Bind to SolidWorks over COM if not yet bound; return True once attached."""
+        if self._fit is not None:
+            return True
+        fit, exc = _connect_view_fitter()
+        if fit is not None:
+            self._fit = fit
+            self._last_error = None
+            return True
+        err_text = str(exc)
+        if err_text != self._last_error:
+            log(f"could not reach SolidWorks over COM ({exc}); will retry once SolidWorks is up, "
+                "or show its window yourself and press F to fit")
+            self._last_error = err_text
+        return False
+
+    def __call__(self):
+        if self._fit is None and not self.attach():
+            return
+        self._fit()
+
+
+def _view_fitter():
+    """Return a lazy view fitter for the SolidWorks the execution layer drives.
+
+    That instance is the first one in the Running Object Table, the same one GetActiveObject
+    returns here. It can be running without a window: on 2026-11-02 the replay built and saved
+    in a SolidWorks that had been hidden since noon, while the user watched a second instance.
+    So on attach it is made visible and brought to the front before the countdown or first
+    feature. View only: nothing in the model changes."""
+    return _LazyViewFitter()
 
 
 def _solidworks_pids():
     out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq SLDWORKS.exe", "/FO", "CSV", "/NH"],
                          capture_output=True, text=True, timeout=30).stdout
     return [int(row.split('","')[1]) for row in out.splitlines() if row.count('","') >= 2]
+
+
+def warn_if_solidworks_not_running():
+    """Print a non-blocking demo hint when no SLDWORKS.exe process is currently running."""
+    try:
+        pids = _solidworks_pids()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    if not pids:
+        log("提示：未检测到已打开的 SolidWorks 窗口；由 COM 自动冷启可能无可见窗口且较慢，"
+            "现场演示建议先手动打开 SolidWorks 窗口")
+        return True
+    return False
 
 
 def pace_builds(seconds):
@@ -158,6 +221,7 @@ def pace_builds(seconds):
         return response
 
     ir_execution_port.AdapterExecutionPort.execute = execute
+    return fit
 
 
 class StopAfterThisPart:
@@ -197,10 +261,21 @@ def clear_stale_undo_scope():
     Only the scope's own document can close it, and an interrupted build's half-built part is
     usually closed by hand afterwards, so the open scope can only be dropped by restarting the
     service. Safe here: the batch lock is held and no DSH server is running, so no build of
-    anyone else's is in flight. begin_job starts the service again and reattaches SolidWorks."""
-    from backend import backend
+    anyone else's is in flight. begin_job starts the service again and reattaches SolidWorks.
 
-    if not backend.documents().get("undo_scope_active"):
+    On a cold start (execution service not yet listening, or SolidWorks not yet attached so
+    /api/tool/documents returns 503), there is no open undo scope to clear; skip safely and let
+    begin_job start the stack. An open health circuit breaker (ExecutionCircuitOpen /
+    EXECUTION_UNHEALTHY) is never swallowed."""
+    import httpx
+    from backend import ExecutionLayerError, backend
+
+    try:
+        inventory = backend.documents()
+    except (httpx.TransportError, ExecutionLayerError, OSError) as exc:
+        log(f"execution service or SolidWorks is not ready yet ({exc}); skipping stale undo scope check")
+        return
+    if not inventory.get("undo_scope_active"):
         return
     log("an interrupted build left the execution service's undo scope open; restarting the service")
     subprocess.run(["taskkill", "/IM", "SolidworksExecution.exe", "/F"], capture_output=True, timeout=30)
@@ -258,7 +333,7 @@ def unique_path(directory, name, suffix):
     return candidate if not candidate.exists() else directory / f"{name}_{next_index(directory, name, suffix)}{suffix}"
 
 
-def build_once(orch, graph_json, intent, out_path, keep_open, lead_in=0):
+def build_once(orch, graph_json, intent, out_path, keep_open, lead_in=0, on_ready=None):
     t = {"begin": 0.0, "build": 0.0, "save": 0.0, "finish": 0.0}
     t0 = time.time()
     r = unwrap(orch.begin_job(intent, ""))  # brings the execution layer and SolidWorks up
@@ -267,6 +342,8 @@ def build_once(orch, graph_json, intent, out_path, keep_open, lead_in=0):
     job_id, token = r["job_id"], r["job_token"]
     t["begin"] = time.time() - t0
     log(f"job {job_id[:8]} begun ({t['begin']:.1f}s)")
+    if on_ready is not None:
+        on_ready()
     countdown(lead_in)
 
     t0 = time.time()
@@ -323,6 +400,7 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    lock = None
     try:
         validate_graph(graph)
         log(f"graph valid: {len(graph.get('nodes', []))} nodes")
@@ -334,42 +412,54 @@ def main():
             raise Stop(f"a DSH SolidWorks server is running (PID {', '.join(map(str, pids))}); "
                        "close DSH, or pass --force if it is certainly idle")
     except Stop as exc:
+        if lock is not None:
+            lock.close()
         log(f"NOT STARTED: {exc}")
         return 2
 
     graph_json = json.dumps(graph, ensure_ascii=False)
     import orchestrator
+    from execution_health import ExecutionCircuitOpen
 
     orch = orchestrator.orchestrator
-    clear_stale_undo_scope()
-    if args.pace > 0:
-        pace_builds(args.pace)
-        log(f"demo replay: {args.pace:g} s after each feature, view fitted to isometric")
-    runs = []
-    first = next_index(out_dir, args.name, ".SLDPRT") if args.repeat > 1 else None
-    total0 = time.time()
-    for i in range(args.repeat):
-        suffix = ".SLDPRT"
-        out_path = (unique_path(out_dir, args.name, suffix) if first is None
-                    else out_dir / f"{args.name}_{first + i}{suffix}")
-        log(f"=== run {i + 1}/{args.repeat} -> {out_path.name}")
+    try:
+        warn_if_solidworks_not_running()
         try:
-            with INTERRUPT:
-                t, verif, trust, warnings = build_once(orch, graph_json, args.intent, out_path,
-                                                       args.keep_open, lead_in)
-            runs.append({"file": str(out_path), "ok": True, "timing": t, "verification": verif, "trust": trust, "warnings": warnings})
-        except Stop as exc:
-            runs.append({"file": str(out_path), "ok": False, "error": str(exc)})
-            log(f"STOPPED: {exc}")
-            break
-        except Exception as exc:
-            runs.append({"file": str(out_path), "ok": False, "error": str(exc)})
-            log(f"FAILED: {exc}")
-        if INTERRUPT.requested:
-            log("stopped after this part, as asked with Ctrl+C")
-            break
-    total = time.time() - total0
-    lock.close()
+            clear_stale_undo_scope()
+        except ExecutionCircuitOpen as exc:
+            log(f"NOT STARTED (EXECUTION_UNHEALTHY): {exc}")
+            return 2
+        view_fitter = None
+        if args.pace > 0:
+            view_fitter = pace_builds(args.pace)
+            log(f"demo replay: {args.pace:g} s after each feature, view fitted to isometric")
+        runs = []
+        first = next_index(out_dir, args.name, ".SLDPRT") if args.repeat > 1 else None
+        total0 = time.time()
+        on_ready = view_fitter.attach if view_fitter is not None else None
+        for i in range(args.repeat):
+            suffix = ".SLDPRT"
+            out_path = (unique_path(out_dir, args.name, suffix) if first is None
+                        else out_dir / f"{args.name}_{first + i}{suffix}")
+            log(f"=== run {i + 1}/{args.repeat} -> {out_path.name}")
+            try:
+                with INTERRUPT:
+                    t, verif, trust, warnings = build_once(orch, graph_json, args.intent, out_path,
+                                                           args.keep_open, lead_in, on_ready=on_ready)
+                runs.append({"file": str(out_path), "ok": True, "timing": t, "verification": verif, "trust": trust, "warnings": warnings})
+            except Stop as exc:
+                runs.append({"file": str(out_path), "ok": False, "error": str(exc)})
+                log(f"STOPPED: {exc}")
+                break
+            except Exception as exc:
+                runs.append({"file": str(out_path), "ok": False, "error": str(exc)})
+                log(f"FAILED: {exc}")
+            if INTERRUPT.requested:
+                log("stopped after this part, as asked with Ctrl+C")
+                break
+        total = time.time() - total0
+    finally:
+        lock.close()
 
     ok = [r for r in runs if r["ok"]]
     print("\n===== batch summary =====")
