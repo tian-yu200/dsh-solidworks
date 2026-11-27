@@ -204,7 +204,10 @@ namespace SolidworksExecution.Services
                 string desiredName = UniqueDraftFeatureName(beforeTree);
 
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 // Neutral (mark 1) first, then the faces to draft (mark 2), on a cleared selection.
                 // The marks, not the order, assign the roles — but the read-back below proves the

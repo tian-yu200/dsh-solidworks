@@ -66,7 +66,10 @@ namespace SolidworksExecution.Services
                     // the sketch, then select the sketch FEATURE by name (the whole contour). Runs on STA (P0.1).
                     string baseProfileName = (modelDoc.SketchManager.ActiveSketch as IFeature)?.Name;
                     if (modelDoc.SketchManager.ActiveSketch != null)
+                    {
+                        AutoConstrainActiveSketch(modelDoc);
                         modelDoc.SketchManager.InsertSketch(true);
+                    }
                     modelDoc.ClearSelection2(true);
                     if (!string.IsNullOrEmpty(baseProfileName))
                         modelDoc.Extension.SelectByID2(baseProfileName, "SKETCH", 0, 0, 0, false, 0, null, 0);
@@ -297,6 +300,7 @@ namespace SolidworksExecution.Services
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "SKETCH_NOT_ACTIVE",
                             "edge_flange_finish requires the generated profile sketch to be ACTIVE (run edge_flange_sketch, then draw the profile).");
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
 
                     var efEdge2 = SelectFlangeEdge(modelDoc, p, efx, efy, efz, out string efEdgeErr);
@@ -361,7 +365,10 @@ namespace SolidworksExecution.Services
                         if (attempt == 1)
                         {
                             if (modelDoc.SketchManager.ActiveSketch != null)
+                            {
+                                AutoConstrainActiveSketch(modelDoc);
                                 modelDoc.SketchManager.InsertSketch(true);
+                            }
                             modelDoc.ClearSelection2(true);
                             modelDoc.Extension.SelectByID2(bendSketchFeat.Name, "SKETCH", 0, 0, 0, false, 0, null, 0);
                         }

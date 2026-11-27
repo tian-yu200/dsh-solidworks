@@ -163,7 +163,10 @@ namespace SolidworksExecution.Services
                 // A thread is a body feature: an open sketch would swallow the edge selection
                 // (same exit-first guard create_shell/add_edge_feature run).
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 // The edge handle must mean the same thing it does in the read: index into the SAME
                 // GetBodies2(swSolidBody,true) -> GetEdges() enumeration analyze_model(edges) reports.

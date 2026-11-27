@@ -60,14 +60,22 @@ class AdapterExecutionPort(ExecutionPort):
         return get_state()
 
 
-def run_feature_graph(graph, *, semantic_feature_names=True):
+def _env_semantic_feature_names():
+    raw = os.environ.get("DSH_SEMANTIC_FEATURE_NAMES", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def run_feature_graph(graph, *, semantic_feature_names=None):
     """Compile + run a Feature Graph IR (dict) against the live execution layer.
 
     Returns a pycompiler CompileResult. Does NOT touch the adapter's state_version global — the
     caller (server.submit_feature_graph) resyncs that afterwards via GET /state (first-class).
-    By default `semantic_feature_names=True` renames created features/sketches/planes in the
-    SolidWorks FeatureManager tree to human-readable node names (best-effort, non-fatal).
+    By default `semantic_feature_names` resolves to False so SolidWorks keeps its native localized
+    FeatureManager tree names (e.g. '凸台-拉伸1', '切除-拉伸1', '草图1' on Chinese installs) with zero
+    post-build rename round-trips; set `semantic_feature_names=True` or `DSH_SEMANTIC_FEATURE_NAMES=1`
+    only when explicit node-ID renaming is desired.
     """
+    enabled = _env_semantic_feature_names() if semantic_feature_names is None else bool(semantic_feature_names)
     return compile_and_run(
-        AdapterExecutionPort(), graph, semantic_feature_names=semantic_feature_names
+        AdapterExecutionPort(), graph, semantic_feature_names=enabled
     )

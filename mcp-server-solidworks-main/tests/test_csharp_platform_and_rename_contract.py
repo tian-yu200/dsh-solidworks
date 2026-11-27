@@ -16,6 +16,10 @@ SLN = os.path.join(EXEC_DIR, "SolidworksExecution.sln")
 PROGRAM_CS = os.path.join(PROJ_DIR, "Program.cs")
 SERVICE_CS = os.path.join(PROJ_DIR, "Services", "SolidWorksService.cs")
 FEATURES_CS = os.path.join(PROJ_DIR, "Services", "SolidWorksService.Features.cs")
+SKETCH_CS = os.path.join(PROJ_DIR, "Services", "SolidWorksService.Sketch.cs")
+SHEET_METAL_CS = os.path.join(PROJ_DIR, "Services", "SolidWorksService.SheetMetal.cs")
+THREADS_CS = os.path.join(PROJ_DIR, "Services", "SolidWorksService.Threads.cs")
+DRAFT_CS = os.path.join(PROJ_DIR, "Services", "SolidWorksService.Draft.cs")
 
 
 def _read(path):
@@ -57,6 +61,38 @@ def test_edit_feature_verifies_rename_readback_and_walks_subfeatures():
     assert "WalkFeatureTree(modelDoc)" in edit_body
     assert "FEATURE_RENAME_REJECTED" in edit_body
     assert "actualName = feature.Name" in edit_body
+
+
+def test_sketch_exit_paths_invoke_two_tier_auto_constrain_with_rollback_guard():
+    sketch = _read(SKETCH_CS)
+    features = _read(FEATURES_CS)
+    sheet_metal = _read(SHEET_METAL_CS)
+    threads = _read(THREADS_CS)
+    draft = _read(DRAFT_CS)
+
+    # Core two-tier engine + safety guards in SolidWorksService.Sketch.cs:
+    for token in (
+        "internal void AutoConstrainActiveSketch(IModelDoc2 modelDoc)",
+        "ConstrainCanonicalCircles(",
+        "TryConstrainCanonicalRectangle(",
+        "ApplyGeometricRelations(",
+        "TryRunFullyDefineSketch(",
+        "modelDoc.SketchManager.FullyDefineSketch(",
+        "OriginProfileFeature",
+        "swInputDimValOnCreate",
+        "modelDoc.SketchManager.AddToDB = false;",
+        "CleanupOverDefiningRelations(",
+        "HasGeometryDrifted(",
+        "RollbackAddedConstraintsAndDimensions(",
+    ):
+        assert token in sketch, f"missing expected sketch auto-constrain token: {token}"
+
+    # Every sketch-consuming exit path must run AutoConstrainActiveSketch before InsertSketch(true):
+    assert sketch.count("AutoConstrainActiveSketch(modelDoc);") >= 1
+    assert features.count("AutoConstrainActiveSketch(modelDoc);") >= 10
+    assert sheet_metal.count("AutoConstrainActiveSketch(modelDoc);") >= 3
+    assert "AutoConstrainActiveSketch(modelDoc);" in threads
+    assert "AutoConstrainActiveSketch(modelDoc);" in draft
 
 
 def _has_local_csharp_build_prereqs():

@@ -116,7 +116,10 @@ namespace SolidworksExecution.Services
                 // while the sketch is open — a closed sketch's segments are not enumerable through
                 // SketchManager. Revolve handles the axis and the exit itself below.
                 if (featureType != "revolve" && modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 var featureMgr = modelDoc.FeatureManager;
                 IFeature feature;
@@ -183,6 +186,7 @@ namespace SolidworksExecution.Services
                     // Remember the profile sketch, then exit it (post-exit, re-select it by name — names
                     // resolve after exit even though coordinates do not).
                     string profileSketchName = ActiveSketchName(modelDoc);
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
                     modelDoc.ClearSelection2(true);
                     if (!string.IsNullOrEmpty(profileSketchName))
@@ -364,7 +368,10 @@ namespace SolidworksExecution.Services
                     }
 
                     if (modelDoc.SketchManager.ActiveSketch != null)
+                    {
+                        AutoConstrainActiveSketch(modelDoc);
                         modelDoc.SketchManager.InsertSketch(true);
+                    }
 
                     // SolidWorks InsertProtrusionBlend2 selection marks:
                     // profiles use Mark=1 when guide curves are present (Mark=0 kept for legacy guide-less calls),
@@ -666,6 +673,7 @@ namespace SolidworksExecution.Services
                 // the tree afterwards (no return value to check — unlike FeatureExtrusion3).
                 string lastBefore = LastFeatureName(modelDoc);
 
+                AutoConstrainActiveSketch(modelDoc);
                 modelDoc.SketchManager.InsertSketch(true);  // exit the sketch
                 modelDoc.ClearSelection2(true);
                 modelDoc.Extension.SelectByID2(profileName, "SKETCH", 0, 0, 0, false, 0, null, 0);
@@ -769,7 +777,10 @@ namespace SolidworksExecution.Services
                 // The shell works on the solid, so any open sketch is exited first (same as
                 // add_edge_feature): a sketch in edit mode would capture the face selection.
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 // face_indices: a JSON-array STRING of indices into the SAME
                 // GetBodies2(swSolidBody,true) → GetFaces() enumeration analyze_model(faces) reports
@@ -904,7 +915,10 @@ namespace SolidworksExecution.Services
 
                 // Ensure we are NOT in sketch mode (edge features work on solid body)
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 modelDoc.ClearSelection2(true);
 
@@ -1114,7 +1128,10 @@ namespace SolidworksExecution.Services
 
                 // Ensure we are NOT in sketch mode before inserting reference geometry (H22 defense)
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 var featureMgr = modelDoc.FeatureManager;
                 IFeature feature = null;
@@ -1301,7 +1318,10 @@ namespace SolidworksExecution.Services
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 var featureMgr = modelDoc.FeatureManager;
                 IFeature feature = null;
@@ -2001,7 +2021,10 @@ namespace SolidworksExecution.Services
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 var dim = modelDoc.Parameter(name) as IDimension;
                 if (dim == null)
@@ -2106,7 +2129,10 @@ namespace SolidworksExecution.Services
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
                 if (modelDoc.SketchManager.ActiveSketch != null)
+                {
+                    AutoConstrainActiveSketch(modelDoc);
                     modelDoc.SketchManager.InsertSketch(true);
+                }
 
                 var allNames = new List<string>();
                 var feature = FindFeatureByName(modelDoc, featureName, allNames);

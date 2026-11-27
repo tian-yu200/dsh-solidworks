@@ -204,12 +204,13 @@ def test_extract_node_dependencies_covers_complex_feature_chains():
     }
 
 
-def test_adapter_ir_execution_port_enables_semantic_feature_names_by_default(monkeypatch):
+def test_adapter_ir_execution_port_preserves_native_feature_names_by_default(monkeypatch):
     claude_dir = os.path.normpath(os.path.join(_COMPILER_ROOT, "..", "..", "adapters", "claude"))
     if claude_dir not in sys.path:
         sys.path.insert(0, claude_dir)
     import ir_execution_port
 
+    monkeypatch.delenv("DSH_SEMANTIC_FEATURE_NAMES", raising=False)
     captured = {}
 
     def fake_compile_and_run(port, graph, *, semantic_feature_names=False):
@@ -217,5 +218,13 @@ def test_adapter_ir_execution_port_enables_semantic_feature_names_by_default(mon
         return "ok"
 
     monkeypatch.setattr(ir_execution_port, "compile_and_run", fake_compile_and_run)
+    assert ir_execution_port.run_feature_graph({"nodes": []}) == "ok"
+    assert captured["semantic_feature_names"] is False
+
+    # Explicit opt-in (via kwarg or env var) still works when requested:
+    assert ir_execution_port.run_feature_graph({"nodes": []}, semantic_feature_names=True) == "ok"
+    assert captured["semantic_feature_names"] is True
+
+    monkeypatch.setenv("DSH_SEMANTIC_FEATURE_NAMES", "1")
     assert ir_execution_port.run_feature_graph({"nodes": []}) == "ok"
     assert captured["semantic_feature_names"] is True
